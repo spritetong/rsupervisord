@@ -11,6 +11,8 @@ pub enum Endpoint {
     Unix(PathBuf),
     #[cfg(windows)]
     NamedPipe(PathBuf),
+    #[cfg(windows)]
+    WindowsUds(PathBuf),
     Tcp(String),
 }
 
@@ -37,10 +39,10 @@ impl Endpoint {
         } else {
             #[cfg(windows)]
             {
-                if trimmed.ends_with(".sock") || !trimmed.starts_with(r"\\.\pipe\") {
-                    Self::NamedPipe(PathBuf::from(r"\\.\pipe\rsupervisord.sock"))
-                } else {
+                if trimmed.starts_with(r"\\.\pipe\") {
                     Self::NamedPipe(PathBuf::from(trimmed))
+                } else {
+                    Self::WindowsUds(PathBuf::from(trimmed))
                 }
             }
             #[cfg(unix)]
@@ -75,6 +77,16 @@ impl Endpoint {
             Self::NamedPipe(path) => {
                 let client = tokio::net::windows::named_pipe::ClientOptions::new().open(path)?;
                 Ok(StreamTransport::NamedPipe(client))
+            }
+            #[cfg(windows)]
+            Self::WindowsUds(path) => {
+                use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+                let std_stream = uds_windows::UnixStream::connect(path)?;
+                let raw = std_stream.into_raw_socket();
+                let std_tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+                std_tcp.set_nonblocking(true)?;
+                let stream = tokio::net::TcpStream::from_std(std_tcp)?;
+                Ok(StreamTransport::Tcp(stream))
             }
             Self::Tcp(addr) => {
                 let stream = tokio::net::TcpStream::connect(addr).await?;

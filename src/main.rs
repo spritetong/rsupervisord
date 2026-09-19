@@ -47,14 +47,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
-    // Initialize logging subscriber
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.loglevel));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
-
     if !args.config.exists() {
         anyhow::bail!(
             "Configuration file not found: {:?}. Please specify a valid file using -c/--config.",
@@ -62,19 +54,69 @@ async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         );
     }
 
+    let config = match SupervisorConfig::from_file(&args.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load configuration from {:?}: {}", args.config, e);
+            return Err(e.into());
+        }
+    };
+
+    // Initialize logging subscriber with console and optional rotating file output
+    let log_level = if args.loglevel != "info" {
+        &args.loglevel
+    } else {
+        &config.logging.level
+    };
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+    let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    if let Some(ref log_file) = config.logging.file {
+        if let Some(parent) = log_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let max_bytes = match &config.logging.max_bytes {
+            Some(s) => rsupervisord::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
+            None => 20 * 1024 * 1024,
+        };
+        let file_rotator = file_rotate::FileRotate::new(
+            log_file,
+            file_rotate::suffix::AppendCount::new(config.logging.backups),
+            file_rotate::ContentLimit::Bytes(max_bytes),
+            file_rotate::compression::Compression::None,
+            None,
+        );
+        let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
+        let make_writer = move || MutexWriter(file_writer_arc.clone());
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(make_writer);
+
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .with(file_layer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .try_init();
+    }
+
     tracing::info!(
         "Starting rsupervisord v{} (elevated: {})",
         env!("CARGO_PKG_VERSION"),
         rsupervisord::platform::native_platform().is_elevated()
     );
-
-    let config = match SupervisorConfig::from_file(&args.config) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to load configuration from {:?}: {}", args.config, e);
-            return Err(e.into());
-        }
-    };
 
     let mut manager = SupervisorManager::new(&config)?;
     let manager_handle = manager.handle();
@@ -119,4 +161,24 @@ async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
 
     tracing::info!("rsupervisord shutdown cleanly");
     Ok(())
+}
+
+struct MutexWriter(
+    std::sync::Arc<std::sync::Mutex<file_rotate::FileRotate<file_rotate::suffix::AppendCount>>>,
+);
+
+impl std::io::Write for MutexWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .flush()
+    }
 }

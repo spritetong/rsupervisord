@@ -1,6 +1,7 @@
 use crate::cli::transport::Endpoint;
 use crate::control::protocol::{
-    ActionResponse, ApiResponse, LogLinesResponse, ProgramStatusDto, ReloadResponse,
+    ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
+    ReloadResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::time::Duration;
@@ -34,6 +35,12 @@ impl SupervisorClient {
                 .filter(|p| names.contains(&p.name))
                 .collect())
         }
+    }
+
+    /// Fetches detailed status and metrics for a specific program.
+    pub async fn get_program(&self, name: &str) -> Result<ProgramDetailsDto> {
+        let path = format!("/api/v1/programs/{}", name);
+        self.request_json("GET", &path, None).await
     }
 
     /// Starts a program (or all programs if name is "all").

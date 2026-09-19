@@ -43,7 +43,9 @@ impl ServerEngine {
         let ipc_router = router.clone();
         let ipc_token = cancel_token.clone();
         set.spawn(async move {
-            let _ = run_ipc_listener(&ipc_path, ipc_router, ipc_token).await;
+            if let Err(e) = run_ipc_listener(&ipc_path, ipc_router, ipc_token).await {
+                tracing::error!("run_ipc_listener failed on {:?}: {}", ipc_path, e);
+            }
         });
 
         // 2. Optional TCP listener

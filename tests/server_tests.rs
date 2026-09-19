@@ -503,3 +503,102 @@ programs:
     let _ = server_task.await;
     manager.shutdown().await.expect("shutdown manager");
 }
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_server_engine_windows_file_uds_transport() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let socket_path = temp_dir.path().join("rsupervisord.sock");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{sock_path}"
+
+program_defaults:
+  autostart: false
+
+programs:
+  uds_worker:
+    command: |-
+      {cmd}
+"#,
+        sock_path = socket_path.to_string_lossy().replace('\\', "\\\\"),
+        cmd = get_worker_command("uds_worker", 10),
+    );
+
+    std::fs::write(&config_path, &yaml).expect("write config");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager_handle,
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let connect_path = config.server.uds_path.clone();
+    let endpoint = Endpoint::parse(&connect_path.to_string_lossy());
+    let client = SupervisorClient::new(endpoint, None);
+
+    let statuses = client
+        .status(&[])
+        .await
+        .expect("query status via Windows UDS socket");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].name, "uds_worker");
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_windows_uds_raw_socket_tokio_io() {
+    use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use uds_windows::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sock_path = temp_dir.path().join("test_raw.sock");
+
+    let listener = StdUnixListener::bind(&sock_path).unwrap();
+
+    let path_clone = sock_path.clone();
+    let client_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let std_client = StdUnixStream::connect(&path_clone).unwrap();
+        let raw = std_client.into_raw_socket();
+        let tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+        tcp.set_nonblocking(true).unwrap();
+        let mut tokio_stream = tokio::net::TcpStream::from_std(tcp).unwrap();
+        tokio_stream.write_all(b"PING").await.unwrap();
+        let mut buf = [0u8; 4];
+        tokio_stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"PONG");
+    });
+
+    let (std_server, _) = listener.accept().unwrap();
+    let raw = std_server.into_raw_socket();
+    let tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+    tcp.set_nonblocking(true).unwrap();
+    let mut tokio_server = tokio::net::TcpStream::from_std(tcp).unwrap();
+
+    let mut buf = [0u8; 4];
+    tokio_server.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"PING");
+    tokio_server.write_all(b"PONG").await.unwrap();
+
+    client_handle.await.unwrap();
+}

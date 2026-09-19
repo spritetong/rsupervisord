@@ -1,5 +1,7 @@
 use crate::error::ProgramError;
-use crate::program::config::{AutoRestartPolicy, ProgramConfig, ProgramLogsConfig, StopSignal};
+use crate::program::config::{
+    AutoRestartPolicy, HealthCheckConfig, ProgramConfig, ProgramLogsConfig, StopSignal,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,6 +80,8 @@ pub struct ProgramDefaults {
     pub priority: Option<u8>,
     #[serde(default)]
     pub logs: Option<ProgramLogsConfig>,
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +117,8 @@ pub struct ProgramConfigRaw {
     pub umask: Option<u32>,
     #[serde(default)]
     pub logs: Option<ProgramLogsConfig>,
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -248,6 +254,11 @@ impl SupervisorConfig {
                 (raw.command.clone(), raw.args.clone())
             };
 
+            let health_check = raw
+                .health_check
+                .clone()
+                .or_else(|| self.program_defaults.health_check.clone());
+
             let prog = ProgramConfig {
                 name: name.clone(),
                 command,
@@ -266,6 +277,7 @@ impl SupervisorConfig {
                 exit_codes,
                 umask: raw.umask,
                 logs,
+                health_check,
             };
 
             resolved.insert(name.clone(), prog);

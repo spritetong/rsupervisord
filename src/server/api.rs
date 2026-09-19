@@ -1,6 +1,7 @@
 use crate::config::SupervisorConfig;
 use crate::control::protocol::{
-    ActionResponse, ApiResponse, LogLinesResponse, ProgramStatusDto, ReloadResponse,
+    ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
+    ReloadResponse,
 };
 use crate::manager::ManagerHandle;
 use crate::program::state::ProgramState;
@@ -54,6 +55,7 @@ fn default_log_lines() -> usize {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(get_status))
+        .route("/api/v1/programs/{name}", get(get_program_details))
         .route("/api/v1/programs/{name}/start", post(start_program))
         .route("/api/v1/programs/{name}/stop", post(stop_program))
         .route("/api/v1/programs/{name}/restart", post(restart_program))
@@ -82,6 +84,17 @@ fn check_auth(headers: &HeaderMap, auth_token: &Option<String>) -> Result<(), St
     Ok(())
 }
 
+/// Formats duration seconds into human readable format (e.g. 45s, 12m 30s, 1h 45m).
+fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// GET /api/v1/status
 async fn get_status(
     State(state): State<AppState>,
@@ -97,19 +110,75 @@ async fn get_status(
 
     let dtos = statuses
         .into_iter()
-        .map(|s| ProgramStatusDto {
-            name: s.name,
-            state: format!("{:?}", s.state).to_uppercase(),
-            pid: s
-                .pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            priority: 50,
-            description: s.description,
+        .map(|s| {
+            let cpu = s
+                .metrics
+                .map(|m| format!("{:.1}%", m.cpu_percent))
+                .unwrap_or_else(|| "-".to_string());
+            let mem = s
+                .metrics
+                .map(|m| format!("{:.1} MB", m.memory_rss_bytes as f64 / 1024.0 / 1024.0))
+                .unwrap_or_else(|| "-".to_string());
+            let uptime = s
+                .uptime_secs
+                .map(format_duration_secs)
+                .unwrap_or_else(|| "-".to_string());
+
+            ProgramStatusDto {
+                name: s.name,
+                state: format!("{:?}", s.state).to_uppercase(),
+                health: s.health.to_string(),
+                pid: s
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                cpu,
+                mem,
+                uptime,
+                description: s.description,
+            }
         })
         .collect();
 
     Ok(Json(ApiResponse::ok(dtos)))
+}
+
+/// GET /api/v1/programs/:name
+async fn get_program_details(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<ApiResponse<ProgramDetailsDto>>), StatusCode> {
+    check_auth(&headers, &state.auth_token)?;
+
+    let status = match state.manager.get_status(&name).await {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::err(format!("Program '{}' not found", name))),
+            ));
+        }
+    };
+
+    let (cpu_percent, memory_rss_bytes) = match status.metrics {
+        Some(m) => (Some(m.cpu_percent), Some(m.memory_rss_bytes)),
+        None => (None, None),
+    };
+
+    let dto = ProgramDetailsDto {
+        name: status.name,
+        state: status.state,
+        health: status.health.to_string(),
+        pid: status.pid,
+        uptime_secs: status.uptime_secs,
+        exit_code: status.exit_code,
+        cpu_percent,
+        memory_rss_bytes,
+        description: status.description,
+    };
+
+    Ok((StatusCode::OK, Json(ApiResponse::ok(dto))))
 }
 
 /// POST /api/v1/programs/:name/start

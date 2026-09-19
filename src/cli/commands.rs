@@ -35,8 +35,11 @@ pub async fn handle_status(client: &SupervisorClient, names: &[String]) -> Resul
         dtos.push(ProgramStatusDto {
             name: p.name.bold().to_string(),
             state: colored_state,
+            health: p.health,
             pid: pid_str,
-            priority: p.priority,
+            cpu: p.cpu,
+            mem: p.mem,
+            uptime: p.uptime,
             description: p.description,
         });
     }

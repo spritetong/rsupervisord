@@ -115,6 +115,7 @@ unsafe impl Sync for WinJobGuard {}
 pub struct WindowsProcessGuard {
     pub pid: u32,
     job: WinJobGuard,
+    last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 #[cfg(windows)]
@@ -136,6 +137,74 @@ impl PlatformProcessGuard for WindowsProcessGuard {
 
     fn pid(&self) -> u32 {
         self.pid
+    }
+
+    fn query_metrics(&self) -> Result<crate::platform::traits::ProcessMetrics, ProgramError> {
+        use windows_sys::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject,
+        };
+
+        unsafe {
+            let mut ret_len = 0;
+
+            // 1. Query Memory
+            let mut limit_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let mem_ok = QueryInformationJobObject(
+                self.job.job_handle,
+                JobObjectExtendedLimitInformation,
+                &mut limit_info as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut ret_len,
+            );
+            let memory_rss_bytes = if mem_ok != 0 {
+                limit_info
+                    .PeakJobMemoryUsed
+                    .max(limit_info.PeakProcessMemoryUsed) as u64
+            } else {
+                0
+            };
+
+            // 2. Query CPU
+            let mut acct_info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+            let cpu_ok = QueryInformationJobObject(
+                self.job.job_handle,
+                JobObjectBasicAccountingInformation,
+                &mut acct_info as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                &mut ret_len,
+            );
+
+            let mut cpu_percent = 0.0f32;
+            if cpu_ok != 0 {
+                let user_time = acct_info.TotalUserTime.max(0) as u64;
+                let kernel_time = acct_info.TotalKernelTime.max(0) as u64;
+                let total_cpu_100ns = user_time + kernel_time;
+                let now = std::time::Instant::now();
+
+                if let Ok(mut lock) = self.last_cpu_sample.lock() {
+                    if let Some((prev_instant, prev_cpu)) = *lock {
+                        let delta_cpu = total_cpu_100ns.saturating_sub(prev_cpu);
+                        let elapsed_100ns =
+                            (now.duration_since(prev_instant).as_nanos() / 100) as u64;
+                        if elapsed_100ns > 0 {
+                            let cpus = std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(1) as f64;
+                            let pct = (delta_cpu as f64 / elapsed_100ns as f64) * 100.0 / cpus;
+                            cpu_percent = (pct as f32).max(0.0);
+                        }
+                    }
+                    *lock = Some((now, total_cpu_100ns));
+                }
+            }
+
+            Ok(crate::platform::traits::ProcessMetrics {
+                memory_rss_bytes,
+                cpu_percent,
+            })
+        }
     }
 }
 
@@ -181,7 +250,11 @@ impl PlatformBackend for WindowsPlatformBackend {
             res?;
         }
 
-        Ok(Box::new(WindowsProcessGuard { pid, job }))
+        Ok(Box::new(WindowsProcessGuard {
+            pid,
+            job,
+            last_cpu_sample: std::sync::Mutex::new(None),
+        }))
     }
 
     fn default_uds_path(&self) -> PathBuf {

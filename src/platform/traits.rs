@@ -2,6 +2,13 @@ use crate::error::ProgramError;
 use crate::program::config::StopSignal;
 use std::path::PathBuf;
 
+/// Process resource utilization metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProcessMetrics {
+    pub memory_rss_bytes: u64,
+    pub cpu_percent: f32,
+}
+
 /// Trait representing an OS-level process guard capable of managing,
 /// signaling, and cleanly terminating a process tree.
 pub trait PlatformProcessGuard: Send + Sync {
@@ -13,6 +20,11 @@ pub trait PlatformProcessGuard: Send + Sync {
 
     /// Returns the primary process ID.
     fn pid(&self) -> u32;
+
+    /// Queries real-time resource utilization metrics for the process (and its tree).
+    fn query_metrics(&self) -> Result<ProcessMetrics, ProgramError> {
+        Ok(ProcessMetrics::default())
+    }
 }
 
 /// Trait providing platform-specific abstractions for process configuration,

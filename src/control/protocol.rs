@@ -37,13 +37,36 @@ pub struct ProgramStatusDto {
     #[tabled(rename = "STATUS")]
     pub state: String,
 
+    #[tabled(rename = "HEALTH")]
+    pub health: String,
+
     #[tabled(rename = "PID")]
     pub pid: String,
 
-    #[tabled(rename = "PRIORITY")]
-    pub priority: u8,
+    #[tabled(rename = "CPU")]
+    pub cpu: String,
+
+    #[tabled(rename = "MEM")]
+    pub mem: String,
+
+    #[tabled(rename = "UPTIME")]
+    pub uptime: String,
 
     #[tabled(rename = "DESCRIPTION")]
+    pub description: String,
+}
+
+/// Detailed view of a single supervised program.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramDetailsDto {
+    pub name: String,
+    pub state: ProgramState,
+    pub health: String,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub cpu_percent: Option<f32>,
+    pub memory_rss_bytes: Option<u64>,
     pub description: String,
 }
 

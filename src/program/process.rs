@@ -207,10 +207,16 @@ struct RunningChild {
     platform_guard: Box<dyn PlatformProcessGuard>,
     stdout_pump: Option<JoinHandle<()>>,
     stderr_pump: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+    health_task: Option<JoinHandle<()>>,
 }
 
 impl RunningChild {
     async fn drain_pumps(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.health_task.take() {
+            let _ = handle.await;
+        }
         if let Some(handle) = self.stdout_pump.take() {
             let _ = handle.await;
         }
@@ -223,12 +229,15 @@ impl RunningChild {
 struct ProgramActor {
     config: ProgramConfig,
     command_rx: mpsc::Receiver<ProgramCommand>,
+    health_rx: mpsc::Receiver<crate::manager::HealthEvent>,
+    health_tx: mpsc::Sender<crate::manager::HealthEvent>,
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
     cancel_token: CancellationToken,
     current_child: Option<RunningChild>,
     retry_count: u32,
     manual_stop: bool,
+    started_at: Option<Instant>,
 }
 
 impl ProgramActor {
@@ -239,20 +248,26 @@ impl ProgramActor {
         ring_buffer: Arc<RingBuffer>,
         cancel_token: CancellationToken,
     ) -> Self {
+        let (health_tx, health_rx) = mpsc::channel(16);
         Self {
             config,
             command_rx,
+            health_rx,
+            health_tx,
             status_snapshot,
             ring_buffer,
             cancel_token,
             current_child: None,
             retry_count: 0,
             manual_stop: false,
+            started_at: None,
         }
     }
 
     async fn run(mut self) {
         let mut start_deadline: Option<tokio::time::Instant> = None;
+        let mut metrics_interval = tokio::time::interval(Duration::from_secs(2));
+        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             let has_child = self.current_child.is_some();
@@ -264,6 +279,45 @@ impl ProgramActor {
                 _ = self.cancel_token.cancelled() => {
                     self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
                     break;
+                }
+
+                Some(health_event) = self.health_rx.recv(), if has_child => {
+                    match health_event {
+                        crate::manager::HealthEvent::Healthy => {
+                            let mut snapshot = self.status_snapshot.write();
+                            snapshot.health = crate::program::state::HealthStatus::Healthy;
+                            snapshot.is_healthy = true;
+                        }
+                        crate::manager::HealthEvent::Unhealthy => {
+                            let should_restart = {
+                                let mut snapshot = self.status_snapshot.write();
+                                snapshot.health = crate::program::state::HealthStatus::Unhealthy;
+                                snapshot.is_healthy = false;
+                                self.config.autorestart != AutoRestartPolicy::Never
+                            };
+
+                            if should_restart {
+                                tracing::warn!(
+                                    program = %self.config.name,
+                                    "Program health check failed consecutively; restarting child process"
+                                );
+                                self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
+                                let _ = self.spawn_child().await;
+                            }
+                        }
+                    }
+                }
+
+                _ = metrics_interval.tick(), if has_child => {
+                    if let Some(ref child) = self.current_child
+                        && let Ok(m) = child.platform_guard.query_metrics()
+                    {
+                        let mut snapshot = self.status_snapshot.write();
+                        snapshot.metrics = Some(m);
+                        if let Some(started) = self.started_at {
+                            snapshot.uptime_secs = Some(started.elapsed().as_secs());
+                        }
+                    }
                 }
 
                 Some(cmd) = self.command_rx.recv() => {
@@ -430,6 +484,27 @@ impl ProgramActor {
             )
         });
 
+        self.started_at = Some(Instant::now());
+        let child_cancel = CancellationToken::new();
+
+        let health_task = if let Some(ref hcfg) = self.config.health_check {
+            let runner = crate::manager::HealthProbeRunner::new(
+                &self.config.name,
+                hcfg.clone(),
+                self.health_tx.clone(),
+                child_cancel.clone(),
+            );
+            Some(tokio::spawn(runner.run()))
+        } else {
+            None
+        };
+
+        let initial_health = if self.config.health_check.is_some() {
+            crate::program::state::HealthStatus::Starting
+        } else {
+            crate::program::state::HealthStatus::None
+        };
+
         let marked_running = self.config.start_secs == 0;
         let initial_state = if marked_running {
             ProgramState::Running
@@ -444,6 +519,14 @@ impl ProgramActor {
             format!("{:?}", initial_state),
         );
 
+        {
+            let mut snapshot = self.status_snapshot.write();
+            snapshot.health = initial_health;
+            snapshot.is_healthy = initial_health == crate::program::state::HealthStatus::Healthy
+                || (initial_health == crate::program::state::HealthStatus::None && marked_running);
+            snapshot.uptime_secs = Some(0);
+        }
+
         self.current_child = Some(RunningChild {
             child,
             pid,
@@ -451,12 +534,15 @@ impl ProgramActor {
             platform_guard,
             stdout_pump,
             stderr_pump,
+            cancel_token: child_cancel,
+            health_task,
         });
 
         Ok(())
     }
 
     async fn stop_current_child(&mut self, grace_period: Duration) {
+        self.started_at = None;
         if let Some(mut child_info) = self.current_child.take() {
             self.update_status(
                 ProgramState::Stopping,
@@ -510,6 +596,7 @@ impl ProgramActor {
         &mut self,
         exit_res: std::io::Result<std::process::ExitStatus>,
     ) -> bool {
+        self.started_at = None;
         let mut child_info = self.current_child.take();
         let pid = child_info.as_ref().map(|c| c.pid);
         let marked_running = child_info
@@ -631,5 +718,11 @@ impl ProgramActor {
         snapshot.pid = pid;
         snapshot.exit_code = exit_code;
         snapshot.description = description;
+        if state != ProgramState::Running && state != ProgramState::Starting {
+            snapshot.health = crate::program::state::HealthStatus::None;
+            snapshot.is_healthy = false;
+            snapshot.metrics = None;
+            snapshot.uptime_secs = None;
+        }
     }
 }

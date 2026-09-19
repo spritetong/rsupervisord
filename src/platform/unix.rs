@@ -18,6 +18,7 @@ use tokio::process::Command as TokioCommand;
 pub struct UnixProcessGuard {
     pub pid: u32,
     pub pgid: i32,
+    last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 #[cfg(unix)]
@@ -26,6 +27,7 @@ impl UnixProcessGuard {
         Self {
             pid,
             pgid: pid as i32,
+            last_cpu_sample: std::sync::Mutex::new(None),
         }
     }
 
@@ -61,6 +63,65 @@ impl PlatformProcessGuard for UnixProcessGuard {
 
     fn pid(&self) -> u32 {
         self.pid
+    }
+
+    fn query_metrics(&self) -> Result<crate::platform::traits::ProcessMetrics, ProgramError> {
+        let mut memory_rss_bytes = 0u64;
+        let mut cpu_percent = 0.0f32;
+
+        // 1. Read /proc/{pid}/status for VmRSS
+        let status_path = format!("/proc/{}/status", self.pid);
+        if let Ok(content) = std::fs::read_to_string(&status_path) {
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if let Some(kb_str) = parts.first()
+                        && let Ok(kb) = kb_str.parse::<u64>()
+                    {
+                        memory_rss_bytes = kb * 1024;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 2. Read /proc/{pid}/stat for CPU times (fields 14 utime and 15 stime)
+        let stat_path = format!("/proc/{}/stat", self.pid);
+        if let Ok(content) = std::fs::read_to_string(&stat_path)
+            && let Some(last_paren_idx) = content.rfind(')')
+        {
+            let rest = &content[last_paren_idx + 1..];
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() > 12 {
+                let utime = fields[11].parse::<u64>().unwrap_or(0);
+                let stime = fields[12].parse::<u64>().unwrap_or(0);
+                let total_ticks = utime + stime;
+                let now = std::time::Instant::now();
+
+                if let Ok(mut lock) = self.last_cpu_sample.lock() {
+                    if let Some((prev_instant, prev_ticks)) = *lock {
+                        let delta_ticks = total_ticks.saturating_sub(prev_ticks);
+                        let elapsed_secs = now.duration_since(prev_instant).as_secs_f64();
+                        if elapsed_secs > 0.0 {
+                            let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+                            let ticks_per_sec = if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
+                            let cpus = std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(1) as f64;
+                            let pct =
+                                (delta_ticks as f64 / ticks_per_sec / elapsed_secs) * 100.0 / cpus;
+                            cpu_percent = (pct as f32).max(0.0);
+                        }
+                    }
+                    *lock = Some((now, total_ticks));
+                }
+            }
+        }
+
+        Ok(crate::platform::traits::ProcessMetrics {
+            memory_rss_bytes,
+            cpu_percent,
+        })
     }
 }
 

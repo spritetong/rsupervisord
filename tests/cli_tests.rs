@@ -72,15 +72,21 @@ async fn test_cli_client_against_mock_daemon() {
                         ProgramStatusDto {
                             name: "mysql".to_string(),
                             state: "RUNNING".to_string(),
+                            health: "HEALTHY".to_string(),
                             pid: "1234".to_string(),
-                            priority: 10,
+                            cpu: "0.5%".to_string(),
+                            mem: "15.2 MB".to_string(),
+                            uptime: "5m".to_string(),
                             description: "Running for 5m".to_string(),
                         },
                         ProgramStatusDto {
                             name: "web".to_string(),
                             state: "STOPPED".to_string(),
+                            health: "-".to_string(),
                             pid: "-".to_string(),
-                            priority: 50,
+                            cpu: "-".to_string(),
+                            mem: "-".to_string(),
+                            uptime: "-".to_string(),
                             description: "Stopped".to_string(),
                         },
                     ];
@@ -176,8 +182,11 @@ async fn test_cli_command_handlers_execution() {
             let dtos = vec![ProgramStatusDto {
                 name: "demo".to_string(),
                 state: "RUNNING".to_string(),
+                health: "HEALTHY".to_string(),
                 pid: "42".to_string(),
-                priority: 20,
+                cpu: "1.2%".to_string(),
+                mem: "8.5 MB".to_string(),
+                uptime: "10s".to_string(),
                 description: "Demo task".to_string(),
             }];
             let body = serde_json::to_string(&ApiResponse::ok(dtos)).unwrap();

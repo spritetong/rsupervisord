@@ -74,6 +74,58 @@ pub struct ProgramConfig {
     pub umask: Option<u32>,
     #[serde(default)]
     pub logs: ProgramLogsConfig,
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HealthCheckType {
+    Http {
+        url: String,
+        #[serde(default = "default_http_expected_status")]
+        expected_status: u16,
+    },
+    Tcp {
+        endpoint: String,
+    },
+    Exec {
+        command: String,
+    },
+}
+
+fn default_http_expected_status() -> u16 {
+    200
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    #[serde(flatten)]
+    pub check_type: HealthCheckType,
+    #[serde(default = "default_health_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_health_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_health_failure_threshold")]
+    pub failure_threshold: u32,
+    #[serde(default = "default_health_initial_delay_secs")]
+    pub initial_delay_secs: u64,
+}
+
+fn default_health_interval_secs() -> u64 {
+    10
+}
+
+fn default_health_timeout_secs() -> u64 {
+    2
+}
+
+fn default_health_failure_threshold() -> u32 {
+    3
+}
+
+fn default_health_initial_delay_secs() -> u64 {
+    0
 }
 
 fn default_priority() -> u8 {
@@ -120,6 +172,7 @@ impl ProgramConfig {
             exit_codes: default_exit_codes(),
             umask: None,
             logs: ProgramLogsConfig::default(),
+            health_check: None,
         }
     }
 

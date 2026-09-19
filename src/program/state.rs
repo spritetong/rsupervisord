@@ -1,4 +1,26 @@
+use crate::platform::traits::ProcessMetrics;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HealthStatus {
+    #[default]
+    None,
+    Starting,
+    Healthy,
+    Unhealthy,
+}
+
+impl std::fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthStatus::None => write!(f, "-"),
+            HealthStatus::Starting => write!(f, "STARTING"),
+            HealthStatus::Healthy => write!(f, "HEALTHY"),
+            HealthStatus::Unhealthy => write!(f, "UNHEALTHY"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -28,7 +50,7 @@ impl ProgramState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProgramStatus {
     pub name: String,
     pub state: ProgramState,
@@ -36,6 +58,8 @@ pub struct ProgramStatus {
     pub uptime_secs: Option<u64>,
     pub exit_code: Option<i32>,
     pub is_healthy: bool,
+    pub health: HealthStatus,
+    pub metrics: Option<ProcessMetrics>,
     pub description: String,
 }
 
@@ -48,6 +72,8 @@ impl ProgramStatus {
             uptime_secs: None,
             exit_code: None,
             is_healthy: false,
+            health: HealthStatus::None,
+            metrics: None,
             description: "Stopped".to_string(),
         }
     }
