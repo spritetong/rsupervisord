@@ -51,7 +51,7 @@ fn default_log_lines() -> usize {
     100
 }
 
-/// Builds the complete Axum router with all v1 REST API endpoints.
+/// Builds the complete Axum router with all v1 REST API endpoints and embedded Web UI.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(get_status))
@@ -64,6 +64,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/reload", post(reload_config))
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
+        .fallback(crate::server::web::static_handler)
         .with_state(state)
 }
 

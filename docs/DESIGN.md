@@ -505,6 +505,8 @@ CLI 在启动时通过 `is_current_process_elevated()` 检查自身权限。若�
 
 ---
 
+---
+
 ## 10. CLI 同步/异步操作执行流程
 
 - **同步执行 (Sync)**：
@@ -519,7 +521,87 @@ CLI 在启动时通过 `is_current_process_elevated()` 检查自身权限。若�
 
 ---
 
-## 11. 设计验证与测试矩阵 (Verification Matrix)
+## 11. Windows 原生 UDS 与反向代理挂接 (Windows Native UDS & Caddy Integration)
+
+为实现与 Caddy、Nginx 等反向代理在 Windows 上的高效零端口对接，`rsupervisord` 支持在 Windows 10 (17063+) 及 Windows 11 上直接监听 AF_UNIX 套接字文件：
+
+```mermaid
+flowchart LR
+    Caddy["Caddy Server / Reverse Proxy"] -->|unix/C:/run/rsupervisord.sock| UDS["Windows Unix Domain Socket"]
+    UDS --> UdsWindows["uds_windows::UnixListener"]
+    UdsWindows --> RawSocket["from_raw_socket + set_nonblocking(true)"]
+    RawSocket --> TokioIo["hyper_util::rt::TokioIo"]
+    TokioIo --> AxumRouter["Axum REST API & Web UI Router"]
+```
+
+1. **底层实现机制**：
+   - 依赖 `uds_windows` 负责监听创建文件句柄。
+   - 接收到客户端流时，通过 `into_raw_socket` 提取底层句柄并立即置为非阻塞模式 (`ioctlsocket(FIONBIO)` / `tokio::net::TcpStream::from_raw_socket`)。
+   - 通过 `hyper_util::rt::TokioIo` 接管底层流，直接让 Axum 的 Router 处理 HTTP 流量。
+2. **生产收益**：
+   - **杜绝端口冲突**：无需在本地监听 127.0.0.1 端口，完全消除端口被占用的隐患。
+   - **ACL 权限保障**：利用 Windows NTFS 原生文件访问控制列表 (ACL) 限制只有管理员和 Caddy 运行用户可读写该 `.sock` 文件，防止跨进程未授权访问。
+
+---
+
+## 12. 嵌入式 Web UI 架构设计 (Embedded Web UI Engine)
+
+### 12.1 零 NPM 与单文件独立分发规范
+为保持核心系统轻量、免构建、高可用并杜绝 node_modules 安全漏洞，Web UI 严格贯彻**零 NPM 构建依赖**：
+- **静态资源嵌入 (`rust-embed`)**：
+  ```rust
+  #[derive(rust_embed::RustEmbed)]
+  #[folder = "web/"]
+  pub struct WebAssets;
+  ```
+  在编译阶段将 `web/index.html` 与 `web/vue.global.prod.js` 完全编译打包进二进制文件的 `.rodata` 段，实现真正意义上的单可执行文件分发。
+- **独立生产运行时**：采用官方生产版单文件 Vue 3 (`web/vue.global.prod.js`, ~154KB)，无 Webpack/Vite 编译步骤，页面打开即刻水合挂载。
+
+### 12.2 SPA 路由回落与 API 隔离
+- **SPA Client-side 路由回落**：
+  当用户访问非文件路径（如 `/programs/web-worker`）时，静态资源处理器自动回落并返回 `index.html`，交由前端接管视图渲染。
+- **API 路径保护**：
+  所有前缀为 `/api/` 的未匹配请求由静态处理器短路拦截，返回标准的结构化 JSON 404，绝不回落至 HTML，保障 API 调用方的健壮性：
+  ```json
+  {"success": false, "error": "Endpoint not found"}
+  ```
+
+### 12.3 Web UI 核心功能与交互规范
+1. **进程拓扑看板与资源监控**：
+   - 概况统计卡片：Total Programs、Running、Stopped、Degraded/Alert、Total CPU %、Total RSS Memory。
+   - 进程表格：微发光状态指示徽章（绿/灰/黄/红）、PID、CPU %、RSS 内存占用（MB/GB）、格式化 Uptime、描述。
+2. **批量与全量控制工具栏**：
+   - 支持多选复选框，选中时动态浮现批量操作栏：`Start Selected`、`Stop Selected`、`Restart Selected`、`Clear`。
+   - 全局一键控制：`Start All`、`Stop All`、`Restart All`。
+3. **零停机配置热重载 (Hot Reload)**：
+   - 点击 `Reload Config` 发送 `POST /api/v1/reload`。
+   - 弹出对话框以高亮色彩分类展示配置差异（Added, Removed, Modified, Unchanged）。
+4. **实时 SSE 终端日志抽屉 (Live Log Streaming)**：
+   - 通过 `EventSource` 连接 `/api/v1/programs/{name}/logs/stream`，实时追加输出流。
+   - 具备自动滚屏锁定、一键复制到剪贴板、清空缓冲区等运维控制。
+5. **安全认证控制**：
+   - 提供 Bearer Token 管理窗口，支持保存至浏览器 `localStorage` 并自动附带 `Authorization: Bearer <token>` 请求头。
+   - 当 API 返回 `401 Unauthorized` 时自动拦截并引导输入 Token。
+
+---
+
+## 13. 主动健康检查与资源监控系统 (Health Checks & Metrics)
+
+### 13.1 主动探针子系统
+每个被托管程序支持独立配置三种类型的周期性健康检查探针：
+1. **HTTP 探针**：向目标 URL（如 `http://127.0.0.1:8080/health`）发起 GET 请求，期望响应状态码在 `200..300` 之间。
+2. **TCP 探针**：尝试与目标端口建立 TCP 连接，握手成功即为健康。
+3. **Exec 探针**：在本地执行指定命令（如 `pg_isready -h localhost`），期望退出码为 0。
+
+- **故障恢复机制**：连续失败次数达到 `failure_threshold` 后，程序健康状态变更为 `Unhealthy`；若配置了自动恢复策略，Manager 将触发平滑重启。
+
+### 13.2 跨平台进程树资源监控 (Process Metrics)
+- **Windows 平台**：通过 Win32 `QueryInformationJobObject` 查询 `JobObjectBasicAndAccountingInformation`，汇总整棵子进程树的内核与用户态 CPU 耗时，并在采样周期内计算精确的 `cpu_percent`；通过 Job 内存限制统计获取真实的 Resident Set Size (RSS)。
+- **Linux 平台**：通过读取 `/proc/{pid}/stat` 与 `/proc/{pid}/statm`，精准解析进程树的时钟周期数与常驻内存页数。
+
+---
+
+## 14. 设计验证与测试矩阵 (Verification Matrix)
 
 | 验证项 | 验证手段 | 预期目标 |
 | :--- | :--- | :--- |
@@ -528,3 +610,6 @@ CLI 在启动时通过 `is_current_process_elevated()` 检查自身权限。若�
 | **死锁防范与压力** | 模拟高并发 CLI `start`/`stop`/`reload` 交叉并发请求 | 无任何任务卡死，超时熔断有效，100% 成功或安全报错 |
 | **热重载零停机** | 配置文件修改其中一个 Program，执行 `reload` | 未改动的服务 PID 绝不改变，网络连接不中断 |
 | **权限隔离校验** | 普通用户在 Linux/Windows 尝试控制 root/Elevated 守护进程 | 明确拦截并输出标准权限不足提示，无越权风险 |
+| **Windows UDS 挂接** | 通过 `uds_windows` 建立 UnixListener，Caddy 反向代理连入 | 成功代理 HTTP 请求，吞吐稳定且零端口监听 |
+| **嵌入式 Web UI 离线** | 断网环境下访问 Web UI (`GET /` 与 `/vue.global.prod.js`) | 资源全部来自二进制内嵌 FS，秒级渲染，SPA 路由正常 |
+| **主动探针自动重启** | 模拟托管服务端口宕机，健康检查连续达到失败阈值 | 状态机自动迁移至 Unhealthy 并触发自动重启恢复 |

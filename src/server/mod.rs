@@ -1,8 +1,10 @@
 pub mod api;
 pub mod uds;
+pub mod web;
 
 pub use api::{AppState, build_router};
 pub use uds::run_ipc_listener;
+pub use web::WebAssets;
 
 use crate::config::schema::ServerConfig;
 use crate::manager::ManagerHandle;

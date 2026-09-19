@@ -1,0 +1,1864 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rsupervisord - Process Supervisor</title>
+  <script src="/vue.global.prod.js"></script>
+  <style>
+    :root {
+      --bg-main: #090d16;
+      --bg-card: #111827;
+      --bg-card-hover: #162032;
+      --bg-subtle: #1e293b;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-focus: #3b82f6;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.12);
+      --success-border: rgba(16, 185, 129, 0.3);
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.12);
+      --warning-border: rgba(245, 158, 11, 0.3);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.12);
+      --danger-border: rgba(239, 68, 68, 0.3);
+      --info: #06b6d4;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Layout */
+    .app-container {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px 20px;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #fff;
+    }
+
+    .brand-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      color: #60a5fa;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      border: 1px solid transparent;
+      outline: none;
+      user-select: none;
+      white-space: nowrap;
+      background: var(--bg-subtle);
+      color: var(--text-main);
+    }
+
+    .btn:hover:not(:disabled) {
+      background: #283548;
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: #2563eb;
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: #1d4ed8;
+    }
+
+    .btn-success {
+      background: #059669;
+      color: #fff;
+    }
+    .btn-success:hover:not(:disabled) {
+      background: #047857;
+    }
+
+    .btn-danger {
+      background: #dc2626;
+      color: #fff;
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: #b91c1c;
+    }
+
+    .btn-warning {
+      background: #d97706;
+      color: #fff;
+    }
+    .btn-warning:hover:not(:disabled) {
+      background: #b45309;
+    }
+
+    .btn-outline {
+      background: transparent;
+      border-color: var(--border-color);
+      color: var(--text-muted);
+    }
+    .btn-outline:hover:not(:disabled) {
+      background: var(--bg-subtle);
+      color: var(--text-main);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .btn-icon {
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+    }
+
+    /* Stat Cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: border-color 0.2s;
+    }
+
+    .stat-card:hover {
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+
+    .stat-title {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .stat-value {
+      font-size: 26px;
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+    }
+
+    .stat-desc {
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .toolbar-left, .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .search-box {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 10px;
+      color: var(--text-dim);
+      pointer-events: none;
+    }
+
+    .input-text {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-main);
+      padding: 7px 12px 7px 32px;
+      font-size: 13px;
+      width: 240px;
+      transition: all 0.15s;
+    }
+
+    .input-text:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    .select-dropdown {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-main);
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      outline: none;
+    }
+
+    /* Batch Selection Bar */
+    .selection-bar {
+      background: #1e3a5f;
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      border-radius: var(--radius-md);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    .selection-count {
+      font-weight: 600;
+      color: #93c5fd;
+    }
+
+    .selection-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Program Table */
+    .table-wrapper {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      overflow-x: auto;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      padding: 12px 16px;
+      background: #0f1624;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border-color);
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 13px;
+      vertical-align: middle;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tbody tr {
+      transition: background-color 0.15s;
+    }
+
+    tbody tr:hover {
+      background-color: var(--bg-card-hover);
+    }
+
+    tbody tr.selected-row {
+      background-color: rgba(37, 99, 235, 0.08);
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .badge-running {
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+      color: #34d399;
+    }
+    .badge-running .badge-dot {
+      background: #10b981;
+      box-shadow: 0 0 6px #10b981;
+    }
+
+    .badge-stopped {
+      background: rgba(107, 114, 128, 0.15);
+      border: 1px solid rgba(107, 114, 128, 0.3);
+      color: #9ca3af;
+    }
+    .badge-stopped .badge-dot {
+      background: #6b7280;
+    }
+
+    .badge-starting, .badge-stopping {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      color: #fbbf24;
+    }
+    .badge-starting .badge-dot, .badge-stopping .badge-dot {
+      background: #f59e0b;
+    }
+
+    .badge-fatal, .badge-backoff, .badge-exited {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      color: #f87171;
+    }
+    .badge-fatal .badge-dot, .badge-backoff .badge-dot, .badge-exited .badge-dot {
+      background: #ef4444;
+      box-shadow: 0 0 6px #ef4444;
+    }
+
+    .badge-health-healthy {
+      background: rgba(16, 185, 129, 0.1);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.25);
+    }
+    .badge-health-unhealthy {
+      background: rgba(239, 68, 68, 0.1);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+    }
+    .badge-health-none {
+      color: var(--text-dim);
+    }
+
+    /* Program Name Cell */
+    .prog-name {
+      font-weight: 600;
+      color: #fff;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .prog-name:hover {
+      color: #60a5fa;
+      text-decoration: underline;
+    }
+
+    .prog-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mono-cell {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+
+    /* Row actions */
+    .row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Modals & Overlays */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+      animation: fadeIn 0.15s ease-out;
+    }
+
+    .modal-card {
+      background: #111827;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-lg);
+      width: 100%;
+      max-width: 580px;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      font-size: 13px;
+    }
+
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      background: #0d131f;
+    }
+
+    /* Drawer for Logs */
+    .log-drawer {
+      position: fixed;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 100%;
+      max-width: 780px;
+      background: #0b0f19;
+      border-left: 1px solid rgba(255, 255, 255, 0.12);
+      z-index: 110;
+      display: flex;
+      flex-direction: column;
+      box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+      animation: slideInRight 0.2s ease-out;
+    }
+
+    .terminal-container {
+      flex: 1;
+      background: #070a10;
+      padding: 14px 18px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
+      color: #e2e8f0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 12px;
+    }
+
+    .log-num {
+      color: #4b5563;
+      user-select: none;
+      min-width: 36px;
+      text-align: right;
+    }
+
+    .log-text {
+      flex: 1;
+    }
+
+    .log-text.log-err {
+      color: #f87171;
+    }
+    .log-text.log-warn {
+      color: #fbbf24;
+    }
+    .log-text.log-info {
+      color: #67e8f9;
+    }
+
+    /* Diff pills for Reload */
+    .diff-group {
+      margin-bottom: 16px;
+    }
+    .diff-title {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .diff-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .diff-pill {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+    }
+
+    /* Toast Notifications */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 200;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .toast {
+      background: #1e293b;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 12px 18px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 280px;
+      max-width: 420px;
+      animation: slideInUp 0.2s ease-out;
+      font-size: 13px;
+    }
+
+    .toast-success {
+      border-left: 4px solid var(--success);
+    }
+    .toast-error {
+      border-left: 4px solid var(--danger);
+    }
+    .toast-info {
+      border-left: 4px solid var(--primary);
+    }
+
+    /* Checkbox */
+    .checkbox-custom {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      accent-color: #2563eb;
+    }
+
+    /* Key-Value details table */
+    .kv-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .kv-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .kv-key {
+      color: var(--text-muted);
+      width: 140px;
+      font-weight: 500;
+    }
+    .kv-val {
+      color: #fff;
+      font-family: var(--font-mono);
+    }
+
+    /* Animations */
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes slideInRight {
+      from { transform: translateX(100%); }
+      to { transform: translateX(0); }
+    }
+    @keyframes slideInUp {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    /* Empty state */
+    .empty-state {
+      padding: 48px 20px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="app-container" v-cloak>
+    <!-- Header -->
+    <header>
+      <div class="brand">
+        <div class="brand-logo">
+          <!-- Supervisord Logo Icon (Layered circles) -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </div>
+        <div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="brand-title">rsupervisord</span>
+            <span class="brand-badge">v0.1.0</span>
+          </div>
+          <div style="font-size: 12px; color: var(--text-dim); margin-top: 1px;">High-Performance Process Supervisor</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Auto refresh indicator -->
+        <button class="btn btn-outline" @click="toggleAutoRefresh" :title="autoRefresh ? 'Click to pause auto refresh' : 'Click to enable auto refresh'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :style="{ animation: autoRefresh ? 'spin 4s linear infinite' : 'none' }">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+          </svg>
+          <span>{{ autoRefresh ? 'Auto: ' + refreshInterval + 's' : 'Paused' }}</span>
+        </button>
+
+        <!-- Manual refresh button -->
+        <button class="btn btn-outline btn-icon" @click="fetchStatus" :disabled="isLoading" title="Refresh now">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+        </button>
+
+        <!-- Reload Config button -->
+        <button class="btn btn-outline" @click="confirmReloadConfig" :disabled="isReloading" title="Zero-downtime hot configuration reload">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+          <span>Reload Config</span>
+        </button>
+
+        <!-- Auth token button -->
+        <button class="btn btn-outline" @click="openAuthModal" :style="authToken ? 'border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;' : ''">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+          <span>{{ authToken ? 'Token Active' : 'Auth Token' }}</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Stats Summary Cards -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <span class="stat-title">Total Programs</span>
+        <span class="stat-value">{{ stats.total }}</span>
+        <span class="stat-desc">Supervised processes</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-title">Running</span>
+        <span class="stat-value" style="color: #34d399;">{{ stats.running }}</span>
+        <span class="stat-desc">Operational</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-title">Stopped</span>
+        <span class="stat-value" style="color: #9ca3af;">{{ stats.stopped }}</span>
+        <span class="stat-desc">Idle / Terminated</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-title">Degraded / Alert</span>
+        <span class="stat-value" :style="stats.degraded > 0 ? 'color: #f87171;' : 'color: #9ca3af;'">{{ stats.degraded }}</span>
+        <span class="stat-desc">Unhealthy / Backoff</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-title">Total CPU</span>
+        <span class="stat-value" style="color: #60a5fa;">{{ stats.totalCpu }}%</span>
+        <span class="stat-desc">Process tree total</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-title">Total Memory</span>
+        <span class="stat-value" style="color: #c084fc;">{{ stats.totalMemFormatted }}</span>
+        <span class="stat-desc">Resident Set Size</span>
+      </div>
+    </div>
+
+    <!-- Toolbar & Global Batch Actions -->
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <!-- Search filter -->
+        <div class="search-box">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" class="input-text" v-model="searchQuery" placeholder="Filter programs...">
+        </div>
+
+        <!-- Status Filter Dropdown -->
+        <select class="select-dropdown" v-model="filterStatus">
+          <option value="ALL">All States ({{ stats.total }})</option>
+          <option value="RUNNING">Running ({{ stats.running }})</option>
+          <option value="STOPPED">Stopped ({{ stats.stopped }})</option>
+          <option value="DEGRADED">Degraded / Alert ({{ stats.degraded }})</option>
+        </select>
+      </div>
+
+      <div class="toolbar-right">
+        <!-- Global Actions -->
+        <button class="btn btn-outline" @click="startAll" :disabled="isActionPending" title="Start all configured programs">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span>Start All</span>
+        </button>
+
+        <button class="btn btn-outline" @click="stopAll" :disabled="isActionPending" title="Stop all configured programs">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          </svg>
+          <span>Stop All</span>
+        </button>
+
+        <button class="btn btn-outline" @click="restartAll" :disabled="isActionPending" title="Restart all running programs">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+          <span>Restart All</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Floating Batch Selection Bar -->
+    <div class="selection-bar" v-if="selected.size > 0">
+      <div class="selection-count">
+        {{ selected.size }} of {{ programs.length }} selected
+      </div>
+      <div class="selection-actions">
+        <button class="btn btn-success" @click="batchStart" :disabled="isActionPending">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span>Start Selected</span>
+        </button>
+
+        <button class="btn btn-danger" @click="batchStop" :disabled="isActionPending">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          </svg>
+          <span>Stop Selected</span>
+        </button>
+
+        <button class="btn btn-warning" @click="batchRestart" :disabled="isActionPending">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          <span>Restart Selected</span>
+        </button>
+
+        <button class="btn btn-outline" @click="deselectAll" title="Clear selection">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+          <span>Clear</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Programs Data Table -->
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 40px; text-align: center;">
+              <input type="checkbox" class="checkbox-custom" :checked="allSelected" :indeterminate="indeterminateSelected" @change="toggleSelectAll">
+            </th>
+            <th>Program</th>
+            <th>Status</th>
+            <th>Health</th>
+            <th>PID</th>
+            <th>CPU</th>
+            <th>Memory</th>
+            <th>Uptime</th>
+            <th style="text-align: right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-if="filteredPrograms.length === 0">
+            <td colspan="9">
+              <div class="empty-state">
+                <p>No programs found matching filter.</p>
+              </div>
+            </td>
+          </tr>
+          <tr v-for="prog in filteredPrograms" :key="prog.name" :class="{ 'selected-row': selected.has(prog.name) }">
+            <!-- Multi-select checkbox -->
+            <td style="text-align: center;">
+              <input type="checkbox" class="checkbox-custom" :checked="selected.has(prog.name)" @change="toggleSelect(prog.name)">
+            </td>
+
+            <!-- Program name & description -->
+            <td>
+              <div class="prog-name" @click="openDetails(prog.name)" title="View configuration details">
+                {{ prog.name }}
+              </div>
+              <div class="prog-desc" :title="prog.description">{{ prog.description }}</div>
+            </td>
+
+            <!-- State Badge -->
+            <td>
+              <span class="badge" :class="getStateBadgeClass(prog.state)">
+                <span class="badge-dot"></span>
+                <span>{{ prog.state }}</span>
+              </span>
+            </td>
+
+            <!-- Health Badge -->
+            <td>
+              <span class="badge" :class="getHealthBadgeClass(prog.health)">
+                {{ prog.health }}
+              </span>
+            </td>
+
+            <!-- PID -->
+            <td class="mono-cell">{{ prog.pid }}</td>
+
+            <!-- CPU -->
+            <td class="mono-cell" :style="prog.cpu !== '-' && parseFloat(prog.cpu) > 0 ? 'color: #60a5fa;' : ''">
+              {{ prog.cpu }}
+            </td>
+
+            <!-- Memory RSS -->
+            <td class="mono-cell" :style="prog.mem !== '-' ? 'color: #c084fc;' : ''">
+              {{ prog.mem }}
+            </td>
+
+            <!-- Uptime -->
+            <td class="mono-cell">{{ prog.uptime }}</td>
+
+            <!-- Actions -->
+            <td style="text-align: right;">
+              <div class="row-actions" style="justify-content: flex-end;">
+                <!-- Start Button -->
+                <button class="btn btn-outline btn-icon" @click="startProgram(prog.name)" :disabled="prog.state === 'RUNNING' || isActionPending" title="Start program">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                  </svg>
+                </button>
+
+                <!-- Stop Button -->
+                <button class="btn btn-outline btn-icon" @click="stopProgram(prog.name)" :disabled="prog.state === 'STOPPED' || isActionPending" title="Stop program">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  </svg>
+                </button>
+
+                <!-- Restart Button -->
+                <button class="btn btn-outline btn-icon" @click="restartProgram(prog.name)" :disabled="isActionPending" title="Restart program">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5">
+                    <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                  </svg>
+                </button>
+
+                <!-- Logs Button -->
+                <button class="btn btn-outline btn-icon" @click="openLogs(prog.name)" title="Live streaming logs">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2">
+                    <polyline points="4 17 10 11 4 5"></polyline>
+                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                  </svg>
+                </button>
+
+                <!-- Details Info Button -->
+                <button class="btn btn-outline btn-icon" @click="openDetails(prog.name)" title="Program details">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                  </svg>
+                </button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Live Log Viewer Drawer -->
+    <div class="log-drawer" v-if="logDrawerOpen">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          <span class="modal-title">Logs: {{ logProgramName }}</span>
+          <span class="badge badge-running" style="font-size: 10px;" v-if="logConnected">
+            <span class="badge-dot"></span> Streaming
+          </span>
+          <span class="badge badge-stopped" style="font-size: 10px;" v-else>
+            Disconnected
+          </span>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <!-- Auto Scroll Toggle -->
+          <button class="btn btn-outline btn-icon" @click="logAutoScroll = !logAutoScroll" :style="logAutoScroll ? 'color: #38bdf8;' : ''" :title="logAutoScroll ? 'Auto-scroll is ON' : 'Auto-scroll is OFF'">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M19 12l-7 7-7-7"/>
+            </svg>
+          </button>
+
+          <!-- Copy Logs -->
+          <button class="btn btn-outline btn-icon" @click="copyLogs" title="Copy to clipboard">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          </button>
+
+          <!-- Clear Logs -->
+          <button class="btn btn-outline btn-icon" @click="logLines = []" title="Clear buffer">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
+
+          <!-- Close Drawer -->
+          <button class="btn btn-outline btn-icon" @click="closeLogs" title="Close drawer">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Terminal Output -->
+      <div class="terminal-container" ref="terminalRef">
+        <div v-if="logLines.length === 0" style="color: #4b5563; padding: 20px 0; text-align: center;">
+          Listening for log output...
+        </div>
+        <div v-for="(line, idx) in logLines" :key="idx" class="log-line">
+          <span class="log-num">{{ idx + 1 }}</span>
+          <span class="log-text" :class="classifyLogLine(line)">{{ line }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Program Details Modal -->
+    <div class="modal-backdrop" v-if="detailsModalOpen" @click.self="detailsModalOpen = false">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title">Program Details: {{ currentDetails?.name }}</div>
+          <button class="btn btn-outline btn-icon" @click="detailsModalOpen = false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body" v-if="currentDetails">
+          <table class="kv-table">
+            <tr>
+              <td class="kv-key">State</td>
+              <td class="kv-val">
+                <span class="badge" :class="getStateBadgeClass(currentDetails.state)">
+                  {{ currentDetails.state }}
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <td class="kv-key">Health</td>
+              <td class="kv-val">
+                <span class="badge" :class="getHealthBadgeClass(currentDetails.health)">
+                  {{ currentDetails.health }}
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <td class="kv-key">PID</td>
+              <td class="kv-val">{{ currentDetails.pid ?? '-' }}</td>
+            </tr>
+            <tr>
+              <td class="kv-key">CPU Usage</td>
+              <td class="kv-val">{{ currentDetails.cpu_percent != null ? currentDetails.cpu_percent.toFixed(1) + '%' : '-' }}</td>
+            </tr>
+            <tr>
+              <td class="kv-key">Memory RSS</td>
+              <td class="kv-val">{{ currentDetails.memory_rss_bytes ? (currentDetails.memory_rss_bytes / 1024 / 1024).toFixed(1) + ' MB' : '-' }}</td>
+            </tr>
+            <tr>
+              <td class="kv-key">Uptime</td>
+              <td class="kv-val">{{ formatUptime(currentDetails.uptime_secs) }}</td>
+            </tr>
+            <tr>
+              <td class="kv-key">Exit Code</td>
+              <td class="kv-val">{{ currentDetails.exit_code ?? '-' }}</td>
+            </tr>
+            <tr>
+              <td class="kv-key">Description</td>
+              <td class="kv-val" style="color: #9ca3af; font-family: inherit;">{{ currentDetails.description }}</td>
+            </tr>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" @click="openLogs(currentDetails.name); detailsModalOpen = false">
+            <span>View Logs</span>
+          </button>
+          <button class="btn btn-primary" @click="detailsModalOpen = false">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hot Reload Summary Modal -->
+    <div class="modal-backdrop" v-if="reloadModalOpen" @click.self="reloadModalOpen = false">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title">Configuration Hot Reload Result</div>
+          <button class="btn btn-outline btn-icon" @click="reloadModalOpen = false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body" v-if="reloadSummary">
+          <div class="diff-group" v-if="reloadSummary.added && reloadSummary.added.length > 0">
+            <div class="diff-title" style="color: #34d399;">Added ({{ reloadSummary.added.length }})</div>
+            <div class="diff-list">
+              <span class="diff-pill" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3);" v-for="item in reloadSummary.added" :key="item">{{ item }}</span>
+            </div>
+          </div>
+
+          <div class="diff-group" v-if="reloadSummary.removed && reloadSummary.removed.length > 0">
+            <div class="diff-title" style="color: #f87171;">Removed ({{ reloadSummary.removed.length }})</div>
+            <div class="diff-list">
+              <span class="diff-pill" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3);" v-for="item in reloadSummary.removed" :key="item">{{ item }}</span>
+            </div>
+          </div>
+
+          <div class="diff-group" v-if="reloadSummary.modified && reloadSummary.modified.length > 0">
+            <div class="diff-title" style="color: #fbbf24;">Modified ({{ reloadSummary.modified.length }})</div>
+            <div class="diff-list">
+              <span class="diff-pill" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3);" v-for="item in reloadSummary.modified" :key="item">{{ item }}</span>
+            </div>
+          </div>
+
+          <div class="diff-group" v-if="reloadSummary.unchanged && reloadSummary.unchanged.length > 0">
+            <div class="diff-title" style="color: #9ca3af;">Unchanged ({{ reloadSummary.unchanged.length }})</div>
+            <div class="diff-list">
+              <span class="diff-pill" style="background: rgba(255, 255, 255, 0.05); color: #9ca3af; border: 1px solid rgba(255, 255, 255, 0.1);" v-for="item in reloadSummary.unchanged" :key="item">{{ item }}</span>
+            </div>
+          </div>
+
+          <div v-if="!reloadSummary.added?.length && !reloadSummary.removed?.length && !reloadSummary.modified?.length" style="color: #9ca3af; text-align: center; padding: 10px 0;">
+            No configuration differences detected. All {{ reloadSummary.unchanged?.length || 0 }} programs unchanged.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" @click="reloadModalOpen = false">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auth Token Modal -->
+    <div class="modal-backdrop" v-if="authModalOpen" @click.self="authModalOpen = false">
+      <div class="modal-card" style="max-width: 440px;">
+        <div class="modal-header">
+          <div class="modal-title">API Bearer Token</div>
+          <button class="btn btn-outline btn-icon" @click="authModalOpen = false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p style="color: var(--text-muted); margin-bottom: 14px;">
+            Enter the authorization token configured in <code>server.auth_token</code> if required by the daemon.
+          </p>
+          <input type="password" class="input-text" v-model="tokenInput" placeholder="Enter bearer token..." style="width: 100%; font-family: var(--font-mono); padding-left: 12px;">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" @click="clearAuthToken">Clear</button>
+          <button class="btn btn-primary" @click="saveAuthToken">Save Token</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notifications Container -->
+    <div class="toast-container">
+      <div v-for="toast in toasts" :key="toast.id" class="toast" :class="'toast-' + toast.type">
+        <div>{{ toast.message }}</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
+
+    createApp({
+      setup() {
+        const programs = ref([]);
+        const selected = ref(new Set());
+        const searchQuery = ref('');
+        const filterStatus = ref('ALL');
+        const autoRefresh = ref(true);
+        const refreshInterval = ref(3);
+        const isLoading = ref(false);
+        const isReloading = ref(false);
+        const isActionPending = ref(false);
+        const lastUpdated = ref(null);
+
+        // Auth
+        const authToken = ref(localStorage.getItem('rsupervisord_auth_token') || '');
+        const authModalOpen = ref(false);
+        const tokenInput = ref('');
+
+        // Details Modal
+        const detailsModalOpen = ref(false);
+        const currentDetails = ref(null);
+
+        // Reload Modal
+        const reloadModalOpen = ref(false);
+        const reloadSummary = ref(null);
+
+        // Logs
+        const logDrawerOpen = ref(false);
+        const logProgramName = ref('');
+        const logLines = ref([]);
+        const logAutoScroll = ref(true);
+        const logConnected = ref(false);
+        const terminalRef = ref(null);
+        let logEventSource = null;
+
+        // Toasts
+        const toasts = ref([]);
+        let toastSeq = 0;
+
+        function showToast(message, type = 'info') {
+          const id = ++toastSeq;
+          toasts.value.push({ id, message, type });
+          setTimeout(() => {
+            toasts.value = toasts.value.filter(t => t.id !== id);
+          }, 3500);
+        }
+
+        // Headers helper with Authorization
+        function getHeaders() {
+          const headers = { 'Content-Type': 'application/json' };
+          if (authToken.value) {
+            headers['Authorization'] = 'Bearer ' + authToken.value;
+          }
+          return headers;
+        }
+
+        // Fetch process status
+        async function fetchStatus() {
+          try {
+            isLoading.value = true;
+            const res = await fetch('/api/v1/status', {
+              headers: getHeaders()
+            });
+
+            if (res.status === 401) {
+              showToast('Authentication required (401 Unauthorized)', 'error');
+              openAuthModal();
+              return;
+            }
+
+            if (!res.ok) {
+              throw new Error('Server returned HTTP ' + res.status);
+            }
+
+            const data = await res.json();
+            if (data.success && Array.isArray(data.data)) {
+              programs.value = data.data;
+              lastUpdated.value = new Date();
+
+              // Prune selected that no longer exist
+              const currentNames = new Set(data.data.map(p => p.name));
+              for (const name of selected.value) {
+                if (!currentNames.has(name)) {
+                  selected.value.delete(name);
+                }
+              }
+            }
+          } catch (e) {
+            console.error('Failed to fetch status:', e);
+          } finally {
+            isLoading.value = false;
+          }
+        }
+
+        // Filtering
+        const filteredPrograms = computed(() => {
+          let list = programs.value;
+
+          if (searchQuery.value.trim()) {
+            const q = searchQuery.value.toLowerCase().trim();
+            list = list.filter(p =>
+              p.name.toLowerCase().includes(q) ||
+              (p.description && p.description.toLowerCase().includes(q))
+            );
+          }
+
+          if (filterStatus.value !== 'ALL') {
+            if (filterStatus.value === 'RUNNING') {
+              list = list.filter(p => p.state === 'RUNNING');
+            } else if (filterStatus.value === 'STOPPED') {
+              list = list.filter(p => p.state === 'STOPPED');
+            } else if (filterStatus.value === 'DEGRADED') {
+              list = list.filter(p =>
+                ['BACKOFF', 'FATAL', 'EXITED'].includes(p.state) ||
+                ['UNHEALTHY', 'DEGRADED'].includes(p.health)
+              );
+            }
+          }
+
+          return list;
+        });
+
+        // Summary Stats
+        const stats = computed(() => {
+          let total = programs.value.length;
+          let running = 0;
+          let stopped = 0;
+          let degraded = 0;
+          let totalCpu = 0;
+          let totalMemBytes = 0;
+
+          for (const p of programs.value) {
+            if (p.state === 'RUNNING') running++;
+            else if (p.state === 'STOPPED') stopped++;
+            else degraded++;
+
+            if (p.health === 'UNHEALTHY' || p.health === 'DEGRADED') {
+              if (p.state === 'RUNNING') {
+                degraded++;
+              }
+            }
+
+            if (p.cpu && p.cpu !== '-') {
+              const num = parseFloat(p.cpu);
+              if (!isNaN(num)) totalCpu += num;
+            }
+
+            if (p.mem && p.mem !== '-') {
+              const parts = p.mem.split(' ');
+              const mb = parseFloat(parts[0]);
+              if (!isNaN(mb)) totalMemBytes += mb * 1024 * 1024;
+            }
+          }
+
+          const totalMemMB = totalMemBytes / 1024 / 1024;
+          const totalMemFormatted = totalMemMB > 1024
+            ? (totalMemMB / 1024).toFixed(2) + ' GB'
+            : totalMemMB.toFixed(1) + ' MB';
+
+          return {
+            total,
+            running,
+            stopped,
+            degraded,
+            totalCpu: totalCpu.toFixed(1),
+            totalMemFormatted
+          };
+        });
+
+        // Selection
+        const allSelected = computed(() => {
+          const list = filteredPrograms.value;
+          return list.length > 0 && list.every(p => selected.value.has(p.name));
+        });
+
+        const indeterminateSelected = computed(() => {
+          const list = filteredPrograms.value;
+          const someSelected = list.some(p => selected.value.has(p.name));
+          return someSelected && !allSelected.value;
+        });
+
+        function toggleSelect(name) {
+          if (selected.value.has(name)) {
+            selected.value.delete(name);
+          } else {
+            selected.value.add(name);
+          }
+        }
+
+        function toggleSelectAll() {
+          const list = filteredPrograms.value;
+          if (allSelected.value) {
+            for (const p of list) {
+              selected.value.delete(p.name);
+            }
+          } else {
+            for (const p of list) {
+              selected.value.add(p.name);
+            }
+          }
+        }
+
+        function deselectAll() {
+          selected.value.clear();
+        }
+
+        // Single Program Actions
+        async function startProgram(name) {
+          try {
+            isActionPending.value = true;
+            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/start?sync=true`, {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              showToast(`Program '${name}' started (${data.data.state})`, 'success');
+            } else {
+              showToast(`Failed to start '${name}': ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error starting '${name}': ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        async function stopProgram(name) {
+          try {
+            isActionPending.value = true;
+            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/stop?sync=true`, {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              showToast(`Program '${name}' stopped (${data.data.state})`, 'success');
+            } else {
+              showToast(`Failed to stop '${name}': ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error stopping '${name}': ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        async function restartProgram(name) {
+          try {
+            isActionPending.value = true;
+            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/restart?sync=true`, {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              showToast(`Program '${name}' restarted (${data.data.state})`, 'success');
+            } else {
+              showToast(`Failed to restart '${name}': ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error restarting '${name}': ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        // Global All Actions
+        async function startAll() {
+          try {
+            isActionPending.value = true;
+            const res = await fetch('/api/v1/all/start', {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              showToast('Start all completed successfully', 'success');
+            } else {
+              showToast(`Start all failed: ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error: ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        async function stopAll() {
+          try {
+            isActionPending.value = true;
+            const res = await fetch('/api/v1/all/stop', {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              showToast('Stop all completed successfully', 'success');
+            } else {
+              showToast(`Stop all failed: ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error: ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        async function restartAll() {
+          try {
+            isActionPending.value = true;
+            await stopAll();
+            await startAll();
+            showToast('Restart all completed', 'success');
+          } catch (e) {
+            showToast(`Restart all error: ${e.message}`, 'error');
+          } finally {
+            isActionPending.value = false;
+            fetchStatus();
+          }
+        }
+
+        // Batch Actions on Selected
+        async function batchStart() {
+          const names = Array.from(selected.value);
+          if (names.length === 0) return;
+          isActionPending.value = true;
+          let okCount = 0;
+          for (const name of names) {
+            try {
+              const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/start?sync=false`, {
+                method: 'POST',
+                headers: getHeaders()
+              });
+              if (res.ok) okCount++;
+            } catch (e) {
+              console.error(e);
+            }
+          }
+          isActionPending.value = false;
+          showToast(`Triggered start on ${okCount}/${names.length} programs`, 'info');
+          fetchStatus();
+        }
+
+        async function batchStop() {
+          const names = Array.from(selected.value);
+          if (names.length === 0) return;
+          isActionPending.value = true;
+          let okCount = 0;
+          for (const name of names) {
+            try {
+              const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/stop?sync=false`, {
+                method: 'POST',
+                headers: getHeaders()
+              });
+              if (res.ok) okCount++;
+            } catch (e) {
+              console.error(e);
+            }
+          }
+          isActionPending.value = false;
+          showToast(`Triggered stop on ${okCount}/${names.length} programs`, 'info');
+          fetchStatus();
+        }
+
+        async function batchRestart() {
+          const names = Array.from(selected.value);
+          if (names.length === 0) return;
+          isActionPending.value = true;
+          let okCount = 0;
+          for (const name of names) {
+            try {
+              const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/restart?sync=false`, {
+                method: 'POST',
+                headers: getHeaders()
+              });
+              if (res.ok) okCount++;
+            } catch (e) {
+              console.error(e);
+            }
+          }
+          isActionPending.value = false;
+          showToast(`Triggered restart on ${okCount}/${names.length} programs`, 'info');
+          fetchStatus();
+        }
+
+        // Hot Reload
+        async function confirmReloadConfig() {
+          try {
+            isReloading.value = true;
+            const res = await fetch('/api/v1/reload', {
+              method: 'POST',
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              reloadSummary.value = data.data;
+              reloadModalOpen.value = true;
+              showToast('Hot reload applied successfully', 'success');
+              fetchStatus();
+            } else {
+              showToast(`Reload failed: ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Reload error: ${e.message}`, 'error');
+          } finally {
+            isReloading.value = false;
+          }
+        }
+
+        // Program Details Modal
+        async function openDetails(name) {
+          try {
+            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}`, {
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+              currentDetails.value = data.data;
+              detailsModalOpen.value = true;
+            } else {
+              showToast(`Failed to load details: ${data.error}`, 'error');
+            }
+          } catch (e) {
+            showToast(`Error: ${e.message}`, 'error');
+          }
+        }
+
+        // Logs Viewer with SSE
+        async function openLogs(name) {
+          closeLogs();
+          logProgramName.value = name;
+          logDrawerOpen.value = true;
+          logLines.value = [];
+          logConnected.value = false;
+
+          // 1. Initial lines fetch
+          try {
+            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/logs?lines=100`, {
+              headers: getHeaders()
+            });
+            const data = await res.json();
+            if (data.success && Array.isArray(data.data.lines)) {
+              logLines.value = data.data.lines;
+              scrollTerminalBottom();
+            }
+          } catch (e) {
+            console.error('Initial log fetch failed:', e);
+          }
+
+          // 2. Stream live updates via SSE
+          try {
+            const sseUrl = `/api/v1/programs/${encodeURIComponent(name)}/logs/stream`;
+            logEventSource = new EventSource(sseUrl);
+            logEventSource.onopen = () => {
+              logConnected.value = true;
+            };
+            logEventSource.onmessage = (event) => {
+              if (event.data) {
+                logLines.value.push(event.data);
+                if (logLines.value.length > 2000) {
+                  logLines.value.shift();
+                }
+                if (logAutoScroll.value) {
+                  scrollTerminalBottom();
+                }
+              }
+            };
+            logEventSource.onerror = () => {
+              logConnected.value = false;
+            };
+          } catch (e) {
+            console.error('SSE initialization error:', e);
+          }
+        }
+
+        function closeLogs() {
+          if (logEventSource) {
+            logEventSource.close();
+            logEventSource = null;
+          }
+          logDrawerOpen.value = false;
+          logConnected.value = false;
+        }
+
+        function scrollTerminalBottom() {
+          nextTick(() => {
+            if (terminalRef.value) {
+              terminalRef.value.scrollTop = terminalRef.value.scrollHeight;
+            }
+          });
+        }
+
+        function copyLogs() {
+          const text = logLines.value.join('\n');
+          navigator.clipboard.writeText(text).then(() => {
+            showToast('Logs copied to clipboard', 'info');
+          });
+        }
+
+        function classifyLogLine(line) {
+          const lower = line.toLowerCase();
+          if (lower.includes('err') || lower.includes('fatal') || lower.includes('panic') || lower.includes('fail')) {
+            return 'log-err';
+          }
+          if (lower.includes('warn')) {
+            return 'log-warn';
+          }
+          if (lower.includes('info')) {
+            return 'log-info';
+          }
+          return '';
+        }
+
+        // Auth Modal
+        function openAuthModal() {
+          tokenInput.value = authToken.value;
+          authModalOpen.value = true;
+        }
+
+        function saveAuthToken() {
+          const val = tokenInput.value.trim();
+          authToken.value = val;
+          if (val) {
+            localStorage.setItem('rsupervisord_auth_token', val);
+          } else {
+            localStorage.removeItem('rsupervisord_auth_token');
+          }
+          authModalOpen.value = false;
+          showToast('Authentication token saved', 'success');
+          fetchStatus();
+        }
+
+        function clearAuthToken() {
+          tokenInput.value = '';
+          saveAuthToken();
+        }
+
+        // Format helpers
+        function getStateBadgeClass(state) {
+          switch (state) {
+            case 'RUNNING': return 'badge-running';
+            case 'STOPPED': return 'badge-stopped';
+            case 'STARTING': return 'badge-starting';
+            case 'STOPPING': return 'badge-stopping';
+            case 'BACKOFF': return 'badge-backoff';
+            case 'FATAL': return 'badge-fatal';
+            case 'EXITED': return 'badge-exited';
+            default: return 'badge-stopped';
+          }
+        }
+
+        function getHealthBadgeClass(health) {
+          if (!health || health === 'Disabled' || health === '-') return 'badge-health-none';
+          if (health === 'Healthy') return 'badge-health-healthy';
+          if (health === 'Unhealthy') return 'badge-health-unhealthy';
+          return 'badge-starting';
+        }
+
+        function formatUptime(secs) {
+          if (secs == null) return '-';
+          if (secs < 60) return secs + 's';
+          if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+          return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+        }
+
+        // Auto refresh timer
+        let timer = null;
+        function setupTimer() {
+          if (timer) clearInterval(timer);
+          if (autoRefresh.value) {
+            timer = setInterval(fetchStatus, refreshInterval.value * 1000);
+          }
+        }
+
+        function toggleAutoRefresh() {
+          autoRefresh.value = !autoRefresh.value;
+          setupTimer();
+        }
+
+        onMounted(() => {
+          fetchStatus();
+          setupTimer();
+        });
+
+        onUnmounted(() => {
+          if (timer) clearInterval(timer);
+          if (logEventSource) logEventSource.close();
+        });
+
+        return {
+          programs,
+          selected,
+          searchQuery,
+          filterStatus,
+          autoRefresh,
+          refreshInterval,
+          isLoading,
+          isReloading,
+          isActionPending,
+          lastUpdated,
+          authToken,
+          authModalOpen,
+          tokenInput,
+          detailsModalOpen,
+          currentDetails,
+          reloadModalOpen,
+          reloadSummary,
+          logDrawerOpen,
+          logProgramName,
+          logLines,
+          logAutoScroll,
+          logConnected,
+          terminalRef,
+          toasts,
+          filteredPrograms,
+          stats,
+          allSelected,
+          indeterminateSelected,
+          toggleSelect,
+          toggleSelectAll,
+          deselectAll,
+          fetchStatus,
+          toggleAutoRefresh,
+          startProgram,
+          stopProgram,
+          restartProgram,
+          startAll,
+          stopAll,
+          restartAll,
+          batchStart,
+          batchStop,
+          batchRestart,
+          confirmReloadConfig,
+          openDetails,
+          openLogs,
+          closeLogs,
+          copyLogs,
+          classifyLogLine,
+          openAuthModal,
+          saveAuthToken,
+          clearAuthToken,
+          getStateBadgeClass,
+          getHealthBadgeClass,
+          formatUptime
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>

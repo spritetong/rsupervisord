@@ -36,8 +36,8 @@ petgraph = "0.8"
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-file-rotate = "0.8.0"
-shell-words = "1.1.1"
+file-rotate = "0.8"
+shell-words = "1"
 
 # CLI and formatting
 clap = { version = "4", features = ["derive"] }
@@ -50,19 +50,27 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace"] }
+rust-embed = "8.5"
+mime_guess = "2.0"
 
 # Platform abstractions
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["process", "signal", "user", "fs", "socket"] }
+nix = { version = "0.31", features = [
+    "process",
+    "signal",
+    "user",
+    "fs",
+    "socket",
+] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-uds_windows = "1.1"
+uds_windows = "1"
 windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_Foundation",
-    "Win32_Security"
+    "Win32_Security",
 ] }
 
 [dev-dependencies]
