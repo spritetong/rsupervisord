@@ -29,4 +29,10 @@ pub trait Program: Send + Sync {
 
     /// Cooperatively shuts down and waits for the internal actor task to terminate cleanly.
     async fn shutdown(&mut self) -> Result<(), ProgramError>;
+
+    /// Retrieves up to `max_lines` buffered log lines. If `max_lines` is None, returns all stored lines.
+    fn read_logs(&self, max_lines: Option<usize>) -> Vec<String>;
+
+    /// Subscribes to real-time incoming log events.
+    fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String>;
 }

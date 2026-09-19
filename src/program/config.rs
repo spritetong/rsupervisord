@@ -26,6 +26,20 @@ pub enum StopSignal {
     CtrlC,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProgramLogsConfig {
+    #[serde(default)]
+    pub stdout: Option<PathBuf>,
+    #[serde(default)]
+    pub stderr: Option<PathBuf>,
+    #[serde(default)]
+    pub max_bytes: Option<String>,
+    #[serde(default)]
+    pub backups: Option<usize>,
+    #[serde(default)]
+    pub redirect_stderr: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramConfig {
     pub name: String,
@@ -58,6 +72,8 @@ pub struct ProgramConfig {
     pub exit_codes: Vec<i32>,
     #[serde(default)]
     pub umask: Option<u32>,
+    #[serde(default)]
+    pub logs: ProgramLogsConfig,
 }
 
 fn default_priority() -> u8 {
@@ -103,6 +119,7 @@ impl ProgramConfig {
             stop_wait_secs: default_stop_wait_secs(),
             exit_codes: default_exit_codes(),
             umask: None,
+            logs: ProgramLogsConfig::default(),
         }
     }
 
@@ -118,6 +135,9 @@ impl ProgramConfig {
                 "Program '{}' command cannot be empty",
                 self.name
             )));
+        }
+        if let Some(ref mb) = self.logs.max_bytes {
+            crate::logging::parse_byte_size(mb)?;
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
 use crate::error::ProgramError;
-use crate::program::config::{AutoRestartPolicy, ProgramConfig, StopSignal};
+use crate::program::config::{AutoRestartPolicy, ProgramConfig, ProgramLogsConfig, StopSignal};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -76,6 +76,8 @@ pub struct ProgramDefaults {
     pub stop_wait_secs: Option<u64>,
     #[serde(default)]
     pub priority: Option<u8>,
+    #[serde(default)]
+    pub logs: Option<ProgramLogsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,8 @@ pub struct ProgramConfigRaw {
     pub exit_codes: Option<Vec<i32>>,
     #[serde(default)]
     pub umask: Option<u32>,
+    #[serde(default)]
+    pub logs: Option<ProgramLogsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -205,6 +209,21 @@ impl SupervisorConfig {
 
             let exit_codes = raw.exit_codes.clone().unwrap_or_else(|| vec![0]);
 
+            let logs = {
+                let def = self.program_defaults.logs.clone().unwrap_or_default();
+                if let Some(ref raw_logs) = raw.logs {
+                    ProgramLogsConfig {
+                        stdout: raw_logs.stdout.clone().or(def.stdout),
+                        stderr: raw_logs.stderr.clone().or(def.stderr),
+                        max_bytes: raw_logs.max_bytes.clone().or(def.max_bytes),
+                        backups: raw_logs.backups.or(def.backups),
+                        redirect_stderr: raw_logs.redirect_stderr || def.redirect_stderr,
+                    }
+                } else {
+                    def
+                }
+            };
+
             let (command, args) = if raw.args.is_empty() {
                 match shell_words::split(&raw.command) {
                     Ok(mut parts) if !parts.is_empty() => {
@@ -234,6 +253,7 @@ impl SupervisorConfig {
                 stop_wait_secs,
                 exit_codes,
                 umask: raw.umask,
+                logs,
             };
 
             resolved.insert(name.clone(), prog);

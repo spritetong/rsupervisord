@@ -1,4 +1,5 @@
 use crate::error::ProgramError;
+use crate::logging::RingBuffer;
 use crate::platform::PlatformProcessGuard;
 use crate::program::config::{AutoRestartPolicy, ProgramConfig};
 use crate::program::state::{ProgramState, ProgramStatus};
@@ -35,6 +36,7 @@ pub struct ProcessProgram {
     config: ProgramConfig,
     command_tx: mpsc::Sender<ProgramCommand>,
     status_snapshot: Arc<RwLock<ProgramStatus>>,
+    ring_buffer: Arc<RingBuffer>,
     cancel_token: CancellationToken,
     actor_handle: Option<JoinHandle<()>>,
 }
@@ -44,6 +46,7 @@ impl ProcessProgram {
         config.validate()?;
 
         let status_snapshot = Arc::new(RwLock::new(ProgramStatus::new_stopped(&config.name)));
+        let ring_buffer = Arc::new(RingBuffer::default());
         let cancel_token = CancellationToken::new();
         let (command_tx, command_rx) = mpsc::channel(32);
 
@@ -51,6 +54,7 @@ impl ProcessProgram {
             config.clone(),
             command_rx,
             status_snapshot.clone(),
+            ring_buffer.clone(),
             cancel_token.clone(),
         );
 
@@ -60,6 +64,7 @@ impl ProcessProgram {
             config,
             command_tx,
             status_snapshot,
+            ring_buffer,
             cancel_token,
             actor_handle: Some(actor_handle),
         })
@@ -179,6 +184,14 @@ impl Program for ProcessProgram {
         }
         Ok(())
     }
+
+    fn read_logs(&self, max_lines: Option<usize>) -> Vec<String> {
+        self.ring_buffer.get_lines(max_lines)
+    }
+
+    fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.ring_buffer.subscribe()
+    }
 }
 
 impl Drop for ProcessProgram {
@@ -192,12 +205,26 @@ struct RunningChild {
     pid: u32,
     marked_running: bool,
     platform_guard: Box<dyn PlatformProcessGuard>,
+    stdout_pump: Option<JoinHandle<()>>,
+    stderr_pump: Option<JoinHandle<()>>,
+}
+
+impl RunningChild {
+    async fn drain_pumps(&mut self) {
+        if let Some(handle) = self.stdout_pump.take() {
+            let _ = handle.await;
+        }
+        if let Some(handle) = self.stderr_pump.take() {
+            let _ = handle.await;
+        }
+    }
 }
 
 struct ProgramActor {
     config: ProgramConfig,
     command_rx: mpsc::Receiver<ProgramCommand>,
     status_snapshot: Arc<RwLock<ProgramStatus>>,
+    ring_buffer: Arc<RingBuffer>,
     cancel_token: CancellationToken,
     current_child: Option<RunningChild>,
     retry_count: u32,
@@ -209,12 +236,14 @@ impl ProgramActor {
         config: ProgramConfig,
         command_rx: mpsc::Receiver<ProgramCommand>,
         status_snapshot: Arc<RwLock<ProgramStatus>>,
+        ring_buffer: Arc<RingBuffer>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             config,
             command_rx,
             status_snapshot,
+            ring_buffer,
             cancel_token,
             current_child: None,
             retry_count: 0,
@@ -339,11 +368,15 @@ impl ProgramActor {
             cmd.env(k, v);
         }
 
+        // Configure async pipes for stdout and stderr capture
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
         // Platform-agnostic pre-spawn configuration via PlatformBackend
         let platform = crate::platform::native_platform();
         platform.configure_command(&mut cmd, self.config.user.as_deref(), self.config.umask)?;
 
-        let child = cmd.spawn().map_err(|e| ProgramError::StartFailed {
+        let mut child = cmd.spawn().map_err(|e| ProgramError::StartFailed {
             name: self.config.name.clone(),
             source: e,
         })?;
@@ -352,8 +385,50 @@ impl ProgramActor {
             ProgramError::PlatformError("Process spawned without PID".to_string())
         })?;
 
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
         // Attach platform-specific process guard
         let platform_guard = platform.attach_child(&child, pid)?;
+
+        let max_bytes = match &self.config.logs.max_bytes {
+            Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
+            None => 20 * 1024 * 1024,
+        };
+        let backups = self.config.logs.backups.unwrap_or(3);
+
+        let stdout_rotator = if let Some(ref path) = self.config.logs.stdout {
+            crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+        } else {
+            None
+        };
+
+        let stderr_rotator = if self.config.logs.redirect_stderr {
+            stdout_rotator.clone()
+        } else if let Some(ref path) = self.config.logs.stderr {
+            crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+        } else {
+            None
+        };
+
+        let stdout_pump = stdout.map(|pipe| {
+            crate::logging::spawn_log_pump(pipe, self.ring_buffer.clone(), stdout_rotator, None)
+        });
+
+        let stderr_prefix = if self.config.logs.redirect_stderr {
+            None
+        } else {
+            Some("STDERR".to_string())
+        };
+
+        let stderr_pump = stderr.map(|pipe| {
+            crate::logging::spawn_log_pump(
+                pipe,
+                self.ring_buffer.clone(),
+                stderr_rotator,
+                stderr_prefix,
+            )
+        });
 
         let marked_running = self.config.start_secs == 0;
         let initial_state = if marked_running {
@@ -374,6 +449,8 @@ impl ProgramActor {
             pid,
             marked_running,
             platform_guard,
+            stdout_pump,
+            stderr_pump,
         });
 
         Ok(())
@@ -395,28 +472,33 @@ impl ProgramActor {
 
             // Wait for graceful exit; escalate to force_kill if grace period expires
             let wait_res = tokio::time::timeout(grace_period, child_info.child.wait()).await;
-            match wait_res {
-                Ok(Ok(status)) => {
-                    let code = status.code();
-                    self.update_status(
-                        ProgramState::Stopped,
-                        None,
-                        code,
-                        format!("Stopped with exit code {:?}", code),
-                    );
-                }
+            let final_code = match wait_res {
+                Ok(Ok(status)) => status.code(),
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
                     let _ = child_info.child.wait().await;
-
-                    self.update_status(
-                        ProgramState::Stopped,
-                        None,
-                        None,
-                        "Force killed".to_string(),
-                    );
+                    None
                 }
+            };
+
+            // Drain stdout & stderr log pipes before marking stopped
+            child_info.drain_pumps().await;
+
+            if let Some(code) = final_code {
+                self.update_status(
+                    ProgramState::Stopped,
+                    None,
+                    Some(code),
+                    format!("Stopped with exit code {:?}", code),
+                );
+            } else {
+                self.update_status(
+                    ProgramState::Stopped,
+                    None,
+                    None,
+                    "Force killed".to_string(),
+                );
             }
         } else {
             self.update_status(ProgramState::Stopped, None, None, "Stopped".to_string());
@@ -428,7 +510,7 @@ impl ProgramActor {
         &mut self,
         exit_res: std::io::Result<std::process::ExitStatus>,
     ) -> bool {
-        let child_info = self.current_child.take();
+        let mut child_info = self.current_child.take();
         let pid = child_info.as_ref().map(|c| c.pid);
         let marked_running = child_info
             .as_ref()
@@ -442,6 +524,10 @@ impl ProgramActor {
                 None
             }
         };
+
+        if let Some(ref mut c) = child_info {
+            c.drain_pumps().await;
+        }
 
         if self.manual_stop {
             self.update_status(
