@@ -55,6 +55,15 @@ pub enum ManagerCommand {
     GetAllStatus {
         reply: oneshot::Sender<Vec<ProgramStatus>>,
     },
+    ReadLogs {
+        name: String,
+        lines: Option<usize>,
+        reply: oneshot::Sender<Result<Vec<String>, ProgramError>>,
+    },
+    SubscribeLogs {
+        name: String,
+        reply: oneshot::Sender<Result<tokio::sync::broadcast::Receiver<String>, ProgramError>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
@@ -266,6 +275,62 @@ impl ManagerHandle {
             })
     }
 
+    pub async fn read_logs(
+        &self,
+        name: impl Into<String>,
+        lines: Option<usize>,
+    ) -> Result<Vec<String>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::ReadLogs {
+                name: name.into(),
+                lines,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(10);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn subscribe_logs(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<tokio::sync::broadcast::Receiver<String>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::SubscribeLogs {
+                name: name.into(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(10);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
     pub async fn shutdown(&self) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -395,6 +460,18 @@ impl ManagerActor {
                         ManagerCommand::GetAllStatus { reply } => {
                             let statuses = self.programs.values().map(|p| p.status()).collect();
                             let _ = reply.send(statuses);
+                        }
+                        ManagerCommand::ReadLogs { name, lines, reply } => {
+                            let res = self.programs.get(&name).map(|p| p.read_logs(lines)).ok_or_else(|| {
+                                ProgramError::ConfigError(format!("Program '{}' not registered", name))
+                            });
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::SubscribeLogs { name, reply } => {
+                            let res = self.programs.get(&name).map(|p| p.subscribe_logs()).ok_or_else(|| {
+                                ProgramError::ConfigError(format!("Program '{}' not registered", name))
+                            });
+                            let _ = reply.send(res);
                         }
                         ManagerCommand::Shutdown { reply } => {
                             self.execute_stop_all(None).await;

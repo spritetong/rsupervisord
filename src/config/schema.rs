@@ -128,6 +128,18 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    /// Loads and parses a SupervisorConfig from a YAML file.
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ProgramError> {
+        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "Failed to read config file '{:?}': {}",
+                path.as_ref(),
+                e
+            ))
+        })?;
+        Self::from_yaml_str(&content)
+    }
+
     pub fn from_yaml_str(yaml_content: &str) -> Result<Self, ProgramError> {
         // Expand environment variables first
         let expanded = crate::config::expand::expand_env_vars(yaml_content);
