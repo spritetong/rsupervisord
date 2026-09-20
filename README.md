@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]
-[![Tests](https://img.shields.io/badge/Tests-70%2F70%20Passing-brightgreen.svg)]
+[![Tests](https://img.shields.io/badge/Tests-73%2F73%20Passing-brightgreen.svg)]
 
 **rsupervisord** is a modern, high-performance, asynchronous process orchestration and monitoring daemon engine written in Rust.
 
@@ -197,7 +197,59 @@ When `-c / --config` is not explicitly specified on the command line, the daemon
 ./target/release/rsupervisorctl reload
 ```
 
-### 5. Accessing the Web Dashboard
+### 5. System Service Management (Windows Service & Linux Systemd)
+
+`rsupervisord` provides built-in, cross-platform system service lifecycle management without requiring external wrappers.
+
+#### Command-Line Service Flags
+- `--install`: Installs `rsupervisord` as an auto-starting system service (Windows Service via SCM, or Linux systemd unit). An optional `-c / --config <path>` embeds an explicit configuration path.
+- `--uninstall`: Stops the running service (if active) and removes it from the service database.
+- `--start`: Starts the registered system service.
+- `--stop`: Gracefully stops the registered system service and drains all supervised child processes.
+- `--restart`: Restarts the registered system service.
+- `--service` (*Windows only*): Invoked automatically by the Windows Service Control Manager (SCM) to execute the daemon within the SCM background worker thread.
+
+#### Windows Service (SCM)
+Open **PowerShell** or **Command Prompt** as Administrator:
+
+```powershell
+# Install Windows Service with auto-start (uses default config path if -c is omitted)
+rsupervisord.exe --install
+
+# Install with explicit configuration file
+rsupervisord.exe --install -c C:\rsupervisord\config.yaml
+
+# Manage service lifecycle
+rsupervisord.exe --start
+rsupervisord.exe --stop
+rsupervisord.exe --restart
+rsupervisord.exe --uninstall
+```
+
+When running as a Windows Service, SCM control requests (`Stop`, `Shutdown`) signal cooperative cancellation via `tokio_util::sync::CancellationToken`, cleanly terminating all supervised processes within native Win32 Job Objects before reporting `ServiceState::Stopped`.
+
+#### Linux Systemd Service
+On Linux systems, run with root privileges:
+
+```bash
+# Install and enable systemd service (/etc/systemd/system/<cmd_name>.service)
+sudo rsupervisord --install
+
+# Install with explicit configuration path
+sudo rsupervisord --install -c /etc/rsupervisord/config.yaml
+
+# Manage service lifecycle via rsupervisord CLI
+sudo rsupervisord --start
+sudo rsupervisord --stop
+sudo rsupervisord --restart
+sudo rsupervisord --uninstall
+
+# Or manage directly via native systemctl
+sudo systemctl status rsupervisord
+sudo systemctl restart rsupervisord
+```
+
+### 6. Accessing the Web Dashboard
 
 Open your browser and navigate to:
 
@@ -220,7 +272,7 @@ http://127.0.0.1:9001/
 | :--- | :--- | :--- |
 | **Silent 0% CPU** | Zero polling wakeups without health check | ✅ Verified (< 0.01% CPU) |
 | **Windows Job Objects** | Multi-tier child/grandchild process reclamation | ✅ 100% Reclaimed |
-| **Unit & Integration Tests** | 49 comprehensive tests across all modules | ✅ 49/49 Passed |
+| **Unit & Integration Tests** | 73 comprehensive tests across all modules | ✅ 73/73 Passed |
 | **Clippy Strict Lints** | Strict `-D warnings` enforcement | ✅ 0 Warnings |
 | **Code Formatting** | Standard Rust formatting (`cargo fmt --check`) | ✅ 0 Diffs |
 | **Cross-Platform Matrix** | Windows 11 Native MSVC & Ubuntu 22.04 LTS (WSL2) | ✅ 100% Dual-Platform Pass |

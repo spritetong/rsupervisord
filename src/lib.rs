@@ -6,14 +6,17 @@
 pub mod cli;
 pub mod config;
 pub mod control;
+pub mod daemon;
 pub mod error;
 pub mod logging;
 pub mod manager;
 pub mod platform;
 pub mod program;
 pub mod server;
+pub mod service;
 
 pub use config::{ConfigDiff, SupervisorConfig};
+pub use daemon::{DaemonArgs, run_daemon};
 pub use error::ProgramError;
 pub use manager::{DependencyGraph, ManagerHandle, ReloadSummary, SupervisorManager};
 pub use platform::{PlatformBackend, PlatformProcessGuard, native_platform};

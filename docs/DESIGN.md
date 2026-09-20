@@ -731,6 +731,18 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   - Windows: `<config dir>/<cmd_name>.sock` (relocated from `C:\ProgramData` to `<config dir>` to eliminate Administrator elevation requirements).
   - Unix: `/var/run/<cmd_name>.sock`.
 
+### 15.13 System Service Integration (Windows Service & Linux Systemd)
+
+- **First-Class Windows Service Control Manager (SCM) Integration**:
+  - Implemented using the `windows-service` crate, supporting `--install`, `--uninstall`, `--start`, `--stop`, `--restart`, and internal `--service`.
+  - Dynamically registers the service under the canonical `cmd_name` (derived from `argv[0]`), ensuring custom-named binaries (e.g. `myd`) install and run under matching service identities.
+  - SCM control events (`ServiceControl::Stop`, `ServiceControl::Shutdown`) are handled by reporting `ServiceState::StopPending` with a 30-second bounded timeout, followed by cooperative broadcast cancellation via `tokio_util::sync::CancellationToken`.
+  - Supervised child processes are gracefully terminated inside Win32 Job Objects before the service transitions to `ServiceState::Stopped`.
+- **Native Linux Systemd Service Automation**:
+  - Generates standard systemd unit files at `/etc/systemd/system/<cmd_name>.service` with `ExecReload=/bin/kill -HUP $MAINPID`, `Restart=on-failure`, and `LimitNOFILE=65536`.
+  - Automatically invokes `systemctl daemon-reload` and `systemctl enable` upon installation.
+  - Enforces root privilege validation (`is_elevated()`) with clear diagnostic error guidance.
+
 ---
 
 ## 16. Verification Matrix
@@ -739,11 +751,12 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 70 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 73 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
 | **Windows Native UDS** | Bind `AF_UNIX` via `uds_windows`; proxy through Caddy | Transparent HTTP proxying with zero open ports | ✅ Windows 11 Native UDS verified |
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 70/70 passed; Linux: 69/69 passed |
+| **System Service Lifecycles** | Install, uninstall, start, stop, restart, and SCM loop | Zero resource leaks, clean drain | ✅ Verified across Windows SCM & Linux systemd |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 73/73 passed; Linux: 72/72 passed |
