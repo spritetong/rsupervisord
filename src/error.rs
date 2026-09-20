@@ -39,6 +39,9 @@ pub enum ProgramError {
     #[error("Operation on program '{name}' timed out after {timeout_secs}s")]
     Timeout { name: String, timeout_secs: u64 },
 
+    #[error("Program '{name}' is not registered")]
+    NotFound { name: String },
+
     #[error("Platform-specific error: {0}")]
     PlatformError(String),
 

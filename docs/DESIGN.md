@@ -689,6 +689,30 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 - During the startup failure backoff window (`2^retry_count` seconds), the backoff timer is multiplexed using `tokio::select!` against `cancel_token.cancelled()`.
 - Daemon shutdowns or program stop commands trigger immediate termination without stalling for up to 32 seconds in backoff sleep.
 
+### 15.9 Configuration Strictness & Hot Reload Boundaries
+
+- **Strict Schema Validation (`deny_unknown_fields`)**:
+  All configuration models enforce `#[serde(deny_unknown_fields)]`. Misspellings or unsupported legacy supervisor keys (such as `numprocs`, `process_name`, `%(process_num)s`) trigger immediate parse errors rather than being silently ignored.
+- **Comment-Safe Macro Expansion**:
+  Environment variable expansion (`${VAR}` and `${VAR:-default}`) processes configuration text line-by-line while keeping comment lines starting with `#` untouched, preventing unset variables in comments from corrupting text.
+- **Dynamic Workload vs. Static Infrastructure Boundaries**:
+  - *Dynamic Workloads (`programs.*`, `program_defaults.*`)*: Fully hot-reloadable with zero downtime for unchanged programs. Program commands, arguments, environment variables, priority tiers, health checks, and log rotation parameters update dynamically.
+  - *Static Daemon Infrastructure (`server.*`, `logging.*`, `metrics.*`, `worker_threads`)*: These sections configure the core supervisor process, binding OS sockets (UDS/TCP), setting tracing subscriber targets, and spinning up the Tokio multi-thread runtime. Because runtime infrastructure cannot be reallocated on the fly without terminating active listener sockets and in-flight control connections, modifying these sections requires restarting the `rsupervisord` daemon.
+
+### 15.10 Cross-Platform Process Isolation Semantics
+
+- **Unix/Linux Privilege Dropping**:
+  On Unix systems, subprocess isolation executes in strict POSIX sequence: `chdir` -> `setpgid` -> `umask` -> `setgroups` -> `setgid` -> `setuid` -> `execve`. When `user` is specified without an explicit `:gid`, `rsupervisord` looks up the user's primary GID and explicitly clears supplementary groups via `setgroups(&[primary_gid])`, ensuring complete privilege dropping from root.
+- **Windows Security Context**:
+  POSIX `user` and `umask` attributes are not applicable to native Windows process creation (which relies on Win32 Access Tokens and ACLs). When `user` or `umask` are specified in a configuration executed on Windows, `rsupervisord` emits a clear warning (`tracing::warn!`) and safely executes the process within the supervisor's existing security context without failing or halting.
+
+### 15.11 Zero-Panic Duration Bounds & Remote Crash Elimination
+
+- Remote query parameters (`?timeout=`) and configuration attributes (`stop_wait_secs`) are strictly bounded to prevent 64-bit integer overflow panics.
+- In `POST /api/v1/programs/:name/stop` and `/restart`, `query.timeout` is clamped to a maximum of 86,400 seconds (24 hours).
+- Internal duration additions use `checked_add(Duration::from_secs(...)).unwrap_or(...)` instead of unchecked `+`, eliminating panic triggers in long-running supervisors.
+- Both synchronous and asynchronous control flows are supported uniformly across start, stop, and restart (`?sync=false` returns `202 Accepted`).
+
 ---
 
 ## 16. Verification Matrix

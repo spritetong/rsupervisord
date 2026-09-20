@@ -19,13 +19,22 @@ pub enum AutoRestartPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum StopSignal {
+    #[serde(alias = "SIGTERM", alias = "TERM", alias = "sigterm", alias = "term")]
     Term,
+    #[serde(alias = "SIGINT", alias = "INT", alias = "sigint", alias = "int")]
     Int,
+    #[serde(alias = "SIGQUIT", alias = "QUIT", alias = "sigquit", alias = "quit")]
     Quit,
+    #[serde(alias = "SIGKILL", alias = "KILL", alias = "sigkill", alias = "kill")]
     Kill,
-    #[serde(rename = "CTRL_BREAK")]
+    #[serde(
+        rename = "CTRL_BREAK",
+        alias = "ctrl_break",
+        alias = "ctrlbreak",
+        alias = "CTRLBREAK"
+    )]
     CtrlBreak,
-    #[serde(rename = "CTRL_C")]
+    #[serde(rename = "CTRL_C", alias = "ctrl_c", alias = "ctrlc", alias = "CTRLC")]
     CtrlC,
 }
 
@@ -36,6 +45,7 @@ impl Default for StopSignal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgramLogsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,

@@ -181,6 +181,7 @@ impl PlatformBackend for UnixPlatformBackend {
                 // 3. Drop privileges if user specified
                 if let Some((uid, gid)) = parsed_ids {
                     if let Some(g) = gid {
+                        let _ = nix::unistd::setgroups(&[g]);
                         nix::unistd::setgid(g).map_err(std::io::Error::other)?;
                     }
                     if let Some(u) = uid {
@@ -330,6 +331,7 @@ pub fn to_nix_signal(sig: StopSignal) -> Signal {
 }
 
 /// Parses a user specification string supporting: "1000", "1000:1000", "username", "username:groupname".
+/// When groupname is omitted, resolves the user's primary GID.
 fn parse_user_spec(spec: &str) -> Result<(Option<Uid>, Option<Gid>), ProgramError> {
     let parts: Vec<&str> = spec.split(':').collect();
     let uid_part = parts[0].trim();
@@ -339,10 +341,15 @@ fn parse_user_spec(spec: &str) -> Result<(Option<Uid>, Option<Gid>), ProgramErro
         None
     };
 
-    let uid = if let Ok(num) = uid_part.parse::<u32>() {
-        Some(Uid::from_raw(num))
+    let (uid, default_gid) = if let Ok(num) = uid_part.parse::<u32>() {
+        let u = Uid::from_raw(num);
+        let primary_gid = nix::unistd::User::from_uid(u)
+            .ok()
+            .flatten()
+            .map(|usr| usr.gid);
+        (Some(u), primary_gid)
     } else if let Ok(Some(u)) = nix::unistd::User::from_name(uid_part) {
-        Some(u.uid)
+        (Some(u.uid), Some(u.gid))
     } else {
         return Err(ProgramError::ConfigError(format!(
             "Unknown user or invalid UID: '{}'",
@@ -362,7 +369,7 @@ fn parse_user_spec(spec: &str) -> Result<(Option<Uid>, Option<Gid>), ProgramErro
             )));
         }
     } else {
-        None
+        default_gid
     };
 
     Ok((uid, gid))

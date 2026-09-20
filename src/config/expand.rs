@@ -6,7 +6,22 @@
 use std::borrow::Cow;
 
 /// Expands environment variables in the format `${VAR}` or `${VAR:-default}` within a raw string.
+/// Comment lines starting with `#` are preserved verbatim without expansion.
 pub fn expand_env_vars(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+
+    for line in raw.split_inclusive('\n') {
+        if line.trim_start().starts_with('#') {
+            result.push_str(line);
+            continue;
+        }
+        result.push_str(&expand_line(line));
+    }
+
+    result
+}
+
+fn expand_line(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
@@ -85,6 +100,19 @@ mod tests {
         assert_eq!(
             expand_env_vars("unclosed ${VAR_NAME and more"),
             "unclosed ${VAR_NAME and more"
+        );
+
+        // Test comment preservation
+        assert_eq!(
+            expand_env_vars(
+                "# Comment with ${TEST_UNSET_VAR} unset\nport: ${TEST_SUPERVISOR_PORT}"
+            ),
+            "# Comment with ${TEST_UNSET_VAR} unset\nport: 9001"
+        );
+
+        assert_eq!(
+            expand_env_vars("  # Indented comment ${TEST_UNSET_VAR}\nname: test"),
+            "  # Indented comment ${TEST_UNSET_VAR}\nname: test"
         );
     }
 }

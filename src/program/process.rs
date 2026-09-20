@@ -220,7 +220,9 @@ impl Program for ProcessProgram {
                 name: self.config.name.clone(),
             })?;
 
-        let timeout_dur = grace_period + Duration::from_secs(5);
+        let timeout_dur = grace_period
+            .checked_add(Duration::from_secs(5))
+            .unwrap_or(Duration::from_secs(86400));
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -244,7 +246,9 @@ impl Program for ProcessProgram {
                 name: self.config.name.clone(),
             })?;
 
-        let timeout_dur = grace_period + Duration::from_secs(10);
+        let timeout_dur = grace_period
+            .checked_add(Duration::from_secs(10))
+            .unwrap_or(Duration::from_secs(86400));
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -368,7 +372,18 @@ impl ProgramActor {
 
         let stdout_rotator = if !stdout_disabled {
             if let Some(ref path) = config.logs.stdout {
-                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+                match crate::logging::LogRotator::new(path, max_bytes, backups) {
+                    Ok(rot) => Some(rot),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to initialize stdout LogRotator for '{}' at {:?}: {}",
+                            config.name,
+                            path,
+                            e
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             }
@@ -380,7 +395,18 @@ impl ProgramActor {
             if config.logs.redirect_stderr {
                 stdout_rotator.clone()
             } else if let Some(ref path) = config.logs.stderr {
-                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+                match crate::logging::LogRotator::new(path, max_bytes, backups) {
+                    Ok(rot) => Some(rot),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to initialize stderr LogRotator for '{}' at {:?}: {}",
+                            config.name,
+                            path,
+                            e
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             }

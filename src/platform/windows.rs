@@ -225,10 +225,15 @@ impl PlatformBackend for WindowsPlatformBackend {
     fn configure_command(
         &self,
         _cmd: &mut TokioCommand,
-        _user: Option<&str>,
-        _umask: Option<u32>,
+        user: Option<&str>,
+        umask: Option<u32>,
     ) -> Result<(), ProgramError> {
-        // Windows-specific process creation flags can be configured here if necessary.
+        if user.is_some() {
+            tracing::warn!("'user' configuration is not supported on Windows and will be ignored");
+        }
+        if umask.is_some() {
+            tracing::warn!("'umask' configuration is not supported on Windows and will be ignored");
+        }
         Ok(())
     }
 

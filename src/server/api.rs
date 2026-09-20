@@ -8,6 +8,7 @@ use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
     ReloadResponse,
 };
+use crate::error::ProgramError;
 use crate::manager::ManagerHandle;
 use crate::program::state::ProgramState;
 use axum::extract::{Path, Query, State};
@@ -194,11 +195,12 @@ async fn get_program_details(
 
     let status = match state.manager.get_status(&name).await {
         Ok(s) => s,
-        Err(_) => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::err(format!("Program '{}' not found", name))),
-            ));
+        Err(e) => {
+            let status_code = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return Ok((status_code, Json(ApiResponse::err(format!("{}", e)))));
         }
     };
 
@@ -253,7 +255,8 @@ async fn start_program(
     }
 
     // Synchronous mode: wait reactively until status settles into Running, Fatal, or Exited
-    let timeout_dur = Duration::from_secs(query.timeout);
+    let timeout_secs = query.timeout.min(86400);
+    let timeout_dur = Duration::from_secs(timeout_secs);
     let mut rx = state.manager.subscribe_events();
 
     // Check if process settled immediately
@@ -341,10 +344,37 @@ async fn stop_program(
     check_auth(&headers, &state.auth_token)?;
 
     let start_time = Instant::now();
-    let grace = Some(Duration::from_secs(query.timeout));
-    if let Err(e) = state.manager.stop_program(&name, grace).await {
+    let timeout_secs = query.timeout.min(86400);
+    let grace = Some(Duration::from_secs(timeout_secs));
+
+    if !query.sync {
+        let mgr = state.manager.clone();
+        let name_clone = name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mgr.stop_program(&name_clone, grace).await {
+                tracing::warn!("Async stop for '{}' failed or timed out: {}", name_clone, e);
+            }
+        });
+
         return Ok((
-            StatusCode::BAD_REQUEST,
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::ok(ActionResponse {
+                name,
+                state: ProgramState::Stopping,
+                pid: None,
+                description: "Stop requested".to_string(),
+                elapsed_ms: start_time.elapsed().as_millis() as u64,
+            })),
+        ));
+    }
+
+    if let Err(e) = state.manager.stop_program(&name, grace).await {
+        let status_code = match &e {
+            ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        return Ok((
+            status_code,
             Json(ApiResponse::err(format!("Stop failed: {}", e))),
         ));
     }
@@ -384,10 +414,41 @@ async fn restart_program(
     check_auth(&headers, &state.auth_token)?;
 
     let start_time = Instant::now();
-    let grace = Some(Duration::from_secs(query.timeout));
-    if let Err(e) = state.manager.restart_program(&name, grace).await {
+    let timeout_secs = query.timeout.min(86400);
+    let grace = Some(Duration::from_secs(timeout_secs));
+
+    if !query.sync {
+        let mgr = state.manager.clone();
+        let name_clone = name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mgr.restart_program(&name_clone, grace).await {
+                tracing::warn!(
+                    "Async restart for '{}' failed or timed out: {}",
+                    name_clone,
+                    e
+                );
+            }
+        });
+
         return Ok((
-            StatusCode::BAD_REQUEST,
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::ok(ActionResponse {
+                name,
+                state: ProgramState::Starting,
+                pid: None,
+                description: "Restart requested".to_string(),
+                elapsed_ms: start_time.elapsed().as_millis() as u64,
+            })),
+        ));
+    }
+
+    if let Err(e) = state.manager.restart_program(&name, grace).await {
+        let status_code = match &e {
+            ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        return Ok((
+            status_code,
             Json(ApiResponse::err(format!("Restart failed: {}", e))),
         ));
     }
@@ -552,10 +613,16 @@ async fn read_logs(
             StatusCode::OK,
             Json(ApiResponse::ok(LogLinesResponse { name, lines })),
         )),
-        Err(e) => Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::err(format!("Failed to read logs: {}", e))),
-        )),
+        Err(e) => {
+            let status = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            Ok((
+                status,
+                Json(ApiResponse::err(format!("Failed to read logs: {}", e))),
+            ))
+        }
     }
 }
 

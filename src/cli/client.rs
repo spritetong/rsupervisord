@@ -147,13 +147,7 @@ impl SupervisorClient {
         stream.flush().await?;
 
         let mut reader = BufReader::new(stream).lines();
-
-        // Consume headers until blank line
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.is_empty() || line == "\r" {
-                break;
-            }
-        }
+        check_sse_status_and_skip_headers(&mut reader).await?;
 
         // Stream event lines
         while let Ok(Some(line)) = reader.next_line().await {
@@ -195,12 +189,7 @@ impl SupervisorClient {
         stream.flush().await?;
 
         let mut reader = BufReader::new(stream).lines();
-
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.is_empty() || line == "\r" {
-                break;
-            }
-        }
+        check_sse_status_and_skip_headers(&mut reader).await?;
 
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
@@ -241,12 +230,7 @@ impl SupervisorClient {
         stream.flush().await?;
 
         let mut reader = BufReader::new(stream).lines();
-
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.is_empty() || line == "\r" {
-                break;
-            }
-        }
+        check_sse_status_and_skip_headers(&mut reader).await?;
 
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
@@ -365,6 +349,48 @@ fn parse_http_response(raw: &str) -> Result<(u16, &str)> {
         .unwrap_or(200);
 
     Ok((status_code, body_part.trim()))
+}
+
+/// Reads and verifies the HTTP status line of an SSE response stream, consuming headers up to the body.
+async fn check_sse_status_and_skip_headers<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut tokio::io::Lines<R>,
+) -> Result<()> {
+    let status_line = match reader.next_line().await? {
+        Some(line) => line,
+        None => bail!("Empty response received from daemon"),
+    };
+
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(200);
+
+    if status_code >= 400 {
+        let mut error_body = String::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if !line.trim().is_empty() {
+                error_body.push_str(&line);
+                error_body.push('\n');
+            }
+        }
+        if status_code == 401 || status_code == 403 {
+            bail!("Access denied ({}): {}", status_code, error_body.trim());
+        }
+        if status_code == 404 {
+            bail!("Resource not found (404): {}", error_body.trim());
+        }
+        bail!("HTTP error {}: {}", status_code, error_body.trim());
+    }
+
+    // Consume remaining headers until blank line
+    while let Ok(Some(line)) = reader.next_line().await {
+        if line.is_empty() || line == "\r" {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

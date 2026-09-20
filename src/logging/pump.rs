@@ -28,18 +28,18 @@ where
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            // Push to in-memory RingBuffer (for tail -f and web streaming) first
+            if let Some(ref prefix) = ring_prefix {
+                ring_buffer.push(format!("{}: {}", prefix, line));
+            } else {
+                ring_buffer.push(&line);
+            }
+
             // Broadcast to the central EventHub LogBus if configured
             if let Some(ref hub) = event_hub
                 && let Some(ref prog) = program_name
             {
                 hub.publish_log(LogEntry::new(prog, stream_name, &line));
-            }
-
-            // Push to in-memory RingBuffer (for tail -f and web streaming)
-            if let Some(ref prefix) = ring_prefix {
-                ring_buffer.push(format!("{}: {}", prefix, line));
-            } else {
-                ring_buffer.push(&line);
             }
 
             // Write raw line to file rotator if configured

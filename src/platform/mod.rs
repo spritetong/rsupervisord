@@ -28,16 +28,38 @@ pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
-        let mut sigint =
-            signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::error!("Failed to register SIGTERM handler: {}", e);
+                None
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::error!("Failed to register SIGINT handler: {}", e);
+                None
+            }
+        };
 
         tokio::select! {
-            _ = sigterm.recv() => {
+            _ = async {
+                if let Some(ref mut s) = sigterm {
+                    s.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 tracing::info!("Received SIGTERM, initiating graceful shutdown");
             }
-            _ = sigint.recv() => {
+            _ = async {
+                if let Some(ref mut s) = sigint {
+                    s.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
             }
         }

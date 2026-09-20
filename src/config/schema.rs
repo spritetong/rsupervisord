@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_uds_path")]
     pub uds_path: PathBuf,
@@ -36,6 +37,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -70,6 +72,7 @@ fn default_metrics_interval() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -103,6 +106,7 @@ impl Default for LoggingConfig {
 
 /// Global defaults template for programs (equivalent to legacy [program-default]).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProgramDefaults {
     #[serde(default)]
     pub autostart: Option<bool>,
@@ -125,6 +129,7 @@ pub struct ProgramDefaults {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgramConfigRaw {
     pub command: String,
     #[serde(default)]
@@ -162,6 +167,7 @@ pub struct ProgramConfigRaw {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SupervisorConfig {
     #[serde(default)]
     pub worker_threads: Option<usize>,
@@ -216,6 +222,16 @@ impl SupervisorConfig {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 99]",
                     name, priority
+                )));
+            }
+            let stop_wait = raw
+                .stop_wait_secs
+                .or(self.program_defaults.stop_wait_secs)
+                .unwrap_or(10);
+            if stop_wait > 86400 {
+                return Err(ProgramError::ConfigError(format!(
+                    "Program '{}' stop_wait_secs {} exceeds maximum 86400",
+                    name, stop_wait
                 )));
             }
         }
@@ -275,12 +291,12 @@ impl SupervisorConfig {
                 let def = self.program_defaults.logs.clone().unwrap_or_default();
                 if let Some(ref raw_logs) = raw.logs {
                     ProgramLogsConfig {
-                        enabled: raw_logs.enabled && def.enabled,
+                        enabled: raw_logs.enabled,
                         stdout: raw_logs.stdout.clone().or(def.stdout),
                         stderr: raw_logs.stderr.clone().or(def.stderr),
                         max_bytes: raw_logs.max_bytes.clone().or(def.max_bytes),
                         backups: raw_logs.backups.or(def.backups),
-                        redirect_stderr: raw_logs.redirect_stderr || def.redirect_stderr,
+                        redirect_stderr: raw_logs.redirect_stderr,
                     }
                 } else {
                     def
@@ -288,12 +304,16 @@ impl SupervisorConfig {
             };
 
             let (command, args) = if raw.args.is_empty() {
-                match shell_words::split(&raw.command) {
-                    Ok(mut parts) if !parts.is_empty() => {
-                        let cmd = parts.remove(0);
-                        (cmd, parts)
+                if std::path::Path::new(&raw.command).is_file() {
+                    (raw.command.clone(), Vec::new())
+                } else {
+                    match shell_words::split(&raw.command) {
+                        Ok(mut parts) if !parts.is_empty() => {
+                            let cmd = parts.remove(0);
+                            (cmd, parts)
+                        }
+                        _ => (raw.command.clone(), Vec::new()),
                     }
-                    _ => (raw.command.clone(), Vec::new()),
                 }
             } else {
                 (raw.command.clone(), raw.args.clone())
@@ -329,5 +349,65 @@ impl SupervisorConfig {
         }
 
         Ok(resolved)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deny_unknown_fields() {
+        let yaml_with_numprocs = r#"
+programs:
+  app:
+    command: "sleep 10"
+    numprocs: 4
+"#;
+        let res = SupervisorConfig::from_yaml_str(yaml_with_numprocs);
+        assert!(res.is_err(), "Expected error on unknown field 'numprocs'");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown field `numprocs`"),
+            "Expected unknown field error message, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_stop_signal_aliases() {
+        let yaml = r#"
+programs:
+  sig_test:
+    command: "echo test"
+    stop_signal: SIGTERM
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Failed to parse SIGTERM");
+        let resolved = config.resolve_programs().unwrap();
+        assert_eq!(resolved["sig_test"].stop_signal, StopSignal::Term);
+
+        let yaml_lower = r#"
+programs:
+  sig_test:
+    command: "echo test"
+    stop_signal: sigterm
+"#;
+        let config_lower =
+            SupervisorConfig::from_yaml_str(yaml_lower).expect("Failed to parse sigterm");
+        let resolved_lower = config_lower.resolve_programs().unwrap();
+        assert_eq!(resolved_lower["sig_test"].stop_signal, StopSignal::Term);
+    }
+
+    #[test]
+    fn test_stop_wait_secs_overflow_validation() {
+        let yaml = r#"
+programs:
+  app:
+    command: "echo test"
+    stop_wait_secs: 100000
+"#;
+        let res = SupervisorConfig::from_yaml_str(yaml);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("exceeds maximum"));
     }
 }

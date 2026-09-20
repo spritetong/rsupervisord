@@ -1878,9 +1878,10 @@
         }
 
         function getHealthBadgeClass(health) {
-          if (!health || health === 'Disabled' || health === '-') return 'badge-health-none';
-          if (health === 'Healthy') return 'badge-health-healthy';
-          if (health === 'Unhealthy') return 'badge-health-unhealthy';
+          const h = (health || '').toUpperCase();
+          if (!h || h === 'DISABLED' || h === '-' || h === 'NONE') return 'badge-health-none';
+          if (h === 'HEALTHY') return 'badge-health-healthy';
+          if (h === 'UNHEALTHY') return 'badge-health-unhealthy';
           return 'badge-starting';
         }
 

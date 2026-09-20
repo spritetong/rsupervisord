@@ -505,13 +505,13 @@ impl ManagerActor {
                         }
                         ManagerCommand::ReadLogs { name, lines, reply } => {
                             let res = self.programs.get(&name).map(|p| p.read_logs(lines)).ok_or_else(|| {
-                                ProgramError::ConfigError(format!("Program '{}' not registered", name))
+                                ProgramError::NotFound { name: name.clone() }
                             });
                             let _ = reply.send(res);
                         }
                         ManagerCommand::SubscribeLogs { name, reply } => {
                             let res = self.programs.get(&name).map(|p| p.subscribe_logs()).ok_or_else(|| {
-                                ProgramError::ConfigError(format!("Program '{}' not registered", name))
+                                ProgramError::NotFound { name: name.clone() }
                             });
                             let _ = reply.send(res);
                         }
@@ -539,9 +539,12 @@ impl ManagerActor {
     }
 
     async fn execute_start_program(&mut self, name: &str) -> Result<(), ProgramError> {
-        let prog = self.programs.get_mut(name).ok_or_else(|| {
-            ProgramError::ConfigError(format!("Program '{}' not registered", name))
-        })?;
+        let prog = self
+            .programs
+            .get_mut(name)
+            .ok_or_else(|| ProgramError::NotFound {
+                name: name.to_string(),
+            })?;
 
         prog.start().await
     }
@@ -558,9 +561,12 @@ impl ManagerActor {
             .unwrap_or(10);
         let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
 
-        let prog = self.programs.get_mut(name).ok_or_else(|| {
-            ProgramError::ConfigError(format!("Program '{}' not registered", name))
-        })?;
+        let prog = self
+            .programs
+            .get_mut(name)
+            .ok_or_else(|| ProgramError::NotFound {
+                name: name.to_string(),
+            })?;
 
         prog.stop(period).await
     }
@@ -577,9 +583,12 @@ impl ManagerActor {
             .unwrap_or(10);
         let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
 
-        let prog = self.programs.get_mut(name).ok_or_else(|| {
-            ProgramError::ConfigError(format!("Program '{}' not registered", name))
-        })?;
+        let prog = self
+            .programs
+            .get_mut(name)
+            .ok_or_else(|| ProgramError::NotFound {
+                name: name.to_string(),
+            })?;
 
         prog.restart(period).await
     }
@@ -594,8 +603,11 @@ impl ManagerActor {
                     && let Some(prog) = self.programs.get(name)
                     && prog.status().state.is_stopped_or_fatal()
                 {
+                    let prog_name = name.clone();
                     start_futs.push(async move {
-                        let _ = prog.start().await;
+                        if let Err(e) = prog.start().await {
+                            tracing::error!("Failed to autostart program '{}': {}", prog_name, e);
+                        }
                     });
                 }
             }
@@ -620,8 +632,11 @@ impl ManagerActor {
                 if let Some(prog) = self.programs.get(name)
                     && prog.status().state.is_active()
                 {
+                    let prog_name = name.clone();
                     stop_futs.push(async move {
-                        let _ = prog.stop(dur).await;
+                        if let Err(e) = prog.stop(dur).await {
+                            tracing::warn!("Failed to stop program '{}': {}", prog_name, e);
+                        }
                     });
                 }
             }
