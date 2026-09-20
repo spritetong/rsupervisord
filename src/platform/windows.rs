@@ -272,7 +272,8 @@ impl PlatformBackend for WindowsPlatformBackend {
     }
 
     fn default_uds_path(&self) -> PathBuf {
-        PathBuf::from("C:\\ProgramData\\rsupervisord\\rsupervisord.sock")
+        let cmd_name = crate::config::paths::get_cmd_name();
+        crate::config::paths::default_uds_path(&cmd_name, None)
     }
 
     fn is_elevated(&self) -> bool {

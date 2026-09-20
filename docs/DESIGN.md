@@ -713,6 +713,24 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 - Internal duration additions use `checked_add(Duration::from_secs(...)).unwrap_or(...)` instead of unchecked `+`, eliminating panic triggers in long-running supervisors.
 - Both synchronous and asynchronous control flows are supported uniformly across start, stop, and restart (`?sync=false` returns `202 Accepted`).
 
+### 15.12 Dynamic Command Naming & Default Path Conventions
+
+- **Dynamic `cmd_name` Derivation**:
+  Derives `cmd_name = <argv[0] basename without ext> replaces tailing "ctl" with "d"`.
+  When executed directly or via symlink (e.g. `myctl -> rsupervisord`), the process automatically detects whether it was invoked as a control tool (`stem.ends_with("ctl")`), routing to CLI execution with `cmd_name = "myd"`.
+- **Multi-Tier Configuration Search Order**:
+  When `-c / --config` is not explicitly provided, the supervisor searches for configuration files in priority order:
+  1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG`
+  2. `<executable path>/<cmd_name>.yaml` (and symlink parent directory)
+  3. `<executable path>/<cmd_name>/config.yaml`
+  4. OS-specific system path: Unix `/etc/<cmd_name>/config.yaml`, Windows None.
+- **Default Log Paths**:
+  - Windows: `<config dir>/logs/(<cmd_name>.log, <program1>.log ...)`
+  - Unix: `/var/log/<cmd_name>/(<cmd_name>.log, <program1>.log ...)`
+- **Default UDS Path**:
+  - Windows: `<config dir>/<cmd_name>.sock` (relocated from `C:\ProgramData` to `<config dir>` to eliminate Administrator elevation requirements).
+  - Unix: `/var/run/<cmd_name>.sock`.
+
 ---
 
 ## 16. Verification Matrix
@@ -721,10 +739,11 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 49/49 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 70 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
 | **Windows Native UDS** | Bind `AF_UNIX` via `uds_windows`; proxy through Caddy | Transparent HTTP proxying with zero open ports | ✅ Windows 11 Native UDS verified |
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 49/49 passed; Linux: 49/49 passed |
+| **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 70/70 passed; Linux: 69/69 passed |

@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 )]
 pub struct DaemonArgs {
     /// Path to YAML configuration file
-    #[arg(short = 'c', long = "config", default_value = "rsupervisord.yaml")]
-    pub config: PathBuf,
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<PathBuf>,
 
     /// Run daemon in the foreground (default: true)
     #[arg(short = 'n', long = "nodaemon")]
@@ -41,7 +41,12 @@ fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().collect();
     let bin_name = args.first().cloned().unwrap_or_default();
 
-    if bin_name.ends_with("rsupervisorctl") || bin_name.ends_with("rsupervisorctl.exe") {
+    let stem = std::path::Path::new(&bin_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+
+    if stem.to_ascii_lowercase().ends_with("ctl") {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -60,8 +65,15 @@ fn main() -> anyhow::Result<()> {
 
     let daemon_args = DaemonArgs::parse_from(args);
 
-    let file_threads = if daemon_args.config.exists() {
-        SupervisorConfig::from_file(&daemon_args.config)
+    let cmd_name = rsupervisord::config::paths::get_cmd_name();
+    let config_path = daemon_args.config.clone().unwrap_or_else(|| {
+        rsupervisord::config::paths::find_default_config_path(&cmd_name).unwrap_or_else(|| {
+            rsupervisord::config::paths::get_default_config_path_fallback(&cmd_name)
+        })
+    });
+
+    let file_threads = if config_path.exists() {
+        SupervisorConfig::from_file(&config_path)
             .ok()
             .and_then(|c| c.worker_threads.map(|w| w as u32))
     } else {
@@ -74,21 +86,21 @@ fn main() -> anyhow::Result<()> {
         .or(file_threads);
 
     let rt = build_tokio_runtime(worker_threads)?;
-    rt.block_on(run_daemon(daemon_args))
+    rt.block_on(run_daemon(daemon_args, config_path))
 }
 
-async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
-    if !args.config.exists() {
+async fn run_daemon(args: DaemonArgs, config_path: PathBuf) -> anyhow::Result<()> {
+    if !config_path.exists() {
         anyhow::bail!(
             "Configuration file not found: {:?}. Please specify a valid file using -c/--config.",
-            args.config
+            config_path
         );
     }
 
-    let config = match SupervisorConfig::from_file(&args.config) {
+    let config = match SupervisorConfig::from_file(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to load configuration from {:?}: {}", args.config, e);
+            eprintln!("Failed to load configuration from {:?}: {}", config_path, e);
             return Err(e.into());
         }
     };
@@ -153,8 +165,10 @@ async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
+    let cmd_name = rsupervisord::config::paths::get_cmd_name();
     tracing::info!(
-        "Starting rsupervisord v{} (elevated: {})",
+        "Starting {} v{} (elevated: {})",
+        cmd_name,
         env!("CARGO_PKG_VERSION"),
         rsupervisord::platform::native_platform().is_elevated()
     );
@@ -173,7 +187,7 @@ async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
 
     // Spawn server engine
     let cancel_token = CancellationToken::new();
-    let server = ServerEngine::new(manager_handle, Some(args.config.clone()), config.server);
+    let server = ServerEngine::new(manager_handle, Some(config_path), config.server);
     let server_token = cancel_token.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server.run(server_token).await {
@@ -200,7 +214,7 @@ async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         tracing::error!("Error shutting down manager: {}", e);
     }
 
-    tracing::info!("rsupervisord shutdown cleanly");
+    tracing::info!("{} shutdown cleanly", cmd_name);
     Ok(())
 }
 

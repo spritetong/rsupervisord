@@ -30,9 +30,13 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
     // Determine target daemon endpoint
     let endpoint = if let Some(ref s) = args.server {
         Endpoint::parse(s)
-    } else if let Some(ref cfg_path) = args.config {
-        if let Ok(content) = std::fs::read_to_string(cfg_path)
-            && let Ok(cfg) = crate::config::SupervisorConfig::from_yaml_str(&content)
+    } else {
+        let cmd_name = crate::config::paths::get_cmd_name();
+        let cfg_path = args
+            .config
+            .or_else(|| crate::config::paths::find_default_config_path(&cmd_name));
+        if let Some(ref path) = cfg_path
+            && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
         {
             if let Some(ref http) = cfg.server.http_bind {
                 Endpoint::parse(http)
@@ -42,8 +46,6 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         } else {
             Endpoint::default_local()
         }
-    } else {
-        Endpoint::default_local()
     };
 
     let client = SupervisorClient::new(endpoint, args.auth_token);

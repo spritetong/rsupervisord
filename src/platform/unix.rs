@@ -205,7 +205,8 @@ impl PlatformBackend for UnixPlatformBackend {
     }
 
     fn default_uds_path(&self) -> PathBuf {
-        PathBuf::from("/var/run/rsupervisord.sock")
+        let cmd_name = crate::config::paths::get_cmd_name();
+        crate::config::paths::default_uds_path(&cmd_name, None)
     }
 
     fn is_elevated(&self) -> bool {

@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]
-[![Tests](https://img.shields.io/badge/Tests-49%2F49%20Passing-brightgreen.svg)]
+[![Tests](https://img.shields.io/badge/Tests-70%2F70%20Passing-brightgreen.svg)]
 
 **rsupervisord** is a modern, high-performance, asynchronous process orchestration and monitoring daemon engine written in Rust.
 
@@ -140,10 +140,36 @@ programs:
 
 See [config-example.yaml](config-example.yaml) for full configuration parameters.
 
-### 3. Running the Daemon
+### 3. Running the Daemon & Dynamic Path Conventions
+
+`rsupervisord` dynamically derives `cmd_name` from `argv[0]` by taking the basename without extension and replacing trailing `ctl` with `d`. If invoked via a symlink ending in `ctl` (e.g. `ln -s rsupervisord myctl`), it automatically executes in CLI mode with `cmd_name = "myd"`.
+
+#### Configuration File Search Order
+When `-c / --config` is not explicitly specified on the command line, the daemon searches for the first existing configuration file in this order:
+1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG` (e.g. `RSUPERVISORD_CONFIG`, `MYD_CONFIG`)
+2. `<executable path>/<cmd_name>.yaml` (and symlink parent directory)
+3. `<executable path>/<cmd_name>/config.yaml`
+4. OS-specific system path:
+   - **Unix**: `/etc/<cmd_name>/config.yaml`
+   - **Windows**: None
+
+#### Default Log Paths
+- **Daemon Log** (when `logging.file` is omitted):
+  - **Windows**: `<config dir>/logs/<cmd_name>.log`
+  - **Unix**: `/var/log/<cmd_name>/<cmd_name>.log`
+- **Supervised Programs** (when `logs.stdout` is omitted):
+  - **Windows**: `<config dir>/logs/<program_name>.log`
+  - **Unix**: `/var/log/<cmd_name>/<program_name>.log`
+
+#### Default UDS (`.sock`) Path
+- **Windows**: `<config dir>/<cmd_name>.sock` (unprivileged, works without Administrator elevation)
+- **Unix**: `/var/run/<cmd_name>.sock`
 
 ```bash
-# Run daemon with configuration
+# Run daemon (auto-detects configuration file)
+./target/release/rsupervisord
+
+# Run daemon with explicit configuration
 ./target/release/rsupervisord -c config.yaml
 
 # Run with single-threaded event loop (ultra-lightweight)

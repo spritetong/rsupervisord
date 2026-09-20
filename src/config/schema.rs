@@ -23,7 +23,8 @@ pub struct ServerConfig {
 }
 
 fn default_uds_path() -> PathBuf {
-    crate::platform::native_platform().default_uds_path()
+    let cmd_name = crate::config::paths::get_cmd_name();
+    crate::config::paths::default_uds_path(&cmd_name, None)
 }
 
 impl Default for ServerConfig {
@@ -184,7 +185,7 @@ pub struct ProgramConfigRaw {
     pub health_check: Option<HealthCheckConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorConfig {
     #[serde(default)]
@@ -199,29 +200,78 @@ pub struct SupervisorConfig {
     pub program_defaults: ProgramDefaults,
     #[serde(default)]
     pub programs: HashMap<String, ProgramConfigRaw>,
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        let mut config = Self {
+            worker_threads: None,
+            server: ServerConfig::default(),
+            logging: LoggingConfig::default(),
+            metrics: MetricsConfig::default(),
+            program_defaults: ProgramDefaults::default(),
+            programs: HashMap::new(),
+            config_dir: None,
+        };
+        config.apply_default_paths();
+        config
+    }
 }
 
 impl SupervisorConfig {
-    /// Loads and parses a SupervisorConfig from a YAML file.
+    /// Loads and parses a SupervisorConfig from a YAML file, storing its directory for default path resolution.
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ProgramError> {
-        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+        let path_ref = path.as_ref();
+        let content = std::fs::read_to_string(path_ref).map_err(|e| {
             ProgramError::ConfigError(format!(
                 "Failed to read config file '{:?}': {}",
-                path.as_ref(),
-                e
+                path_ref, e
             ))
         })?;
-        Self::from_yaml_str(&content)
+        let config_dir = path_ref.parent().map(|p| {
+            if p.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                p.to_path_buf()
+            }
+        });
+        Self::from_yaml_str_with_config_dir(&content, config_dir.as_deref())
     }
 
     pub fn from_yaml_str(yaml_content: &str) -> Result<Self, ProgramError> {
+        Self::from_yaml_str_with_config_dir(yaml_content, None)
+    }
+
+    pub fn from_yaml_str_with_config_dir(
+        yaml_content: &str,
+        config_dir: Option<&std::path::Path>,
+    ) -> Result<Self, ProgramError> {
         // Expand environment variables first
         let expanded = crate::config::expand::expand_env_vars(yaml_content);
-        let config: Self = serde_yaml::from_str(&expanded).map_err(|e| {
+        let mut config: Self = serde_yaml::from_str(&expanded).map_err(|e| {
             ProgramError::ConfigError(format!("Failed to parse YAML configuration: {}", e))
         })?;
+        config.config_dir = config_dir.map(|p| p.to_path_buf());
+        config.apply_default_paths();
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn apply_default_paths(&mut self) {
+        let cmd_name = crate::config::paths::get_cmd_name();
+        let default_no_dir = crate::config::paths::default_uds_path(&cmd_name, None);
+        if self.server.uds_path.as_os_str().is_empty() || self.server.uds_path == default_no_dir {
+            self.server.uds_path =
+                crate::config::paths::default_uds_path(&cmd_name, self.config_dir.as_deref());
+        }
+        if self.logging.enabled && self.logging.file.is_none() {
+            self.logging.file = Some(crate::config::paths::default_daemon_log_path(
+                &cmd_name,
+                self.config_dir.as_deref(),
+            ));
+        }
     }
 
     pub fn validate(&self) -> Result<(), ProgramError> {
@@ -314,9 +364,21 @@ impl SupervisorConfig {
                     .or_else(|| def_logs.and_then(|l| l.enabled))
                     .unwrap_or(true);
 
+                let cmd_name = crate::config::paths::get_cmd_name();
                 let stdout = raw_logs
                     .and_then(|l| l.stdout.clone())
-                    .or_else(|| def_logs.and_then(|l| l.stdout.clone()));
+                    .or_else(|| def_logs.and_then(|l| l.stdout.clone()))
+                    .or_else(|| {
+                        if enabled {
+                            Some(crate::config::paths::default_program_log_path(
+                                &cmd_name,
+                                name,
+                                self.config_dir.as_deref(),
+                            ))
+                        } else {
+                            None
+                        }
+                    });
 
                 let stderr = raw_logs
                     .and_then(|l| l.stderr.clone())
@@ -484,5 +546,6 @@ programs:
         let override_logs = &resolved["app_override"].logs;
         assert!(override_logs.enabled);
         assert!(!override_logs.redirect_stderr);
+        assert!(override_logs.stdout.is_some());
     }
 }

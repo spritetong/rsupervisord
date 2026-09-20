@@ -5,6 +5,7 @@
 
 pub mod diff;
 pub mod expand;
+pub mod paths;
 pub mod schema;
 
 pub use diff::ConfigDiff;
