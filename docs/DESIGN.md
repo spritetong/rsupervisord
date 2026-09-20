@@ -16,8 +16,9 @@ To fundamentally eliminate high CPU consumption, orphan process leaks, lock cont
    - **Deadlock Elimination**: Synchronous Request-Response interactions follow strict hierarchical one-way messaging with timeout circuit breakers, completely preventing circular wait deadlocks.
 2. **Explicit JoinHandle Lifecycle Tracking**:
    - Detached asynchronous tasks are strictly forbidden. Every task spawned with `tokio::spawn` must have its `JoinHandle` explicitly retained by its supervisor, ensuring deterministic tracking, graceful draining, and clean destruction during stop or reload phases.
-3. **Zero-Abort & Cooperative Cancellation (`CancellationToken`)**:
-   - **Calling `JoinHandle::abort()` is strictly prohibited**. Cooperative cancellation is managed via `tokio_util::sync::CancellationToken`, giving process control blocks, OS handles (Windows Job Objects, Unix pipes), and log buffers a deterministic window to flush and release resources safely.
+3. **Cooperative Cancellation (`CancellationToken`) & Bounded Drain Guard**:
+   - Cooperative cancellation is governed by `tokio_util::sync::CancellationToken`, giving process control blocks, OS handles, and log buffers a deterministic window to flush and release resources safely.
+   - For log pipe draining after process termination, a hard 2-second timeout guard prevents rogue grandchild processes inheriting standard descriptors from deadlocking the supervisor, aborting stalled pumps only as an ultimate fallback.
 4. **Uniform Parking Lot Primitives**:
    - `std::sync::{Mutex, RwLock, Condvar}` are banned throughout the codebase in favor of high-performance `parking_lot` primitives.
    - Synchronization locks are restricted to instantaneous in-memory mutations; **holding any synchronous lock across an `.await` point is strictly prohibited**.
@@ -472,8 +473,8 @@ flowchart TD
 ### 7.2 POSIX (Linux / BSD) Platform: Process Groups & Subreaper
 
 - **Process Groups**: Calls `setpgid(0, 0)` in `pre_exec` to isolate child process groups, delivering signals via `killpg(pgid, signal)`.
-- **Subreaper Support**: Activates `PR_SET_CHILD_SUBREAPER` on Linux so orphaned grandchildren are re-parented to `rsupervisord` and cleanly reaped in a `waitpid` loop.
-- **De-escalation**: Invokes `setgid` and `setuid` in `pre_exec` before executing the target binary.
+- **Subreaper Activation**: Configures Linux `PR_SET_CHILD_SUBREAPER` on startup so double-forked daemons and orphaned background grandchildren are adopted directly by `rsupervisord` rather than PID 1.
+- **Fork-Safe Privilege De-escalation**: Resolves user and group IDs via NSS lookups (`getpwnam_r`, `getgrnam_r`) in the parent process prior to fork. The `pre_exec` hook executes exclusively async-signal-safe primitives (`setpgid`, `umask`, `setgid`, `setuid`) with pre-resolved integer IDs, avoiding deadlock risks from glibc internal locks or allocations post-fork.
 
 ---
 
@@ -489,7 +490,9 @@ flowchart LR
 
 1. **Zero-Polling I/O**: Reads lines asynchronously via `BufReader::lines()`, sleeping with 0% CPU consumption when no output is produced.
 2. **Rotating Storage (`file-rotate`)**: Automatically rotates based on size (`max_bytes`) or schedule (`rotate: daily`), retaining `backups` historical archives.
-3. **RingBuffer**: Bounded circular buffer (`parking_lot::Mutex<VecDeque<String>>`) allowing instant replay upon `rsupervisorctl tail -f` or Web UI log drawer opening.
+3. **Persistent LogRotators**: Rotator instances are created once per configured program actor and shared across child process generations, preserving sequential log rotation and avoiding reopening files or losing sequence on process restarts.
+4. **High-Throughput Buffering**: Log lines are appended to the rotation writer without synchronous per-line flush calls, maximizing I/O throughput while guaranteeing explicit flushes on stream EOF and process exit.
+5. **RingBuffer**: Bounded circular buffer (`parking_lot::Mutex<VecDeque<String>>`) allowing instant replay upon `rsupervisorctl tail -f` or Web UI log drawer opening.
 
 ---
 

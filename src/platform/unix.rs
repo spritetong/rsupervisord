@@ -161,8 +161,13 @@ impl PlatformBackend for UnixPlatformBackend {
         user: Option<&str>,
         umask: Option<u32>,
     ) -> Result<(), ProgramError> {
+        let parsed_ids = if let Some(user_spec) = user {
+            Some(parse_user_spec(user_spec)?)
+        } else {
+            None
+        };
+
         unsafe {
-            let user_owned = user.map(|s| s.to_string());
             cmd.pre_exec(move || {
                 // 1. Establish independent process group
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
@@ -174,10 +179,7 @@ impl PlatformBackend for UnixPlatformBackend {
                 }
 
                 // 3. Drop privileges if user specified
-                if let Some(ref user_spec) = user_owned {
-                    let (uid, gid) = parse_user_spec(user_spec)
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
+                if let Some((uid, gid)) = parsed_ids {
                     if let Some(g) = gid {
                         nix::unistd::setgid(g).map_err(std::io::Error::other)?;
                     }

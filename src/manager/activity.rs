@@ -5,14 +5,28 @@
 
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// RAII guard representing an active client stream (e.g. SSE).
+/// While any stream guard is alive, metrics sampling remains active.
+#[derive(Debug)]
+pub struct SseStreamGuard(Arc<AtomicUsize>);
+
+impl Drop for SseStreamGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Tracks client activity (CLI, REST API, Web UI) to auto-pause background
 /// resource utilization metrics (CPU/MEM) collection when no clients are observing.
 #[derive(Debug, Clone)]
 pub struct ActivityTracker {
     last_activity: Arc<RwLock<Instant>>,
+    active_observers: Arc<AtomicUsize>,
     idle_timeout_secs: u64,
+    interval_secs: u64,
     enabled: bool,
 }
 
@@ -21,9 +35,16 @@ impl ActivityTracker {
     /// If `idle_timeout_secs` is 0, the tracker is always active (never times out).
     /// If `enabled` is false, metrics collection is globally disabled.
     pub fn new(idle_timeout_secs: u64, enabled: bool) -> Self {
+        Self::with_interval(idle_timeout_secs, 2, enabled)
+    }
+
+    /// Creates an ActivityTracker with custom sampling interval in seconds.
+    pub fn with_interval(idle_timeout_secs: u64, interval_secs: u64, enabled: bool) -> Self {
         Self {
             last_activity: Arc::new(RwLock::new(Instant::now())),
+            active_observers: Arc::new(AtomicUsize::new(0)),
             idle_timeout_secs,
+            interval_secs: interval_secs.max(1),
             enabled,
         }
     }
@@ -33,15 +54,30 @@ impl ActivityTracker {
         *self.last_activity.write() = Instant::now();
     }
 
+    /// Enters an active SSE stream session, returning a RAII guard that keeps metrics active.
+    pub fn enter_stream(&self) -> SseStreamGuard {
+        self.active_observers.fetch_add(1, Ordering::SeqCst);
+        self.record_activity();
+        SseStreamGuard(self.active_observers.clone())
+    }
+
     /// Checks whether metrics collection should be active right now.
     pub fn is_metrics_active(&self) -> bool {
         if !self.enabled {
             return false;
         }
+        if self.active_observers.load(Ordering::Relaxed) > 0 {
+            return true;
+        }
         if self.idle_timeout_secs == 0 {
             return true;
         }
         self.last_activity.read().elapsed() < Duration::from_secs(self.idle_timeout_secs)
+    }
+
+    /// Returns the configured metrics sampling interval in seconds.
+    pub fn interval_secs(&self) -> u64 {
+        self.interval_secs
     }
 
     /// Returns the configured idle timeout in seconds.
@@ -57,6 +93,6 @@ impl ActivityTracker {
 
 impl Default for ActivityTracker {
     fn default() -> Self {
-        Self::new(30, true)
+        Self::with_interval(30, 2, true)
     }
 }

@@ -127,19 +127,30 @@ impl ProcessProgram {
 
         let name = &self.config.name;
         let timeout_future = tokio::time::timeout(timeout_dur, async {
-            while let Ok(event) = rx.recv().await {
-                if let crate::manager::SystemEvent::StateChanged {
-                    name: ref evt_name,
-                    new_state,
-                    ..
-                } = event
-                    && evt_name == name
-                    && new_state == target
-                {
-                    return Ok(());
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let crate::manager::SystemEvent::StateChanged {
+                            name: ref evt_name,
+                            new_state,
+                            ..
+                        } = event
+                            && evt_name == name
+                            && new_state == target
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if self.status().state == target {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(ProgramError::ChannelClosed { name: name.clone() });
+                    }
                 }
             }
-            Err(ProgramError::ChannelClosed { name: name.clone() })
         });
 
         match timeout_future.await {
@@ -176,7 +187,7 @@ impl Program for ProcessProgram {
         status
     }
 
-    async fn start(&mut self) -> Result<(), ProgramError> {
+    async fn start(&self) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ProgramCommand::Start { reply: reply_tx })
@@ -197,7 +208,7 @@ impl Program for ProcessProgram {
             })?
     }
 
-    async fn stop(&mut self, grace_period: Duration) -> Result<(), ProgramError> {
+    async fn stop(&self, grace_period: Duration) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ProgramCommand::Stop {
@@ -221,7 +232,7 @@ impl Program for ProcessProgram {
             })?
     }
 
-    async fn restart(&mut self, grace_period: Duration) -> Result<(), ProgramError> {
+    async fn restart(&self, grace_period: Duration) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ProgramCommand::Restart {
@@ -277,14 +288,39 @@ struct RunningChild {
 impl RunningChild {
     async fn drain_pumps(&mut self) {
         self.cancel_token.cancel();
-        if let Some(handle) = self.health_task.take() {
-            let _ = handle.await;
-        }
-        if let Some(handle) = self.stdout_pump.take() {
-            let _ = handle.await;
-        }
-        if let Some(handle) = self.stderr_pump.take() {
-            let _ = handle.await;
+        let health = self.health_task.take();
+        let out = self.stdout_pump.take();
+        let err = self.stderr_pump.take();
+
+        let health_abort = health.as_ref().map(|h| h.abort_handle());
+        let out_abort = out.as_ref().map(|h| h.abort_handle());
+        let err_abort = err.as_ref().map(|h| h.abort_handle());
+
+        let hard_deadline = tokio::time::timeout(Duration::from_secs(2), async {
+            if let Some(h) = health {
+                let _ = h.await;
+            }
+            if let Some(h) = out {
+                let _ = h.await;
+            }
+            if let Some(h) = err {
+                let _ = h.await;
+            }
+        });
+
+        if hard_deadline.await.is_err() {
+            tracing::warn!(
+                "Log pump drain timed out (inherited pipe by grandchild?); aborting pumps"
+            );
+            if let Some(ref a) = health_abort {
+                a.abort();
+            }
+            if let Some(ref a) = out_abort {
+                a.abort();
+            }
+            if let Some(ref a) = err_abort {
+                a.abort();
+            }
         }
     }
 }
@@ -303,6 +339,9 @@ struct ProgramActor {
     current_child: Option<RunningChild>,
     retry_count: u32,
     manual_stop: bool,
+    backoff_deadline: Option<tokio::time::Instant>,
+    stdout_rotator: Option<crate::logging::LogRotator>,
+    stderr_rotator: Option<crate::logging::LogRotator>,
 }
 
 impl ProgramActor {
@@ -318,6 +357,37 @@ impl ProgramActor {
         cancel_token: CancellationToken,
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
+
+        let max_bytes = match &config.logs.max_bytes {
+            Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
+            None => 20 * 1024 * 1024,
+        };
+        let backups = config.logs.backups.unwrap_or(3);
+        let stdout_disabled = config.logs.is_stdout_disabled();
+        let stderr_disabled = config.logs.is_stderr_disabled();
+
+        let stdout_rotator = if !stdout_disabled {
+            if let Some(ref path) = config.logs.stdout {
+                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let stderr_rotator = if !stderr_disabled {
+            if config.logs.redirect_stderr {
+                stdout_rotator.clone()
+            } else if let Some(ref path) = config.logs.stderr {
+                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             command_rx,
@@ -332,13 +402,17 @@ impl ProgramActor {
             current_child: None,
             retry_count: 0,
             manual_stop: false,
+            backoff_deadline: None,
+            stdout_rotator,
+            stderr_rotator,
         }
     }
 
     async fn run(mut self) {
         let has_health_check = self.config.health_check.is_some();
         let mut start_deadline: Option<tokio::time::Instant> = None;
-        let mut metrics_interval = tokio::time::interval(Duration::from_secs(2));
+        let mut metrics_interval =
+            tokio::time::interval(Duration::from_secs(self.activity_tracker.interval_secs()));
         metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -352,6 +426,20 @@ impl ProgramActor {
                 _ = self.cancel_token.cancelled() => {
                     self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
                     break;
+                }
+
+                Some(cmd) = self.command_rx.recv() => {
+                    let was_running = self.current_child.is_some();
+                    self.handle_command(cmd).await;
+                    if !was_running && self.current_child.is_some() {
+                        if self.config.start_secs > 0 {
+                            start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                        } else {
+                            start_deadline = None;
+                        }
+                    } else if self.current_child.is_none() {
+                        start_deadline = None;
+                    }
                 }
 
                 Some(health_event) = self.health_rx.recv(), if has_child && has_health_check => {
@@ -397,9 +485,42 @@ impl ProgramActor {
                                     "Program health check failed consecutively; restarting child process"
                                 );
                                 self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
-                                let _ = self.spawn_child().await;
+                                if let Err(e) = self.spawn_child().await {
+                                    tracing::error!(program = %self.config.name, error = %e, "Failed to restart child after health check failure");
+                                    start_deadline = None;
+                                    self.update_status(
+                                        ProgramState::Fatal,
+                                        None,
+                                        None,
+                                        format!("Health check restart failed: {}", e),
+                                    );
+                                } else if self.config.start_secs > 0 {
+                                    start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                                } else {
+                                    start_deadline = None;
+                                }
                             }
                         }
+                    }
+                }
+
+                _ = async {
+                    match self.backoff_deadline {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.backoff_deadline.is_some() => {
+                    self.backoff_deadline = None;
+                    if let Err(e) = self.spawn_child().await {
+                        tracing::error!(program = %self.config.name, error = %e, "Failed to spawn child after backoff");
+                        self.update_status(
+                            ProgramState::Fatal,
+                            None,
+                            None,
+                            format!("Spawn failed after backoff: {}", e),
+                        );
+                    } else if self.config.start_secs > 0 {
+                        start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
                     }
                 }
 
@@ -409,20 +530,6 @@ impl ProgramActor {
                     {
                         let mut snapshot = self.status_snapshot.write();
                         snapshot.metrics = Some(m);
-                    }
-                }
-
-                Some(cmd) = self.command_rx.recv() => {
-                    let was_running = self.current_child.is_some();
-                    self.handle_command(cmd).await;
-                    if !was_running && self.current_child.is_some() {
-                        if self.config.start_secs > 0 {
-                            start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
-                        } else {
-                            start_deadline = None;
-                        }
-                    } else if self.current_child.is_none() {
-                        start_deadline = None;
                     }
                 }
 
@@ -462,6 +569,8 @@ impl ProgramActor {
     async fn handle_command(&mut self, cmd: ProgramCommand) {
         match cmd {
             ProgramCommand::Start { reply } => {
+                self.retry_count = 0;
+                self.backoff_deadline = None;
                 let res = self.spawn_child().await;
                 let _ = reply.send(res);
             }
@@ -470,6 +579,7 @@ impl ProgramActor {
                 reply,
             } => {
                 self.manual_stop = true;
+                self.backoff_deadline = None;
                 self.stop_current_child(grace_period).await;
                 let _ = reply.send(Ok(()));
             }
@@ -478,6 +588,8 @@ impl ProgramActor {
                 reply,
             } => {
                 self.manual_stop = true;
+                self.retry_count = 0;
+                self.backoff_deadline = None;
                 self.stop_current_child(grace_period).await;
                 self.manual_stop = false;
                 let res = self.spawn_child().await;
@@ -485,6 +597,7 @@ impl ProgramActor {
             }
             ProgramCommand::Shutdown { reply } => {
                 self.manual_stop = true;
+                self.backoff_deadline = None;
                 self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs))
                     .await;
                 let _ = reply.send(Ok(()));
@@ -494,11 +607,24 @@ impl ProgramActor {
     }
 
     async fn spawn_child(&mut self) -> Result<(), ProgramError> {
-        if let Some(ref child) = self.current_child {
-            return Err(ProgramError::AlreadyRunning {
-                name: self.config.name.clone(),
-                pid: child.pid,
-            });
+        if let Some(ref mut child) = self.current_child {
+            match child.child.try_wait() {
+                Ok(Some(_status)) => {
+                    tracing::warn!(
+                        program = %self.config.name,
+                        pid = child.pid,
+                        "Previous child process already terminated; cleaning up before new spawn"
+                    );
+                    child.drain_pumps().await;
+                    self.current_child = None;
+                }
+                _ => {
+                    return Err(ProgramError::AlreadyRunning {
+                        name: self.config.name.clone(),
+                        pid: child.pid,
+                    });
+                }
+            }
         }
 
         self.manual_stop = false;
@@ -513,6 +639,8 @@ impl ProgramActor {
         for (k, v) in &self.config.environment {
             cmd.env(k, v);
         }
+
+        cmd.stdin(std::process::Stdio::null());
 
         let stdout_disabled = self.config.logs.is_stdout_disabled();
         let stderr_disabled = self.config.logs.is_stderr_disabled();
@@ -554,40 +682,12 @@ impl ProgramActor {
         // Attach platform-specific process guard
         let platform_guard = platform.attach_child(&child_guard, pid)?;
 
-        let max_bytes = match &self.config.logs.max_bytes {
-            Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
-            None => 20 * 1024 * 1024,
-        };
-        let backups = self.config.logs.backups.unwrap_or(3);
-
-        let stdout_rotator = if !stdout_disabled {
-            if let Some(ref path) = self.config.logs.stdout {
-                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let stderr_rotator = if !stderr_disabled {
-            if self.config.logs.redirect_stderr {
-                stdout_rotator.clone()
-            } else if let Some(ref path) = self.config.logs.stderr {
-                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let stdout_pump = if !stdout_disabled {
             stdout.map(|pipe| {
                 crate::logging::spawn_log_pump(
                     pipe,
                     self.ring_buffer.clone(),
-                    stdout_rotator,
+                    self.stdout_rotator.clone(),
                     None,
                     Some(self.event_hub.clone()),
                     Some(self.config.name.clone()),
@@ -609,7 +709,7 @@ impl ProgramActor {
                 crate::logging::spawn_log_pump(
                     pipe,
                     self.ring_buffer.clone(),
-                    stderr_rotator,
+                    self.stderr_rotator.clone(),
                     stderr_prefix,
                     Some(self.event_hub.clone()),
                     Some(self.config.name.clone()),
@@ -707,11 +807,15 @@ impl ProgramActor {
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
-                    let _ = child_info
-                        .platform_guard
-                        .wait_exit(&mut child_info.child)
-                        .await;
-                    None
+                    let post_kill_wait = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        child_info.platform_guard.wait_exit(&mut child_info.child),
+                    )
+                    .await;
+                    match post_kill_wait {
+                        Ok(Ok(status)) => status.code(),
+                        _ => None,
+                    }
                 }
             };
 
@@ -782,9 +886,7 @@ impl ProgramActor {
         if !marked_running {
             // Process crashed during the start_secs window: treated as startup failure
             self.retry_count += 1;
-            if self.retry_count <= self.config.start_retries
-                && self.config.autorestart != AutoRestartPolicy::Never
-            {
+            if self.retry_count <= self.config.start_retries {
                 self.update_status(
                     ProgramState::Backoff,
                     pid,
@@ -795,12 +897,9 @@ impl ProgramActor {
                     ),
                 );
                 let backoff_secs = 2u64.pow(self.retry_count.min(5));
-                tokio::select! {
-                    _ = self.cancel_token.cancelled() => false,
-                    _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {
-                        self.spawn_child().await.is_ok()
-                    }
-                }
+                self.backoff_deadline =
+                    Some(tokio::time::Instant::now() + Duration::from_secs(backoff_secs));
+                false
             } else {
                 self.update_status(
                     ProgramState::Fatal,
@@ -823,7 +922,22 @@ impl ProgramActor {
                         exit_code,
                         "Autorestarting (policy: always)".to_string(),
                     );
-                    self.spawn_child().await.is_ok()
+                    if let Err(e) = self.spawn_child().await {
+                        tracing::error!(
+                            program = %self.config.name,
+                            error = %e,
+                            "Failed to autorestart child process"
+                        );
+                        self.update_status(
+                            ProgramState::Fatal,
+                            None,
+                            exit_code,
+                            format!("Autorestart spawn failed: {}", e),
+                        );
+                        false
+                    } else {
+                        true
+                    }
                 }
                 AutoRestartPolicy::Unexpected => {
                     if !is_expected {
@@ -833,7 +947,22 @@ impl ProgramActor {
                             exit_code,
                             format!("Unexpected exit with code {:?}, autorestarting", exit_code),
                         );
-                        self.spawn_child().await.is_ok()
+                        if let Err(e) = self.spawn_child().await {
+                            tracing::error!(
+                                program = %self.config.name,
+                                error = %e,
+                                "Failed to autorestart child process"
+                            );
+                            self.update_status(
+                                ProgramState::Fatal,
+                                None,
+                                exit_code,
+                                format!("Autorestart spawn failed: {}", e),
+                            );
+                            false
+                        } else {
+                            true
+                        }
                     } else {
                         self.update_status(
                             ProgramState::Exited,

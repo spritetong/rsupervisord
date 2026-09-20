@@ -86,7 +86,7 @@ async fn test_process_stdout_capture_into_ring_buffer() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = 0;
 
-    let mut program = ProcessProgram::new(config).unwrap();
+    let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
 
     // Give process a brief moment to finish outputting
@@ -147,7 +147,7 @@ async fn test_process_stdout_file_logging_and_rotation() {
         redirect_stderr: true,
     };
 
-    let mut program = ProcessProgram::new(config).unwrap();
+    let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -181,7 +181,7 @@ async fn test_process_live_log_subscription() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = 0;
 
-    let mut program = ProcessProgram::new(config).unwrap();
+    let program = ProcessProgram::new(config).unwrap();
     let mut rx = program.subscribe_logs();
 
     program.start().await.unwrap();

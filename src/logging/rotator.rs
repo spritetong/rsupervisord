@@ -93,11 +93,10 @@ impl LogRotator {
         })
     }
 
-    /// Writes a line of text to the rotating log file and flushes it immediately.
+    /// Writes a line of text to the rotating log file.
     pub fn write_line(&self, line: &str) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        writeln!(guard, "{}", line)?;
-        guard.flush()
+        writeln!(guard, "{}", line)
     }
 
     /// Flushes any buffered content to disk.

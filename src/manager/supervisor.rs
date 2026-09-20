@@ -385,8 +385,9 @@ impl SupervisorManager {
         let programs_map = initial_config.resolve_programs()?;
         let dag = DependencyGraph::build(&programs_map)?;
 
-        let activity_tracker = crate::manager::ActivityTracker::new(
+        let activity_tracker = crate::manager::ActivityTracker::with_interval(
             initial_config.metrics.idle_timeout_secs,
+            initial_config.metrics.interval_secs,
             initial_config.metrics.enabled,
         );
         let event_hub = crate::manager::EventHub::default();
@@ -586,22 +587,29 @@ impl ManagerActor {
     /// Starts all programs in layers according to the DAG topology (concurrently within each layer).
     async fn execute_start_all(&mut self) -> Result<(), ProgramError> {
         for layer in &self.dag.start_layers {
+            let mut start_futs = Vec::new();
             for name in layer {
                 let should_start = self.configs.get(name).map(|c| c.autostart).unwrap_or(false);
                 if should_start
-                    && let Some(prog) = self.programs.get_mut(name)
+                    && let Some(prog) = self.programs.get(name)
                     && prog.status().state.is_stopped_or_fatal()
                 {
-                    let _ = prog.start().await;
+                    start_futs.push(async move {
+                        let _ = prog.start().await;
+                    });
                 }
+            }
+            if !start_futs.is_empty() {
+                futures_util::future::join_all(start_futs).await;
             }
         }
         Ok(())
     }
 
-    /// Gracefully stops all programs in reverse topological order.
+    /// Gracefully stops all programs in reverse topological order (concurrently within each layer).
     async fn execute_stop_all(&mut self, grace_period: Option<Duration>) {
         for layer in &self.dag.stop_layers {
+            let mut stop_futs = Vec::new();
             for name in layer {
                 let wait_secs = self
                     .configs
@@ -609,11 +617,16 @@ impl ManagerActor {
                     .map(|c| c.stop_wait_secs)
                     .unwrap_or(5);
                 let dur = grace_period.unwrap_or_else(|| Duration::from_secs(wait_secs));
-                if let Some(prog) = self.programs.get_mut(name)
+                if let Some(prog) = self.programs.get(name)
                     && prog.status().state.is_active()
                 {
-                    let _ = prog.stop(dur).await;
+                    stop_futs.push(async move {
+                        let _ = prog.stop(dur).await;
+                    });
                 }
+            }
+            if !stop_futs.is_empty() {
+                futures_util::future::join_all(stop_futs).await;
             }
         }
     }
@@ -652,7 +665,7 @@ impl ManagerActor {
                 let _ = prog.shutdown().await;
             }
 
-            let mut new_prog = ProcessProgram::with_options(
+            let new_prog = ProcessProgram::with_options(
                 new_cfg.clone(),
                 self.activity_tracker.clone(),
                 self.event_hub.clone(),
@@ -669,7 +682,7 @@ impl ManagerActor {
         // 3. Added programs: instantiate, register, and start if autostart
         for new_cfg in diff.added {
             let name = &new_cfg.name;
-            let mut new_prog = ProcessProgram::with_options(
+            let new_prog = ProcessProgram::with_options(
                 new_cfg.clone(),
                 self.activity_tracker.clone(),
                 self.event_hub.clone(),

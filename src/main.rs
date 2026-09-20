@@ -78,6 +78,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
+    rsupervisord::platform::setup_subreaper();
+
     if !args.config.exists() {
         anyhow::bail!(
             "Configuration file not found: {:?}. Please specify a valid file using -c/--config.",

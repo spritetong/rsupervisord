@@ -184,3 +184,113 @@ async fn test_unix_process_group_cleanup() {
 
     program.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn test_grandchild_pipe_retention_bounded_drain() {
+    #[cfg(unix)]
+    let (cmd, args) = (
+        "sh".to_string(),
+        vec!["-c".to_string(), "(sleep 30 >&1) & exit 0".to_string()],
+    );
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "cmd.exe".to_string(),
+        vec![
+            "/C".to_string(),
+            "start /b ping -n 30 127.0.0.1 >nul & exit 0".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("grandchild_pipe", cmd);
+    config.args = args;
+    config.start_secs = 0;
+    config.autorestart = AutoRestartPolicy::Never;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let start_stop = std::time::Instant::now();
+    let _ = program.stop(Duration::from_secs(1)).await;
+    assert!(
+        start_stop.elapsed() < Duration::from_secs(5),
+        "Stop took too long: {:?}",
+        start_stop.elapsed()
+    );
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_spawn_failure_error() {
+    let config = ProgramConfig::new("bad_cmd", "definitely_nonexistent_binary_12345");
+    let mut program = ProcessProgram::new(config).expect("create");
+    let res = program.start().await;
+    assert!(res.is_err(), "Start should fail for nonexistent command");
+    assert_eq!(program.status().state, ProgramState::Stopped);
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_backoff_stop_cancellation() {
+    let (cmd, args) = get_exit_command(1);
+    let mut config = ProgramConfig::new("backoff_cancel", cmd);
+    config.args = args;
+    config.start_secs = 3;
+    config.start_retries = 3;
+    config.autorestart = AutoRestartPolicy::Never;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+
+    // Wait for crash and transition to Backoff
+    program
+        .wait_for_state(ProgramState::Backoff, Duration::from_secs(3))
+        .await
+        .expect("Program should enter Backoff");
+    assert_eq!(program.status().state, ProgramState::Backoff);
+
+    // Stop while in Backoff
+    let start_stop = std::time::Instant::now();
+    program
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("Stop should succeed in Backoff");
+    assert_eq!(program.status().state, ProgramState::Stopped);
+    assert!(
+        start_stop.elapsed() < Duration::from_millis(500),
+        "Stop during backoff took too long: {:?}",
+        start_stop.elapsed()
+    );
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_autorestart_never_startup_retries() {
+    let (cmd, args) = get_exit_command(1);
+    let mut config = ProgramConfig::new("retry_never", cmd);
+    config.args = args;
+    config.start_secs = 2;
+    config.start_retries = 1;
+    config.autorestart = AutoRestartPolicy::Never;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+
+    // First crash -> Backoff (retry 1)
+    program
+        .wait_for_state(ProgramState::Backoff, Duration::from_secs(3))
+        .await
+        .expect("Should enter Backoff on first crash");
+
+    // Second crash -> Fatal (exceeded start_retries)
+    program
+        .wait_for_state(ProgramState::Fatal, Duration::from_secs(6))
+        .await
+        .expect("Should transition to Fatal when retries exceeded even if autorestart is Never");
+
+    assert_eq!(program.status().state, ProgramState::Fatal);
+    program.shutdown().await.expect("shutdown");
+}

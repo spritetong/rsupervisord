@@ -24,13 +24,13 @@ pub trait Program: Send + Sync {
     fn status(&self) -> ProgramStatus;
 
     /// Asynchronously triggers program startup.
-    async fn start(&mut self) -> Result<(), ProgramError>;
+    async fn start(&self) -> Result<(), ProgramError>;
 
     /// Asynchronously triggers graceful shutdown within grace_period.
-    async fn stop(&mut self, grace_period: Duration) -> Result<(), ProgramError>;
+    async fn stop(&self, grace_period: Duration) -> Result<(), ProgramError>;
 
     /// Asynchronously restarts the program.
-    async fn restart(&mut self, grace_period: Duration) -> Result<(), ProgramError>;
+    async fn restart(&self, grace_period: Duration) -> Result<(), ProgramError>;
 
     /// Cooperatively shuts down and waits for the internal actor task to terminate cleanly.
     async fn shutdown(&mut self) -> Result<(), ProgramError>;

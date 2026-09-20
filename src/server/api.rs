@@ -498,7 +498,7 @@ async fn reload_config(
         }
     };
 
-    let content = match std::fs::read_to_string(&config_path) {
+    let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,
         Err(e) => {
             return Ok((
@@ -574,9 +574,13 @@ async fn stream_logs(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
-        Ok(line) => Some(Ok(Event::default().data(line))),
-        Err(_) => None,
+    let stream_guard = state.manager.activity_tracker().enter_stream();
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let _guard = &stream_guard;
+        match item {
+            Ok(line) => Some(Ok(Event::default().data(line))),
+            Err(_) => None,
+        }
     });
 
     Ok(Sse::new(stream))
@@ -591,12 +595,16 @@ async fn stream_system_events(
     check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
 
     let rx = state.manager.subscribe_events();
-    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
-        Ok(evt) => {
-            let json = serde_json::to_string(&evt).unwrap_or_default();
-            Some(Ok(Event::default().data(json)))
+    let stream_guard = state.manager.activity_tracker().enter_stream();
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let _guard = &stream_guard;
+        match item {
+            Ok(evt) => {
+                let json = serde_json::to_string(&evt).unwrap_or_default();
+                Some(Ok(Event::default().data(json)))
+            }
+            Err(_) => None,
         }
-        Err(_) => None,
     });
 
     Ok(Sse::new(stream)
@@ -612,12 +620,16 @@ async fn stream_all_logs(
     check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
 
     let rx = state.manager.subscribe_all_logs();
-    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
-        Ok(entry) => {
-            let json = serde_json::to_string(&entry).unwrap_or_default();
-            Some(Ok(Event::default().data(json)))
+    let stream_guard = state.manager.activity_tracker().enter_stream();
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let _guard = &stream_guard;
+        match item {
+            Ok(entry) => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                Some(Ok(Event::default().data(json)))
+            }
+            Err(_) => None,
         }
-        Err(_) => None,
     });
 
     Ok(Sse::new(stream)
