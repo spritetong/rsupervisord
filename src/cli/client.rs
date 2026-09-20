@@ -366,28 +366,45 @@ async fn check_sse_status_and_skip_headers<R: tokio::io::AsyncBufRead + Unpin>(
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(200);
 
-    if status_code >= 400 {
-        let mut error_body = String::new();
-        while let Ok(Some(line)) = reader.next_line().await {
-            if !line.trim().is_empty() {
-                error_body.push_str(&line);
-                error_body.push('\n');
-            }
-        }
-        if status_code == 401 || status_code == 403 {
-            bail!("Access denied ({}): {}", status_code, error_body.trim());
-        }
-        if status_code == 404 {
-            bail!("Resource not found (404): {}", error_body.trim());
-        }
-        bail!("HTTP error {}: {}", status_code, error_body.trim());
-    }
+    let mut content_length: Option<usize> = None;
 
-    // Consume remaining headers until blank line
+    // Consume headers until blank line
     while let Ok(Some(line)) = reader.next_line().await {
-        if line.is_empty() || line == "\r" {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             break;
         }
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(val) = lower.strip_prefix("content-length:") {
+            content_length = val.trim().parse::<usize>().ok();
+        }
+    }
+
+    if status_code >= 400 {
+        let mut error_body = String::new();
+        if content_length.unwrap_or(0) > 0
+            && let Ok(Ok(Some(line))) =
+                tokio::time::timeout(Duration::from_millis(200), reader.next_line()).await
+        {
+            error_body.push_str(line.trim());
+        }
+
+        let msg = if error_body.is_empty() {
+            match status_code {
+                401 => "Unauthorized (401)".to_string(),
+                403 => "Access denied (403 Forbidden)".to_string(),
+                404 => "Resource not found (404)".to_string(),
+                _ => format!("HTTP error {}", status_code),
+            }
+        } else {
+            match status_code {
+                401 | 403 => format!("Access denied ({}): {}", status_code, error_body),
+                404 => format!("Resource not found (404): {}", error_body),
+                _ => format!("HTTP error {}: {}", status_code, error_body),
+            }
+        };
+
+        bail!(msg);
     }
 
     Ok(())

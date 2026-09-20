@@ -43,14 +43,28 @@ where
             }
 
             // Write raw line to file rotator if configured
-            if let Some(ref rot) = rotator {
-                let _ = rot.write_line(&line);
+            if let Some(ref rot) = rotator
+                && let Err(e) = rot.write_line(&line)
+            {
+                tracing::warn!(
+                    program = ?program_name,
+                    stream = stream_name,
+                    error = %e,
+                    "Failed to write log line to rotator"
+                );
             }
         }
 
         // Final flush on EOF
-        if let Some(ref rot) = rotator {
-            let _ = rot.flush();
+        if let Some(ref rot) = rotator
+            && let Err(e) = rot.flush()
+        {
+            tracing::warn!(
+                program = ?program_name,
+                stream = stream_name,
+                error = %e,
+                "Failed to flush log rotator"
+            );
         }
     })
 }

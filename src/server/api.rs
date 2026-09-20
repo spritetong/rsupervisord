@@ -235,8 +235,12 @@ async fn start_program(
 
     let start_time = Instant::now();
     if let Err(e) = state.manager.start_program(&name).await {
+        let status_code = match &e {
+            ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_REQUEST,
+        };
         return Ok((
-            StatusCode::BAD_REQUEST,
+            status_code,
             Json(ApiResponse::err(format!("Start failed: {}", e))),
         ));
     }
@@ -347,6 +351,18 @@ async fn stop_program(
     let timeout_secs = query.timeout.min(86400);
     let grace = Some(Duration::from_secs(timeout_secs));
 
+    // Verify program exists before accepting async or sync request
+    if let Err(e) = state.manager.get_status(&name).await {
+        let status_code = match &e {
+            ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return Ok((
+            status_code,
+            Json(ApiResponse::err(format!("Stop failed: {}", e))),
+        ));
+    }
+
     if !query.sync {
         let mgr = state.manager.clone();
         let name_clone = name.clone();
@@ -416,6 +432,18 @@ async fn restart_program(
     let start_time = Instant::now();
     let timeout_secs = query.timeout.min(86400);
     let grace = Some(Duration::from_secs(timeout_secs));
+
+    // Verify program exists before accepting async or sync request
+    if let Err(e) = state.manager.get_status(&name).await {
+        let status_code = match &e {
+            ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return Ok((
+            status_code,
+            Json(ApiResponse::err(format!("Restart failed: {}", e))),
+        ));
+    }
 
     if !query.sync {
         let mgr = state.manager.clone();

@@ -142,7 +142,10 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(30);
+        let timeout_dur = grace_period
+            .unwrap_or(Duration::from_secs(10))
+            .checked_add(Duration::from_secs(15))
+            .unwrap_or(Duration::from_secs(86400));
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -171,7 +174,10 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(45);
+        let timeout_dur = grace_period
+            .unwrap_or(Duration::from_secs(10))
+            .checked_add(Duration::from_secs(25))
+            .unwrap_or(Duration::from_secs(86400));
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -495,7 +501,7 @@ impl ManagerActor {
                         }
                         ManagerCommand::GetStatus { name, reply } => {
                             let res = self.programs.get(&name).map(|p| p.status()).ok_or_else(|| {
-                                ProgramError::NotRunning { name: name.clone() }
+                                ProgramError::NotFound { name: name.clone() }
                             });
                             let _ = reply.send(res);
                         }

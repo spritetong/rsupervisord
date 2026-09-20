@@ -123,9 +123,27 @@ pub struct ProgramDefaults {
     #[serde(default)]
     pub priority: Option<u8>,
     #[serde(default)]
-    pub logs: Option<ProgramLogsConfig>,
+    pub logs: Option<ProgramLogsConfigRaw>,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+}
+
+/// Raw representation of program log configuration with optional booleans for inheritance.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramLogsConfigRaw {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub stdout: Option<PathBuf>,
+    #[serde(default)]
+    pub stderr: Option<PathBuf>,
+    #[serde(default)]
+    pub max_bytes: Option<String>,
+    #[serde(default)]
+    pub backups: Option<usize>,
+    #[serde(default)]
+    pub redirect_stderr: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,7 +179,7 @@ pub struct ProgramConfigRaw {
     #[serde(default)]
     pub umask: Option<u32>,
     #[serde(default)]
-    pub logs: Option<ProgramLogsConfig>,
+    pub logs: Option<ProgramLogsConfigRaw>,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
 }
@@ -288,18 +306,42 @@ impl SupervisorConfig {
             let exit_codes = raw.exit_codes.clone().unwrap_or_else(|| vec![0]);
 
             let logs = {
-                let def = self.program_defaults.logs.clone().unwrap_or_default();
-                if let Some(ref raw_logs) = raw.logs {
-                    ProgramLogsConfig {
-                        enabled: raw_logs.enabled,
-                        stdout: raw_logs.stdout.clone().or(def.stdout),
-                        stderr: raw_logs.stderr.clone().or(def.stderr),
-                        max_bytes: raw_logs.max_bytes.clone().or(def.max_bytes),
-                        backups: raw_logs.backups.or(def.backups),
-                        redirect_stderr: raw_logs.redirect_stderr,
-                    }
-                } else {
-                    def
+                let raw_logs = raw.logs.as_ref();
+                let def_logs = self.program_defaults.logs.as_ref();
+
+                let enabled = raw_logs
+                    .and_then(|l| l.enabled)
+                    .or_else(|| def_logs.and_then(|l| l.enabled))
+                    .unwrap_or(true);
+
+                let stdout = raw_logs
+                    .and_then(|l| l.stdout.clone())
+                    .or_else(|| def_logs.and_then(|l| l.stdout.clone()));
+
+                let stderr = raw_logs
+                    .and_then(|l| l.stderr.clone())
+                    .or_else(|| def_logs.and_then(|l| l.stderr.clone()));
+
+                let max_bytes = raw_logs
+                    .and_then(|l| l.max_bytes.clone())
+                    .or_else(|| def_logs.and_then(|l| l.max_bytes.clone()));
+
+                let backups = raw_logs
+                    .and_then(|l| l.backups)
+                    .or_else(|| def_logs.and_then(|l| l.backups));
+
+                let redirect_stderr = raw_logs
+                    .and_then(|l| l.redirect_stderr)
+                    .or_else(|| def_logs.and_then(|l| l.redirect_stderr))
+                    .unwrap_or(false);
+
+                ProgramLogsConfig {
+                    enabled,
+                    stdout,
+                    stderr,
+                    max_bytes,
+                    backups,
+                    redirect_stderr,
                 }
             };
 
@@ -409,5 +451,38 @@ programs:
         let res = SupervisorConfig::from_yaml_str(yaml);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_logs_inheritance_override() {
+        let yaml = r#"
+program_defaults:
+  logs:
+    enabled: false
+    redirect_stderr: true
+programs:
+  app_inherit:
+    command: "echo inherit"
+    logs:
+      stdout: "/tmp/app.log"
+  app_override:
+    command: "echo override"
+    logs:
+      enabled: true
+      redirect_stderr: false
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let resolved = config.resolve_programs().unwrap();
+
+        // app_inherit should inherit enabled: false and redirect_stderr: true
+        let inherit_logs = &resolved["app_inherit"].logs;
+        assert!(!inherit_logs.enabled);
+        assert!(inherit_logs.redirect_stderr);
+        assert_eq!(inherit_logs.stdout, Some(PathBuf::from("/tmp/app.log")));
+
+        // app_override should explicitly override both
+        let override_logs = &resolved["app_override"].logs;
+        assert!(override_logs.enabled);
+        assert!(!override_logs.redirect_stderr);
     }
 }

@@ -455,15 +455,22 @@ impl ProgramActor {
                 }
 
                 Some(cmd) = self.command_rx.recv() => {
-                    let was_running = self.current_child.is_some();
                     self.handle_command(cmd).await;
-                    if !was_running && self.current_child.is_some() {
-                        if self.config.start_secs > 0 {
-                            start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                    if self.current_child.is_some() {
+                        let marked_running = self
+                            .current_child
+                            .as_ref()
+                            .map(|c| c.marked_running)
+                            .unwrap_or(false);
+                        if !marked_running && self.config.start_secs > 0 {
+                            start_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + Duration::from_secs(self.config.start_secs),
+                            );
                         } else {
                             start_deadline = None;
                         }
-                    } else if self.current_child.is_none() {
+                    } else {
                         start_deadline = None;
                     }
                 }
@@ -559,21 +566,6 @@ impl ProgramActor {
                     }
                 }
 
-                _ = async {
-                    match start_deadline {
-                        Some(dl) => tokio::time::sleep_until(dl).await,
-                        None => std::future::pending().await,
-                    }
-                }, if is_waiting_start => {
-                    start_deadline = None;
-                    if let Some(child) = self.current_child.as_mut() {
-                        child.marked_running = true;
-                        let pid = child.pid;
-                        self.retry_count = 0;
-                        self.update_status(ProgramState::Running, Some(pid), None, "Running".to_string());
-                    }
-                }
-
                 exit_res = async {
                     match self.current_child.as_mut() {
                         Some(c) => c.platform_guard.wait_exit(&mut c.child).await,
@@ -584,6 +576,25 @@ impl ProgramActor {
                     let restarted = self.handle_child_exit(exit_res).await;
                     if restarted && self.config.start_secs > 0 {
                         start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                    }
+                }
+
+                _ = async {
+                    match start_deadline {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending().await,
+                    }
+                }, if is_waiting_start => {
+                    start_deadline = None;
+                    if let Some(child) = self.current_child.as_mut() {
+                        if let Ok(Some(_)) = child.child.try_wait() {
+                            // Child already terminated; exit_res will handle exit on next iteration
+                        } else {
+                            child.marked_running = true;
+                            let pid = child.pid;
+                            self.retry_count = 0;
+                            self.update_status(ProgramState::Running, Some(pid), None, "Running".to_string());
+                        }
                     }
                 }
             }

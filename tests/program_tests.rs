@@ -116,6 +116,52 @@ async fn test_program_restart() {
 }
 
 #[tokio::test]
+async fn test_program_restart_with_start_secs() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("test_restart_start_secs", cmd);
+    config.args = args;
+    config.start_secs = 1;
+
+    let mut program = ProcessProgram::new(config).expect("Failed to create ProcessProgram");
+    program.start().await.expect("Failed to start program");
+    program
+        .wait_for_state(ProgramState::Running, Duration::from_secs(3))
+        .await
+        .expect("Program should transition to Running initial time");
+
+    let pid1 = program.status().pid.expect("PID should exist");
+
+    // Restart while running
+    program
+        .restart(Duration::from_secs(2))
+        .await
+        .expect("Failed to restart program");
+
+    assert_eq!(program.status().state, ProgramState::Starting);
+    let pid2 = program
+        .status()
+        .pid
+        .expect("PID should exist after restart");
+    assert_ne!(pid1, pid2, "New process should have different PID");
+
+    // Wait for start_secs (1s) -> must transition to Running
+    program
+        .wait_for_state(ProgramState::Running, Duration::from_secs(3))
+        .await
+        .expect("Program should transition to Running state after restart with start_secs > 0");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    program
+        .stop(Duration::from_secs(2))
+        .await
+        .expect("Failed to stop program");
+    program
+        .shutdown()
+        .await
+        .expect("Failed to shutdown program");
+}
+
+#[tokio::test]
 async fn test_program_normal_exit_detection() {
     let (cmd, args) = get_exit_command(0);
     let mut config = ProgramConfig::new("test_normal_exit", cmd);

@@ -78,6 +78,19 @@ impl LogRotator {
             })?;
         }
 
+        // Probe target path to ensure write permissions upfront
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path_buf)
+            .map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "Failed to open/create log file '{}': {}",
+                    path_buf.display(),
+                    e
+                ))
+            })?;
+
         let max_bytes = max_bytes.max(1);
         let rotator = FileRotate::new(
             path_buf.clone(),
