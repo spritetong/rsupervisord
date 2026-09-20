@@ -387,10 +387,7 @@ programs:
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    #[cfg(windows)]
-    let ipc_endpoint = Endpoint::NamedPipe(ipc_path.clone());
-    #[cfg(unix)]
-    let ipc_endpoint = Endpoint::Unix(ipc_path.clone());
+    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
 
     let ipc_client = SupervisorClient::new(ipc_endpoint, None);
     let statuses = ipc_client

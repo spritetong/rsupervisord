@@ -161,16 +161,7 @@ impl HealthProbeRunner {
 
     /// Shell execution probe verifying 0 exit code with strict timeout.
     async fn check_exec(command: &str, timeout_dur: Duration) -> bool {
-        #[cfg(windows)]
-        let mut cmd = tokio::process::Command::new("cmd");
-        #[cfg(windows)]
-        cmd.args(["/C", command]);
-
-        #[cfg(not(windows))]
-        let mut cmd = tokio::process::Command::new("sh");
-        #[cfg(not(windows))]
-        cmd.args(["-c", command]);
-
+        let mut cmd = crate::platform::native_platform().build_shell_command(command);
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 

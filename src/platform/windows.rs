@@ -3,19 +3,16 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
-#[cfg(windows)]
 use crate::error::ProgramError;
-#[cfg(windows)]
-use crate::platform::traits::{PlatformBackend, PlatformProcessGuard};
-#[cfg(windows)]
+use crate::platform::traits::{
+    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard,
+};
 use crate::program::config::StopSignal;
-#[cfg(windows)]
-use std::path::PathBuf;
-#[cfg(windows)]
+use async_trait::async_trait;
+use std::io;
+use std::path::{Path, PathBuf};
 use tokio::process::Command as TokioCommand;
-#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-#[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -23,12 +20,10 @@ use windows_sys::Win32::System::JobObjects::{
 };
 
 /// RAII wrapper for a Windows Job Object configured with kill-on-close.
-#[cfg(windows)]
 pub struct WinJobGuard {
     job_handle: HANDLE,
 }
 
-#[cfg(windows)]
 impl WinJobGuard {
     pub fn new() -> Result<Self, ProgramError> {
         unsafe {
@@ -99,7 +94,6 @@ impl WinJobGuard {
     }
 }
 
-#[cfg(windows)]
 impl Drop for WinJobGuard {
     fn drop(&mut self) {
         if !self.job_handle.is_null() && self.job_handle != INVALID_HANDLE_VALUE {
@@ -110,20 +104,16 @@ impl Drop for WinJobGuard {
     }
 }
 
-#[cfg(windows)]
 unsafe impl Send for WinJobGuard {}
-#[cfg(windows)]
 unsafe impl Sync for WinJobGuard {}
 
 /// Guard managing a Windows Job Object and process tree.
-#[cfg(windows)]
 pub struct WindowsProcessGuard {
     pub pid: u32,
     job: WinJobGuard,
     last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
-#[cfg(windows)]
 impl PlatformProcessGuard for WindowsProcessGuard {
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         match signal {
@@ -214,10 +204,9 @@ impl PlatformProcessGuard for WindowsProcessGuard {
 }
 
 /// Native Windows platform backend implementation.
-#[cfg(windows)]
 pub struct WindowsPlatformBackend;
 
-#[cfg(windows)]
+#[async_trait]
 impl PlatformBackend for WindowsPlatformBackend {
     fn configure_command(
         &self,
@@ -290,5 +279,122 @@ impl PlatformBackend for WindowsPlatformBackend {
             CloseHandle(token);
             success != 0 && elevation.TokenIsElevated != 0
         }
+    }
+
+    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError> {
+        if !self.is_elevated() && !allow_unelevated {
+            tracing::debug!("Caller process is not running as Administrator");
+        }
+        Ok(())
+    }
+
+    fn default_stop_signal(&self) -> StopSignal {
+        StopSignal::CtrlBreak
+    }
+
+    fn build_shell_command(&self, command: &str) -> TokioCommand {
+        let mut cmd = TokioCommand::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    }
+
+    async fn connect_ipc(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>> {
+        use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+        let std_stream = uds_windows::UnixStream::connect(path)?;
+        let raw = std_stream.into_raw_socket();
+        let std_tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+        std_tcp.set_nonblocking(true)?;
+        let stream = tokio::net::TcpStream::from_std(std_tcp)?;
+        Ok(Box::new(stream))
+    }
+
+    async fn connect_named_pipe(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>> {
+        let client = tokio::net::windows::named_pipe::ClientOptions::new().open(path)?;
+        Ok(Box::new(client))
+    }
+
+    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>> {
+        if path.to_string_lossy().starts_with(r"\\.\pipe\") {
+            let listener = WindowsNamedPipeListener::bind(path)?;
+            Ok(Box::new(listener))
+        } else {
+            let listener = WindowsUdsListener::bind(path)?;
+            Ok(Box::new(listener))
+        }
+    }
+}
+
+/// Windows named pipe IPC listener.
+pub struct WindowsNamedPipeListener {
+    pipe_name: String,
+    is_first: bool,
+}
+
+impl WindowsNamedPipeListener {
+    pub fn bind(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            pipe_name: path.to_string_lossy().to_string(),
+            is_first: true,
+        })
+    }
+}
+
+#[async_trait]
+impl PlatformIpcListener for WindowsNamedPipeListener {
+    async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
+        let server = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(self.is_first)
+            .create(&self.pipe_name)?;
+        self.is_first = false;
+        server.connect().await?;
+        Ok(Box::new(server))
+    }
+}
+
+/// Windows Unix Domain Socket (AF_UNIX) listener.
+pub struct WindowsUdsListener {
+    listener: std::sync::Arc<uds_windows::UnixListener>,
+    path: PathBuf,
+}
+
+impl WindowsUdsListener {
+    pub fn bind(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_file(path);
+
+        let listener = uds_windows::UnixListener::bind(path)?;
+        Ok(Self {
+            listener: std::sync::Arc::new(listener),
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for WindowsUdsListener {
+    fn drop(&mut self) {
+        let _ = uds_windows::UnixStream::connect(&self.path);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[async_trait]
+impl PlatformIpcListener for WindowsUdsListener {
+    async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
+        use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+
+        let l = self.listener.clone();
+        let (std_stream, _) = tokio::task::spawn_blocking(move || l.accept())
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Interrupted, e))??;
+
+        let raw = std_stream.into_raw_socket();
+        let std_tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+        std_tcp.set_nonblocking(true)?;
+        let async_stream = tokio::net::TcpStream::from_std(std_tcp)?;
+        Ok(Box::new(async_stream))
     }
 }

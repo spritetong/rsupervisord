@@ -16,19 +16,23 @@ pub enum AutoRestartPolicy {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum StopSignal {
-    #[cfg_attr(unix, default)]
     Term,
     Int,
     Quit,
     Kill,
-    #[cfg_attr(windows, default)]
     #[serde(rename = "CTRL_BREAK")]
     CtrlBreak,
     #[serde(rename = "CTRL_C")]
     CtrlC,
+}
+
+impl Default for StopSignal {
+    fn default() -> Self {
+        crate::platform::native_platform().default_stop_signal()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

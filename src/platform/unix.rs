@@ -3,30 +3,25 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
-#[cfg(unix)]
 use crate::error::ProgramError;
-#[cfg(unix)]
-use crate::platform::traits::{PlatformBackend, PlatformProcessGuard};
-#[cfg(unix)]
+use crate::platform::traits::{
+    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard,
+};
 use crate::program::config::StopSignal;
-#[cfg(unix)]
+use async_trait::async_trait;
 use nix::sys::signal::{self, Signal};
-#[cfg(unix)]
 use nix::unistd::{Gid, Pid, Uid};
-#[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
+use std::io;
+use std::path::{Path, PathBuf};
 use tokio::process::Command as TokioCommand;
 
 /// Guard managing a Unix process group.
-#[cfg(unix)]
 pub struct UnixProcessGuard {
     pub pid: u32,
     pub pgid: i32,
     last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
-#[cfg(unix)]
 impl UnixProcessGuard {
     pub fn new(pid: u32) -> Self {
         Self {
@@ -55,7 +50,6 @@ impl UnixProcessGuard {
     }
 }
 
-#[cfg(unix)]
 impl PlatformProcessGuard for UnixProcessGuard {
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         let nix_sig = to_nix_signal(signal);
@@ -131,51 +125,39 @@ impl PlatformProcessGuard for UnixProcessGuard {
 }
 
 /// Native Unix platform backend implementation.
-#[cfg(unix)]
 pub struct UnixPlatformBackend;
 
-#[cfg(unix)]
+#[async_trait]
 impl PlatformBackend for UnixPlatformBackend {
     fn configure_command(
         &self,
         cmd: &mut TokioCommand,
         user: Option<&str>,
-        umask_val: Option<u32>,
+        umask: Option<u32>,
     ) -> Result<(), ProgramError> {
-        let (uid, gid) = if let Some(user_str) = user {
-            parse_user_spec(user_str)?
-        } else {
-            (None, None)
-        };
-
         unsafe {
+            let user_owned = user.map(|s| s.to_string());
             cmd.pre_exec(move || {
-                // 1. Establish an independent process group (setpgid(0, 0))
+                // 1. Establish independent process group
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
-                    .map_err(|e| std::io::Error::other(format!("Failed to setpgid: {}", e)))?;
+                    .map_err(std::io::Error::other)?;
 
-                // 2. Set file mode creation mask (umask)
-                if let Some(mask) = umask_val {
+                // 2. Apply umask if configured
+                if let Some(mask) = umask {
                     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask));
                 }
 
-                // 3. Drop privileges (setgid first, then setuid)
-                if let Some(g) = gid {
-                    nix::unistd::setgid(g).map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Failed to setgid({}): {}", g, e),
-                        )
-                    })?;
-                }
+                // 3. Drop privileges if user specified
+                if let Some(ref user_spec) = user_owned {
+                    let (uid, gid) = parse_user_spec(user_spec)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                if let Some(u) = uid {
-                    nix::unistd::setuid(u).map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Failed to setuid({}): {}", u, e),
-                        )
-                    })?;
+                    if let Some(g) = gid {
+                        nix::unistd::setgid(g).map_err(std::io::Error::other)?;
+                    }
+                    if let Some(u) = uid {
+                        nix::unistd::setuid(u).map_err(std::io::Error::other)?;
+                    }
                 }
 
                 Ok(())
@@ -200,10 +182,114 @@ impl PlatformBackend for UnixPlatformBackend {
     fn is_elevated(&self) -> bool {
         nix::unistd::getuid().is_root()
     }
+
+    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError> {
+        let _ = allow_unelevated;
+        let _ = self.is_elevated();
+        Ok(())
+    }
+
+    fn default_stop_signal(&self) -> StopSignal {
+        StopSignal::Term
+    }
+
+    fn build_shell_command(&self, command: &str) -> TokioCommand {
+        let mut cmd = TokioCommand::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    }
+
+    async fn connect_ipc(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>> {
+        let stream = tokio::net::UnixStream::connect(path).await?;
+        Ok(Box::new(stream))
+    }
+
+    async fn connect_named_pipe(&self, _path: &Path) -> io::Result<Box<dyn AsyncStream>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Named pipes are not supported on Unix systems",
+        ))
+    }
+
+    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>> {
+        let listener = UnixIpcListener::bind(path)?;
+        Ok(Box::new(listener))
+    }
+}
+
+/// Verifies caller peer credentials on Unix domain sockets.
+pub fn verify_caller_credentials(stream: &tokio::net::UnixStream) -> Result<(), ProgramError> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    use std::os::fd::{AsRawFd, BorrowedFd};
+
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+    let creds = getsockopt(&borrowed_fd, PeerCredentials).map_err(|e| {
+        ProgramError::PlatformError(format!("Failed to retrieve peer credentials: {}", e))
+    })?;
+    let caller_uid = Uid::from_raw(creds.uid());
+    let daemon_uid = nix::unistd::getuid();
+
+    if daemon_uid.is_root() {
+        if !caller_uid.is_root() {
+            return Err(ProgramError::PlatformError(format!(
+                "Access denied: Caller UID {} is not root",
+                caller_uid
+            )));
+        }
+    } else if caller_uid != daemon_uid && !caller_uid.is_root() {
+        return Err(ProgramError::PlatformError(format!(
+            "Access denied: Caller UID {} does not match daemon UID {}",
+            caller_uid, daemon_uid
+        )));
+    }
+
+    Ok(())
+}
+
+/// Unix domain socket IPC listener.
+pub struct UnixIpcListener {
+    listener: tokio::net::UnixListener,
+    path: PathBuf,
+}
+
+impl UnixIpcListener {
+    pub fn bind(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_file(path);
+
+        let listener = tokio::net::UnixListener::bind(path)?;
+        Ok(Self {
+            listener,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for UnixIpcListener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[async_trait]
+impl PlatformIpcListener for UnixIpcListener {
+    async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            if let Err(e) = verify_caller_credentials(&stream) {
+                tracing::warn!("Rejecting unauthorized UDS connection: {}", e);
+                continue;
+            }
+            return Ok(Box::new(stream));
+        }
+    }
 }
 
 /// Converts generic StopSignal to POSIX Signal.
-#[cfg(unix)]
 pub fn to_nix_signal(sig: StopSignal) -> Signal {
     match sig {
         StopSignal::Term => Signal::SIGTERM,
@@ -216,7 +302,6 @@ pub fn to_nix_signal(sig: StopSignal) -> Signal {
 }
 
 /// Parses a user specification string supporting: "1000", "1000:1000", "username", "username:groupname".
-#[cfg(unix)]
 fn parse_user_spec(spec: &str) -> Result<(Option<Uid>, Option<Gid>), ProgramError> {
     let parts: Vec<&str> = spec.split(':').collect();
     let uid_part = parts[0].trim();

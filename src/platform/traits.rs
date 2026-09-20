@@ -5,7 +5,20 @@
 
 use crate::error::ProgramError;
 use crate::program::config::StopSignal;
-use std::path::PathBuf;
+use async_trait::async_trait;
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// Unified stream trait combining AsyncRead and AsyncWrite.
+pub trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized> AsyncStream for T {}
+
+/// Trait representing an OS-level IPC listener (Unix Domain Socket or Windows Named Pipe/UDS).
+#[async_trait]
+pub trait PlatformIpcListener: Send + Sync {
+    /// Accepts an incoming connection stream.
+    async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>>;
+}
 
 /// Process resource utilization metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -33,7 +46,8 @@ pub trait PlatformProcessGuard: Send + Sync {
 }
 
 /// Trait providing platform-specific abstractions for process configuration,
-/// child tracking, and platform defaults.
+/// child tracking, IPC communication, and platform defaults.
+#[async_trait]
 pub trait PlatformBackend: Send + Sync {
     /// Configures the command builder before spawning (e.g. process groups, user privileges, umask).
     fn configure_command(
@@ -55,4 +69,22 @@ pub trait PlatformBackend: Send + Sync {
 
     /// Checks if the current process runs with elevated (administrator / root) privileges.
     fn is_elevated(&self) -> bool;
+
+    /// Validates caller privileges before accepting requests.
+    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError>;
+
+    /// Returns the platform-appropriate default stop signal (e.g. SIGTERM on Unix, CTRL_BREAK on Windows).
+    fn default_stop_signal(&self) -> StopSignal;
+
+    /// Constructs a platform-specific shell execution command (e.g. `sh -c` on Unix, `cmd /C` on Windows).
+    fn build_shell_command(&self, command: &str) -> tokio::process::Command;
+
+    /// Connects to a local IPC socket (Unix Domain Socket / AF_UNIX) at the given path.
+    async fn connect_ipc(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>>;
+
+    /// Connects to a Windows named pipe at the given path (unsupported on Unix).
+    async fn connect_named_pipe(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>>;
+
+    /// Binds an OS-level IPC listener at the given path.
+    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>>;
 }
