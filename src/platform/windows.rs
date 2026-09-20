@@ -36,11 +36,15 @@ impl WinJobGuard {
                 )));
             }
 
+            let job_guard = scopeguard::guard(job, |j| {
+                CloseHandle(j);
+            });
+
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
             let ok = SetInformationJobObject(
-                job,
+                *job_guard,
                 JobObjectExtendedLimitInformation,
                 &info as *const _ as *const _,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -48,14 +52,14 @@ impl WinJobGuard {
 
             if ok == 0 {
                 let err = std::io::Error::last_os_error();
-                CloseHandle(job);
                 return Err(ProgramError::PlatformError(format!(
                     "Failed to set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: {}",
                     err
                 )));
             }
 
-            Ok(Self { job_handle: job })
+            let job_handle = scopeguard::ScopeGuard::into_inner(job_guard);
+            Ok(Self { job_handle })
         }
     }
 
@@ -249,9 +253,10 @@ impl PlatformBackend for WindowsPlatformBackend {
                     pid, err
                 )));
             }
-            let res = job.assign_process(handle);
-            CloseHandle(handle);
-            res?;
+            let _handle_guard = scopeguard::guard(handle, |h| {
+                CloseHandle(h);
+            });
+            job.assign_process(handle)?;
         }
 
         Ok(Box::new(WindowsProcessGuard {
@@ -277,6 +282,9 @@ impl PlatformBackend for WindowsPlatformBackend {
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
                 return false;
             }
+            let _token_guard = scopeguard::guard(token, |t| {
+                CloseHandle(t);
+            });
             let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
             let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
             let success = GetTokenInformation(
@@ -286,7 +294,6 @@ impl PlatformBackend for WindowsPlatformBackend {
                 size,
                 &mut size,
             );
-            CloseHandle(token);
             success != 0 && elevation.TokenIsElevated != 0
         }
     }
@@ -361,10 +368,15 @@ impl PlatformIpcListener for WindowsNamedPipeListener {
     }
 }
 
+fn cleanup_windows_uds(p: PathBuf) {
+    let _ = uds_windows::UnixStream::connect(&p);
+    let _ = std::fs::remove_file(&p);
+}
+
 /// Windows Unix Domain Socket (AF_UNIX) listener.
 pub struct WindowsUdsListener {
     listener: std::sync::Arc<uds_windows::UnixListener>,
-    path: PathBuf,
+    _cleanup: scopeguard::ScopeGuard<PathBuf, fn(PathBuf)>,
 }
 
 impl WindowsUdsListener {
@@ -377,17 +389,11 @@ impl WindowsUdsListener {
         let _ = std::fs::remove_file(path);
 
         let listener = uds_windows::UnixListener::bind(path)?;
+        let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_windows_uds as fn(PathBuf));
         Ok(Self {
             listener: std::sync::Arc::new(listener),
-            path: path.to_path_buf(),
+            _cleanup: cleanup,
         })
-    }
-}
-
-impl Drop for WindowsUdsListener {
-    fn drop(&mut self) {
-        let _ = uds_windows::UnixStream::connect(&self.path);
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 

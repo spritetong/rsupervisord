@@ -45,6 +45,7 @@ pub struct ProcessProgram {
     started_at: Arc<RwLock<Option<Instant>>>,
     event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
+    _cancel_guard: tokio_util::sync::DropGuard,
     actor_handle: Option<JoinHandle<()>>,
 }
 
@@ -93,6 +94,7 @@ impl ProcessProgram {
         );
 
         let actor_handle = tokio::spawn(actor.run());
+        let cancel_guard = cancel_token.clone().drop_guard();
 
         Ok(Self {
             config,
@@ -102,6 +104,7 @@ impl ProcessProgram {
             started_at,
             event_hub,
             cancel_token,
+            _cancel_guard: cancel_guard,
             actor_handle: Some(actor_handle),
         })
     }
@@ -259,12 +262,6 @@ impl Program for ProcessProgram {
     }
 }
 
-impl Drop for ProcessProgram {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
-    }
-}
-
 struct RunningChild {
     child: tokio::process::Child,
     pid: u32,
@@ -273,6 +270,7 @@ struct RunningChild {
     stdout_pump: Option<JoinHandle<()>>,
     stderr_pump: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
+    _cancel_guard: tokio_util::sync::DropGuard,
     health_task: Option<JoinHandle<()>>,
 }
 
@@ -536,20 +534,25 @@ impl ProgramActor {
         let platform = crate::platform::native_platform();
         platform.configure_command(&mut cmd, self.config.user.as_deref(), self.config.umask)?;
 
-        let mut child = cmd.spawn().map_err(|e| ProgramError::StartFailed {
+        let child = cmd.spawn().map_err(|e| ProgramError::StartFailed {
             name: self.config.name.clone(),
             source: e,
         })?;
 
-        let pid = child.id().ok_or_else(|| {
+        // Guard the newly spawned child process so it is safely terminated if any subsequent setup step fails
+        let mut child_guard = scopeguard::guard(child, |mut c| {
+            let _ = c.start_kill();
+        });
+
+        let pid = child_guard.id().ok_or_else(|| {
             ProgramError::PlatformError("Process spawned without PID".to_string())
         })?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child_guard.stdout.take();
+        let stderr = child_guard.stderr.take();
 
         // Attach platform-specific process guard
-        let platform_guard = platform.attach_child(&child, pid)?;
+        let platform_guard = platform.attach_child(&child_guard, pid)?;
 
         let max_bytes = match &self.config.logs.max_bytes {
             Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
@@ -660,6 +663,9 @@ impl ProgramActor {
             snapshot.uptime_secs = Some(0);
         }
 
+        let child = scopeguard::ScopeGuard::into_inner(child_guard);
+        let cancel_guard = child_cancel.clone().drop_guard();
+
         self.current_child = Some(RunningChild {
             child,
             pid,
@@ -668,6 +674,7 @@ impl ProgramActor {
             stdout_pump,
             stderr_pump,
             cancel_token: child_cancel,
+            _cancel_guard: cancel_guard,
             health_task,
         });
 
@@ -788,8 +795,12 @@ impl ProgramActor {
                     ),
                 );
                 let backoff_secs = 2u64.pow(self.retry_count.min(5));
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                self.spawn_child().await.is_ok()
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => false,
+                    _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {
+                        self.spawn_child().await.is_ok()
+                    }
+                }
             } else {
                 self.update_status(
                     ProgramState::Fatal,

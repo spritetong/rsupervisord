@@ -210,8 +210,9 @@ impl PlatformBackend for UnixPlatformBackend {
     }
 
     fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError> {
-        let _ = allow_unelevated;
-        let _ = self.is_elevated();
+        if !self.is_elevated() && !allow_unelevated {
+            tracing::debug!("Caller process is not running as root");
+        }
         Ok(())
     }
 
@@ -243,6 +244,34 @@ impl PlatformBackend for UnixPlatformBackend {
     }
 }
 
+fn cleanup_unix_ipc(p: PathBuf) {
+    let _ = std::fs::remove_file(&p);
+}
+
+/// Unix domain socket IPC listener.
+pub struct UnixIpcListener {
+    listener: tokio::net::UnixListener,
+    _cleanup: scopeguard::ScopeGuard<PathBuf, fn(PathBuf)>,
+}
+
+impl UnixIpcListener {
+    pub fn bind(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_file(path);
+
+        let listener = tokio::net::UnixListener::bind(path)?;
+        let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_unix_ipc as fn(PathBuf));
+        Ok(Self {
+            listener,
+            _cleanup: cleanup,
+        })
+    }
+}
+
 /// Verifies caller peer credentials on Unix domain sockets.
 pub fn verify_caller_credentials(stream: &tokio::net::UnixStream) -> Result<(), ProgramError> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
@@ -270,35 +299,6 @@ pub fn verify_caller_credentials(stream: &tokio::net::UnixStream) -> Result<(), 
     }
 
     Ok(())
-}
-
-/// Unix domain socket IPC listener.
-pub struct UnixIpcListener {
-    listener: tokio::net::UnixListener,
-    path: PathBuf,
-}
-
-impl UnixIpcListener {
-    pub fn bind(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-        {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::remove_file(path);
-
-        let listener = tokio::net::UnixListener::bind(path)?;
-        Ok(Self {
-            listener,
-            path: path.to_path_buf(),
-        })
-    }
-}
-
-impl Drop for UnixIpcListener {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 #[async_trait]

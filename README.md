@@ -20,6 +20,10 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
 - 🛡️ **Guaranteed Process Tree Reclamation (No Leaked Orphans)**:
   - **Windows**: Bound to native Win32 `Job Objects` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Even multi-tier grandchild processes are 100% terminated by the Windows kernel if the daemon terminates or stops a service—without relying on `taskkill.exe`.
   - **Linux / BSD**: Subreaper adoption (`PR_SET_CHILD_SUBREAPER`), isolated process groups (`setpgid`), and group signal dispatching (`killpg`).
+  - **Scope-Guarded Pre-Attachment**: Early startup errors or cancellations automatically terminate newly spawned child processes via `scopeguard`, eliminating orphan processes before OS tree attachment.
+- 🧰 **Resilient RAII Lifecycles & Zero-Polling API**:
+  - Replaces boilerplate `impl Drop` with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard` for OS handles and socket files.
+  - Fully reactive synchronous REST API (`sync=true`) unblocks instantaneously via `EventHub` with zero busy-polling delay.
 - 🔄 **DAG Dependency Orchestration & Zero-Downtime Hot Reload**:
   - Directed Acyclic Graph topology with `priority: 0..99` and automatic cycle detection.
   - Layered parallel startup for non-dependent tasks.

@@ -8,7 +8,7 @@
 
 ## 1. Core Design Tenets
 
-To fundamentally eliminate high CPU consumption, orphan process leaks, lock contention, and deadlocks commonly found in traditional supervisor engines (such as `ochinchina/supervisord`), `rsupervisord` enforces four rigid architectural constraints:
+To fundamentally eliminate high CPU consumption, orphan process leaks, lock contention, and deadlocks commonly found in traditional supervisor engines (such as `ochinchina/supervisord`), `rsupervisord` enforces five rigid architectural constraints:
 
 1. **Task-Based Actor Model**:
    - Both the `Manager` and every managed `Program` are designed as asynchronous tasks (`async task`) with independent lifecycles.
@@ -21,6 +21,9 @@ To fundamentally eliminate high CPU consumption, orphan process leaks, lock cont
 4. **Uniform Parking Lot Primitives**:
    - `std::sync::{Mutex, RwLock, Condvar}` are banned throughout the codebase in favor of high-performance `parking_lot` primitives.
    - Synchronization locks are restricted to instantaneous in-memory mutations; **holding any synchronous lock across an `.await` point is strictly prohibited**.
+5. **Scope-Guarded Local Lifecycles & RAII Cleanups**:
+   - Unprotected `create -> use -> destroy` patterns across async functions and futures are hardened using `scopeguard` (`scopeguard::guard`). Newly spawned child processes are immediately held in a termination guard that disarms only after successful platform tree attachment and log pump wiring, preventing orphaned processes upon initialization errors.
+   - OS handles (`OpenProcess`, `OpenProcessToken`, Windows Job Objects) and socket files are cleaned up through RAII guards (`scopeguard::ScopeGuard` and `tokio_util::sync::DropGuard`), eliminating handwritten `Drop` boilerplate and preventing resource leaks.
 
 ---
 
@@ -671,6 +674,17 @@ flowchart TD
 ### 15.6 Zero-Allocation Broadcast Guard
 
 In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending, avoiding buffering messages when no clients are live-streaming logs.
+
+### 15.7 Reactive REST API Synchronous Waiting
+
+- Synchronous lifecycle endpoints (`POST /api/v1/programs/:name/start?sync=true`) eliminate legacy 50ms busy-polling sleep loops.
+- Reactively subscribes to `EventHub` for `SystemEvent::StateChanged` events. When the target program transitions to `Running`, `Fatal`, or `Exited`, the endpoint unblocks instantaneously with zero polling delay.
+- Implements proactive lag recovery: if broadcast receiver lags (`RecvError::Lagged`), it immediately performs an in-memory snapshot check to avoid missed transitions.
+
+### 15.8 Responsive Cancellation in Exponential Backoff
+
+- During the startup failure backoff window (`2^retry_count` seconds), the backoff timer is multiplexed using `tokio::select!` against `cancel_token.cancelled()`.
+- Daemon shutdowns or program stop commands trigger immediate termination without stalling for up to 32 seconds in backoff sleep.
 
 ---
 

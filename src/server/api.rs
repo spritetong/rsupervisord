@@ -252,34 +252,72 @@ async fn start_program(
         ));
     }
 
-    // Synchronous mode: wait until status settles into Running, Fatal, or Exited
+    // Synchronous mode: wait reactively until status settles into Running, Fatal, or Exited
     let timeout_dur = Duration::from_secs(query.timeout);
-    while start_time.elapsed() < timeout_dur {
-        if let Ok(st) = state.manager.get_status(&name).await
-            && (st.state == ProgramState::Running
-                || st.state == ProgramState::Fatal
-                || st.state == ProgramState::Exited)
-        {
-            return Ok((
-                StatusCode::OK,
-                Json(ApiResponse::ok(ActionResponse {
-                    name,
-                    state: st.state,
-                    pid: st.pid,
-                    description: st.description,
-                    elapsed_ms: start_time.elapsed().as_millis() as u64,
-                })),
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut rx = state.manager.subscribe_events();
+
+    // Check if process settled immediately
+    if let Ok(st) = state.manager.get_status(&name).await
+        && (st.state == ProgramState::Running
+            || st.state == ProgramState::Fatal
+            || st.state == ProgramState::Exited)
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok(ActionResponse {
+                name,
+                state: st.state,
+                pid: st.pid,
+                description: st.description,
+                elapsed_ms: start_time.elapsed().as_millis() as u64,
+            })),
+        ));
     }
 
-    // Return current state upon timeout
-    let final_status = state
-        .manager
-        .get_status(&name)
-        .await
-        .unwrap_or_else(|_| crate::program::state::ProgramStatus::new_stopped(&name));
+    // Reactive event wait without busy-polling
+    let _ = tokio::time::timeout(timeout_dur, async {
+        loop {
+            match rx.recv().await {
+                Ok(crate::manager::SystemEvent::StateChanged {
+                    name: ref ev_name,
+                    new_state,
+                    ..
+                }) if ev_name == &name
+                    && (new_state == ProgramState::Running
+                        || new_state == ProgramState::Fatal
+                        || new_state == ProgramState::Exited) =>
+                {
+                    break;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(st) = state.manager.get_status(&name).await
+                        && (st.state == ProgramState::Running
+                            || st.state == ProgramState::Fatal
+                            || st.state == ProgramState::Exited)
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+    .await;
+
+    // Return current state upon settling or timeout
+    let final_status = match state.manager.get_status(&name).await {
+        Ok(st) => st,
+        Err(e) => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(format!(
+                    "Failed to retrieve status: {}",
+                    e
+                ))),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::OK,
@@ -311,11 +349,18 @@ async fn stop_program(
         ));
     }
 
-    let final_status = state
-        .manager
-        .get_status(&name)
-        .await
-        .unwrap_or_else(|_| crate::program::state::ProgramStatus::new_stopped(&name));
+    let final_status = match state.manager.get_status(&name).await {
+        Ok(st) => st,
+        Err(e) => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(format!(
+                    "Failed to retrieve status: {}",
+                    e
+                ))),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::OK,
@@ -347,11 +392,18 @@ async fn restart_program(
         ));
     }
 
-    let final_status = state
-        .manager
-        .get_status(&name)
-        .await
-        .unwrap_or_else(|_| crate::program::state::ProgramStatus::new_stopped(&name));
+    let final_status = match state.manager.get_status(&name).await {
+        Ok(st) => st,
+        Err(e) => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(format!(
+                    "Failed to retrieve status: {}",
+                    e
+                ))),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::OK,

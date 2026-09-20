@@ -377,6 +377,7 @@ impl ManagerHandle {
 pub struct SupervisorManager {
     handle: ManagerHandle,
     actor_handle: Option<JoinHandle<()>>,
+    _cancel_guard: tokio_util::sync::DropGuard,
 }
 
 impl SupervisorManager {
@@ -417,14 +418,17 @@ impl SupervisorManager {
 
         let handle = ManagerHandle {
             command_tx,
-            cancel_token,
+            cancel_token: cancel_token.clone(),
             activity_tracker,
             event_hub,
         };
 
+        let cancel_guard = cancel_token.clone().drop_guard();
+
         Ok(Self {
             handle,
             actor_handle: Some(actor_handle),
+            _cancel_guard: cancel_guard,
         })
     }
 
@@ -438,12 +442,6 @@ impl SupervisorManager {
             let _ = handle.await;
         }
         Ok(())
-    }
-}
-
-impl Drop for SupervisorManager {
-    fn drop(&mut self) {
-        self.handle.cancel_token.cancel();
     }
 }
 

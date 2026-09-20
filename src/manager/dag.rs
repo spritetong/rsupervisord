@@ -192,7 +192,7 @@ mod tests {
 
         let dag = DependencyGraph::build(&map).expect("DAG build failed");
 
-        // 启动层级: Layer 0: [db, redis], Layer 1: [api], Layer 2: [web]
+        // Startup layers: Layer 0: [db, redis], Layer 1: [api], Layer 2: [web]
         assert_eq!(dag.start_layers.len(), 3);
         assert_eq!(
             dag.start_layers[0],
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(dag.start_layers[1], vec!["api".to_string()]);
         assert_eq!(dag.start_layers[2], vec!["web".to_string()]);
 
-        // 关机层级: Layer 0: [web], Layer 1: [api], Layer 2: [redis, db] (redis priority 20 > db priority 10)
+        // Shutdown layers: Layer 0: [web], Layer 1: [api], Layer 2: [redis, db] (redis priority 20 > db priority 10)
         assert_eq!(dag.stop_layers.len(), 3);
         assert_eq!(dag.stop_layers[0], vec!["web".to_string()]);
         assert_eq!(dag.stop_layers[1], vec!["api".to_string()]);
@@ -210,7 +210,7 @@ mod tests {
             vec!["redis".to_string(), "db".to_string()]
         );
 
-        // 级联依赖查询: db 的下游依赖为 api 与 web
+        // Cascade dependency lookup: downstream dependents of db are api and web
         let deps = DependencyGraph::get_dependents(&map, "db");
         assert!(deps.contains("api"));
         assert!(deps.contains("web"));

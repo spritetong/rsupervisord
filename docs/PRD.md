@@ -24,6 +24,7 @@ In containerized environments, microservices architectures, edge devices, and Wi
 - **First-Class Cross-Platform Architecture**: Strict separation between core business orchestration and platform-specific implementations. The business layer contains zero `#[cfg]` branches, relying on uniform platform traits and Windows native Job Objects for 100% reliable descendant tree reclamation.
 - **Activity-Aware Adaptive Metrics & Disableable Logging**: Automatically pauses CPU/memory sampling during idle periods when no CLI or Web clients are connected. Supports completely disabling process and daemon logging (`Stdio::null()`), eliminating pipeline overhead.
 - **Star-Topology Dual-Track Event Hub & SSE**: Unified system lifecycle event broadcasting (`SystemEvent`) and aggregated log bus (`LogEntry`) with dual-track isolation, zero-subscriber no-op optimization, real-time Web UI EventSource synchronization, and CLI streaming (`rsupervisorctl events` & `rsupervisorctl tail -f all`).
+- **Resilient Scope-Guarded Lifecycle Management**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`, guarantees leak-free OS handle management, and drives synchronous API waiting reactively via `EventHub` with zero busy-polling.
 - **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
 - **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance; replaces XML-RPC with unified **UDS (Unix Domain Socket) / TCP + JSON REST API**.
 - **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
@@ -126,6 +127,8 @@ To eliminate boilerplate across multiple programs, the engine provides a `progra
 
 #### 3.1.5 Process Tree Cleanup & Leak Prevention
 
+- **Scope-Guarded Pre-Attachment Orphan Prevention**:
+  - Immediately upon `cmd.spawn()`, the child process is wrapped in a `scopeguard::guard` configured to invoke `child.start_kill()`. If subsequent steps (process group assignment, Job Object attachment, stdio pipe hooking, or health probe instantiation) fail, the child is reliably killed, completely preventing orphan process leaks during early startup failures.
 - **Windows Job Object Sandbox**:
   - Each program creates a dedicated Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
   - Child processes are assigned to the Job immediately upon creation. Regardless of how many sub-processes are spawned, the Windows NT kernel guarantees 100% reclamation when stopped or if the daemon terminates.
