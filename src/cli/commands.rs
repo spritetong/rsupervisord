@@ -235,6 +235,43 @@ pub async fn handle_tail(
     follow: bool,
     lines: usize,
 ) -> Result<()> {
+    if name == "all" {
+        if follow {
+            println!(
+                "{}",
+                "Streaming aggregated logs for all programs... (Press Ctrl+C to exit)"
+                    .cyan()
+                    .bold()
+            );
+            client
+                .stream_all_logs(|line| {
+                    if let Ok(entry) = serde_json::from_str::<crate::manager::LogEntry>(line) {
+                        let stream_tag = if entry.stream == "stderr" {
+                            "[stderr]".red()
+                        } else {
+                            "[stdout]".dimmed()
+                        };
+                        println!(
+                            "[{}] {} {}",
+                            entry.program.cyan().bold(),
+                            stream_tag,
+                            entry.line
+                        );
+                    } else {
+                        println!("{}", line);
+                    }
+                })
+                .await?;
+        } else {
+            println!(
+                "{}",
+                "Specify -f/--follow to tail all logs continuously: rsupervisorctl tail -f all"
+                    .yellow()
+            );
+        }
+        return Ok(());
+    }
+
     let initial_lines = client.read_logs(name, lines).await?;
     for line in initial_lines {
         println!("{}", line);
@@ -248,5 +285,94 @@ pub async fn handle_tail(
             .await?;
     }
 
+    Ok(())
+}
+
+/// Executes the 'events' command to stream live system events.
+pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
+    println!(
+        "{}",
+        "Subscribing to system event bus... (Press Ctrl+C to exit)"
+            .cyan()
+            .bold()
+    );
+    client
+        .stream_events(|line| {
+            if let Ok(event) = serde_json::from_str::<crate::manager::SystemEvent>(line) {
+                match event {
+                    crate::manager::SystemEvent::StateChanged {
+                        name,
+                        old_state,
+                        new_state,
+                        pid,
+                        exit_code,
+                        description,
+                    } => {
+                        let pid_str = pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
+                        let exit_str = exit_code
+                            .map(|c| format!(" exit={}", c))
+                            .unwrap_or_default();
+                        println!(
+                            "[{}] StateChanged: {:?} -> {:?}{}{} - {}",
+                            name.cyan().bold(),
+                            old_state,
+                            new_state,
+                            pid_str,
+                            exit_str,
+                            description
+                        );
+                    }
+                    crate::manager::SystemEvent::HealthChanged {
+                        name,
+                        healthy,
+                        status,
+                        reason,
+                    } => {
+                        let tag = if healthy {
+                            "HEALTHY".green()
+                        } else {
+                            "UNHEALTHY".red()
+                        };
+                        let r = reason.map(|s| format!(" ({})", s)).unwrap_or_default();
+                        println!(
+                            "[{}] HealthChanged: [{}] {:?}{}",
+                            name.cyan().bold(),
+                            tag,
+                            status,
+                            r
+                        );
+                    }
+                    crate::manager::SystemEvent::ConfigReloaded {
+                        added,
+                        removed,
+                        modified,
+                        unchanged,
+                    } => {
+                        println!(
+                            "{}: added={}, removed={}, modified={}, unchanged={}",
+                            "ConfigReloaded".magenta().bold(),
+                            added.len(),
+                            removed.len(),
+                            modified.len(),
+                            unchanged.len()
+                        );
+                    }
+                    crate::manager::SystemEvent::DaemonLifecycle {
+                        action,
+                        timestamp_secs,
+                    } => {
+                        println!(
+                            "{}: action={} at {}",
+                            "DaemonLifecycle".yellow().bold(),
+                            action,
+                            timestamp_secs
+                        );
+                    }
+                }
+            } else {
+                println!("{}", line);
+            }
+        })
+        .await?;
     Ok(())
 }

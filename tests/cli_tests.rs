@@ -53,6 +53,19 @@ fn test_cli_args_parsing() {
             lines: 50
         }) if name == "web"
     ));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "tail", "all", "-f"]);
+    assert!(matches!(
+        args.command,
+        Some(CliCommand::Tail {
+            name,
+            follow: true,
+            ..
+        }) if name == "all"
+    ));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "events"]);
+    assert!(matches!(args.command, Some(CliCommand::Events)));
 }
 
 #[tokio::test]

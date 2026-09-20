@@ -168,6 +168,98 @@ impl SupervisorClient {
         Ok(())
     }
 
+    /// Streams all real-time log lines across all managed programs from the daemon (Server-Sent Events).
+    pub async fn stream_all_logs<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&str),
+    {
+        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    self.endpoint
+                )
+            })?
+            .with_context(|| format!("Failed to connect to daemon at {:?}", self.endpoint))?;
+
+        let mut req =
+            "GET /api/v1/logs/stream HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
+                .to_string();
+        if let Some(ref token) = self.auth_token {
+            req.push_str(&format!("Authorization: Bearer {}\r\n", token));
+        }
+        req.push_str("\r\n");
+
+        stream.write_all(req.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut reader = BufReader::new(stream).lines();
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.is_empty() || line == "\r" {
+                break;
+            }
+        }
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            let trimmed = line.trim();
+            if let Some(data) = trimmed.strip_prefix("data:") {
+                callback(data.trim_start());
+            } else if !trimmed.is_empty() && !trimmed.starts_with(':') {
+                callback(trimmed);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Streams real-time system events from the daemon (Server-Sent Events).
+    pub async fn stream_events<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&str),
+    {
+        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    self.endpoint
+                )
+            })?
+            .with_context(|| format!("Failed to connect to daemon at {:?}", self.endpoint))?;
+
+        let mut req =
+            "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
+                .to_string();
+        if let Some(ref token) = self.auth_token {
+            req.push_str(&format!("Authorization: Bearer {}\r\n", token));
+        }
+        req.push_str("\r\n");
+
+        stream.write_all(req.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut reader = BufReader::new(stream).lines();
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.is_empty() || line == "\r" {
+                break;
+            }
+        }
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            let trimmed = line.trim();
+            if let Some(data) = trimmed.strip_prefix("data:") {
+                callback(data.trim_start());
+            } else if !trimmed.is_empty() && !trimmed.starts_with(':') {
+                callback(trimmed);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Sends an HTTP request and deserializes the JSON response body.
     async fn request_json<T: serde::de::DeserializeOwned>(
         &self,

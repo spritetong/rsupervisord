@@ -720,12 +720,27 @@
       </div>
 
       <div class="header-actions">
+        <!-- Live SSE Status Indicator -->
+        <div class="badge" :class="sseConnected ? 'badge-running' : 'badge-stopped'" :title="sseConnected ? 'Real-time Star Bus Event Stream Active (/api/v1/events)' : 'Real-time Event Stream Disconnected (Fallback Polling Active)'" style="display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; font-size: 12px; font-weight: 500;">
+          <span style="display: inline-block; width: 7px; height: 7px; border-radius: 50%;" :style="{ background: sseConnected ? '#10b981' : '#ef4444' }"></span>
+          <span>{{ sseConnected ? 'Live Events' : 'Polling' }}</span>
+        </div>
+
         <!-- Auto refresh indicator -->
         <button class="btn btn-outline" @click="toggleAutoRefresh" :title="autoRefresh ? 'Click to pause auto refresh' : 'Click to enable auto refresh'">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :style="{ animation: autoRefresh ? 'spin 4s linear infinite' : 'none' }">
             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
           </svg>
-          <span>{{ autoRefresh ? 'Auto: ' + refreshInterval + 's' : 'Paused' }}</span>
+          <span>{{ autoRefresh ? (sseConnected ? 'Heartbeat: 30s' : 'Auto: ' + refreshInterval + 's') : 'Paused' }}</span>
+        </button>
+
+        <!-- All Logs button -->
+        <button class="btn btn-outline" @click="openLogs('all')" title="Stream aggregated real-time logs across all programs">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          <span>All Logs</span>
         </button>
 
         <!-- Manual refresh button -->
@@ -1005,7 +1020,7 @@
             <polyline points="4 17 10 11 4 5"></polyline>
             <line x1="12" y1="19" x2="20" y2="19"></line>
           </svg>
-          <span class="modal-title">Logs: {{ logProgramName }}</span>
+          <span class="modal-title">Logs: {{ logProgramName === 'all' ? 'All Programs (Aggregated)' : logProgramName }}</span>
           <span class="badge badge-running" style="font-size: 10px;" v-if="logConnected">
             <span class="badge-dot"></span> Streaming
           </span>
@@ -1224,6 +1239,10 @@
         const isReloading = ref(false);
         const isActionPending = ref(false);
         const lastUpdated = ref(null);
+
+        // SSE Real-Time Star Event Bus
+        const sseConnected = ref(false);
+        let systemEventSource = null;
 
         // Auth
         const authToken = ref(localStorage.getItem('rsupervisord_auth_token') || '');
@@ -1653,30 +1672,48 @@
           logLines.value = [];
           logConnected.value = false;
 
-          // 1. Initial lines fetch
-          try {
-            const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/logs?lines=100`, {
-              headers: getHeaders()
-            });
-            const data = await res.json();
-            if (data.success && Array.isArray(data.data.lines)) {
-              logLines.value = data.data.lines;
-              scrollTerminalBottom();
+          // 1. Initial lines fetch (only for individual programs)
+          if (name !== 'all') {
+            try {
+              const res = await fetch(`/api/v1/programs/${encodeURIComponent(name)}/logs?lines=100`, {
+                headers: getHeaders()
+              });
+              const data = await res.json();
+              if (data.success && Array.isArray(data.data.lines)) {
+                logLines.value = data.data.lines;
+                scrollTerminalBottom();
+              }
+            } catch (e) {
+              console.error('Initial log fetch failed:', e);
             }
-          } catch (e) {
-            console.error('Initial log fetch failed:', e);
+          } else {
+            logLines.value = ['[Subscribing to aggregated log stream across all programs...]'];
           }
 
           // 2. Stream live updates via SSE
           try {
-            const sseUrl = `/api/v1/programs/${encodeURIComponent(name)}/logs/stream`;
+            const tokenParam = authToken.value ? '?token=' + encodeURIComponent(authToken.value) : '';
+            const sseUrl = name === 'all'
+              ? `/api/v1/logs/stream${tokenParam}`
+              : `/api/v1/programs/${encodeURIComponent(name)}/logs/stream${tokenParam}`;
+
             logEventSource = new EventSource(sseUrl);
             logEventSource.onopen = () => {
               logConnected.value = true;
             };
             logEventSource.onmessage = (event) => {
               if (event.data) {
-                logLines.value.push(event.data);
+                let text = event.data;
+                if (name === 'all') {
+                  try {
+                    const parsed = JSON.parse(event.data);
+                    if (parsed.program && parsed.line) {
+                      const tag = parsed.stream === 'stderr' ? ' [stderr]' : '';
+                      text = `[${parsed.program}]${tag} ${parsed.line}`;
+                    }
+                  } catch (_) {}
+                }
+                logLines.value.push(text);
                 if (logLines.value.length > 2000) {
                   logLines.value.shift();
                 }
@@ -1731,6 +1768,76 @@
           return '';
         }
 
+        // Star-Topology System Events SSE Listener
+        function setupSystemEvents() {
+          if (systemEventSource) {
+            systemEventSource.close();
+            systemEventSource = null;
+          }
+          try {
+            const tokenParam = authToken.value ? '?token=' + encodeURIComponent(authToken.value) : '';
+            const url = `/api/v1/events${tokenParam}`;
+            systemEventSource = new EventSource(url);
+
+            systemEventSource.onopen = () => {
+              sseConnected.value = true;
+              setupTimer();
+              fetchStatus();
+            };
+
+            const handleEvent = (event) => {
+              try {
+                const payload = JSON.parse(event.data);
+                const { type, data } = payload;
+                if (type === 'StateChanged') {
+                  const prog = programs.value.find(p => p.name === data.name);
+                  if (prog) {
+                    prog.state = String(data.new_state).toUpperCase();
+                    prog.pid = data.pid != null ? String(data.pid) : '-';
+                    prog.description = data.description;
+                    if (['STOPPED', 'FATAL', 'EXITED'].includes(prog.state)) {
+                      prog.cpu = '-';
+                      prog.mem = '-';
+                      prog.uptime = '-';
+                      prog.health = '-';
+                    }
+                  } else {
+                    fetchStatus();
+                  }
+                  lastUpdated.value = new Date();
+                } else if (type === 'HealthChanged') {
+                  const prog = programs.value.find(p => p.name === data.name);
+                  if (prog) {
+                    prog.health = data.status;
+                  }
+                  lastUpdated.value = new Date();
+                } else if (type === 'ConfigReloaded') {
+                  showToast('Configuration hot-reloaded', 'info');
+                  fetchStatus();
+                } else if (type === 'DaemonLifecycle') {
+                  showToast(`Daemon: ${data.action}`, 'info');
+                  fetchStatus();
+                }
+              } catch (err) {
+                console.error('Error handling system event:', err);
+              }
+            };
+
+            systemEventSource.onmessage = handleEvent;
+            systemEventSource.addEventListener('system', handleEvent);
+
+            systemEventSource.onerror = () => {
+              if (sseConnected.value) {
+                sseConnected.value = false;
+                setupTimer();
+              }
+            };
+          } catch (e) {
+            console.error('Failed to initialize System EventSource:', e);
+            sseConnected.value = false;
+          }
+        }
+
         // Auth Modal
         function openAuthModal() {
           tokenInput.value = authToken.value;
@@ -1747,6 +1854,7 @@
           }
           authModalOpen.value = false;
           showToast('Authentication token saved', 'success');
+          setupSystemEvents();
           fetchStatus();
         }
 
@@ -1783,12 +1891,13 @@
           return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
         }
 
-        // Auto refresh timer
+        // Auto refresh timer: heartbeat at 30s when SSE connected, or rapid polling on fallback
         let timer = null;
         function setupTimer() {
           if (timer) clearInterval(timer);
           if (autoRefresh.value) {
-            timer = setInterval(fetchStatus, refreshInterval.value * 1000);
+            const intervalSecs = sseConnected.value ? 30 : refreshInterval.value;
+            timer = setInterval(fetchStatus, intervalSecs * 1000);
           }
         }
 
@@ -1799,12 +1908,14 @@
 
         onMounted(() => {
           fetchStatus();
+          setupSystemEvents();
           setupTimer();
         });
 
         onUnmounted(() => {
           if (timer) clearInterval(timer);
           if (logEventSource) logEventSource.close();
+          if (systemEventSource) systemEventSource.close();
         });
 
         return {
@@ -1814,6 +1925,7 @@
           filterStatus,
           autoRefresh,
           refreshInterval,
+          sseConnected,
           isLoading,
           isReloading,
           isActionPending,

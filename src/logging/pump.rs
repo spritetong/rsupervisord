@@ -5,17 +5,21 @@
 
 use crate::logging::ring_buffer::RingBuffer;
 use crate::logging::rotator::LogRotator;
+use crate::manager::{EventHub, LogEntry};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::task::JoinHandle;
 
 /// Spawns an asynchronous background task to pump lines from an async reader (stdout/stderr)
-/// into a RingBuffer and an optional LogRotator file writer.
+/// into a RingBuffer, an optional LogRotator file writer, and the central EventHub.
 pub fn spawn_log_pump<R>(
     reader: R,
     ring_buffer: Arc<RingBuffer>,
     rotator: Option<LogRotator>,
     ring_prefix: Option<String>,
+    event_hub: Option<EventHub>,
+    program_name: Option<String>,
+    stream_name: &'static str,
 ) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -24,6 +28,13 @@ where
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            // Broadcast to the central EventHub LogBus if configured
+            if let Some(ref hub) = event_hub
+                && let Some(ref prog) = program_name
+            {
+                hub.publish_log(LogEntry::new(prog, stream_name, &line));
+            }
+
             // Push to in-memory RingBuffer (for tail -f and web streaming)
             if let Some(ref prefix) = ring_prefix {
                 ring_buffer.push(format!("{}: {}", prefix, line));

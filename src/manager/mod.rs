@@ -5,10 +5,12 @@
 
 pub mod activity;
 pub mod dag;
+pub mod event;
 pub mod health;
 pub mod supervisor;
 
 pub use activity::ActivityTracker;
 pub use dag::DependencyGraph;
+pub use event::{EventHub, LogEntry, SystemEvent};
 pub use health::{HealthEvent, HealthProbeRunner};
 pub use supervisor::{ManagerCommand, ManagerHandle, ReloadSummary, SupervisorManager};

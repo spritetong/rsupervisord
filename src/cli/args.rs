@@ -86,9 +86,9 @@ pub enum CliCommand {
     },
     /// Perform zero-downtime hot reload of configuration file
     Reload,
-    /// Tail console output for a specific program
+    /// Tail console output for a specific program, or 'all' for aggregated stream
     Tail {
-        /// Program name
+        /// Program name or 'all'
         name: String,
 
         /// Continuously stream live log lines
@@ -99,4 +99,6 @@ pub enum CliCommand {
         #[arg(short = 'n', long = "lines", default_value = "100")]
         lines: usize,
     },
+    /// Stream real-time system lifecycle and state events
+    Events,
 }

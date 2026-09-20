@@ -76,6 +76,7 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
             follow,
             lines,
         } => commands::handle_tail(&client, &name, follow, lines).await?,
+        CliCommand::Events => commands::handle_events(&client).await?,
     }
 
     Ok(())

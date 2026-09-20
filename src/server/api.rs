@@ -56,6 +56,11 @@ fn default_log_lines() -> usize {
     100
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct AuthQuery {
+    pub token: Option<String>,
+}
+
 /// Builds the complete Axum router with all v1 REST API endpoints and embedded Web UI.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -67,6 +72,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/all/start", post(start_all))
         .route("/api/v1/all/stop", post(stop_all))
         .route("/api/v1/reload", post(reload_config))
+        .route("/api/v1/events", get(stream_system_events))
+        .route("/api/v1/logs/stream", get(stream_all_logs))
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
         .fallback(crate::server::web::static_handler)
@@ -89,9 +96,23 @@ async fn record_activity_middleware(
 
 /// Validates optional bearer token authentication.
 fn check_auth(headers: &HeaderMap, auth_token: &Option<String>) -> Result<(), StatusCode> {
+    check_auth_with_query(headers, auth_token, None)
+}
+
+/// Validates optional bearer token authentication from either Authorization header or query parameter.
+fn check_auth_with_query(
+    headers: &HeaderMap,
+    auth_token: &Option<String>,
+    query_token: Option<&str>,
+) -> Result<(), StatusCode> {
     if let Some(expected_token) = auth_token
         && !expected_token.is_empty()
     {
+        if let Some(q) = query_token
+            && q == expected_token
+        {
+            return Ok(());
+        }
         let auth_header = headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
@@ -491,8 +512,9 @@ async fn stream_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
 
     let rx = state
         .manager
@@ -506,4 +528,46 @@ async fn stream_logs(
     });
 
     Ok(Sse::new(stream))
+}
+
+/// GET /api/v1/events
+async fn stream_system_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
+
+    let rx = state.manager.subscribe_events();
+    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
+        Ok(evt) => {
+            let json = serde_json::to_string(&evt).unwrap_or_default();
+            Some(Ok(Event::default().data(json)))
+        }
+        Err(_) => None,
+    });
+
+    Ok(Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default().interval(Duration::from_secs(15))))
+}
+
+/// GET /api/v1/logs/stream
+async fn stream_all_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
+
+    let rx = state.manager.subscribe_all_logs();
+    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
+        Ok(entry) => {
+            let json = serde_json::to_string(&entry).unwrap_or_default();
+            Some(Ok(Event::default().data(json)))
+        }
+        Err(_) => None,
+    });
+
+    Ok(Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default().interval(Duration::from_secs(15))))
 }

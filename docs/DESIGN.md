@@ -206,6 +206,61 @@ pub enum ProgramCommand {
 
 ---
 
+### 3.3 Star-Topology Dual-Track Event Bus (`EventHub`)
+
+Traditional supervisor implementations rely on point-to-point mesh invocation or tight coupling across server routes and worker actors. Furthermore, frontends are forced to poll `/status` continuously.
+
+To resolve these issues while maintaining minimal latency and zero wasted allocations, `rsupervisord` adopts a **Star-Topology Dual-Track Event Bus**:
+
+```mermaid
+flowchart TD
+    subgraph Producers ["Producers"]
+        ProgActor["ProgramActor\n(State: Running, Stopped, Exited...)"]
+        HealthTask["HealthProbeRunner\n(Health: Healthy, Unhealthy)"]
+        LogPumps["LogPump Tasks\n(Stdout / Stderr Lines)"]
+        ManagerCore["Manager Core\n(ConfigReloaded, DaemonLifecycle)"]
+    end
+
+    subgraph CentralHub ["Central Event Hub (EventHub)"]
+        direction TB
+        SystemBus["System Event Bus (SystemEventBus)\n- Critical state transitions, low frequency, reliable\n- tokio::sync::broadcast<SystemEvent> (cap: 256)"]
+        LogBus["Aggregated Log Bus (LogBus)\n- High-throughput streaming across all programs\n- tokio::sync::broadcast<LogEntry> (cap: 2048)"]
+    end
+
+    subgraph Consumers ["Consumers"]
+        WebSSE_Events["Web UI: System Events SSE\n(/api/v1/events)"]
+        WebSSE_Logs["Web UI: Live Logs Drawer & Aggregated Stream\n(/api/v1/programs/:name/logs/stream & /api/v1/logs/stream)"]
+        CLIMonitor["CLI Real-Time Monitor & Tail\n(rsupervisorctl events & tail -f all)"]
+        InternalWait["Internal Reactive State Sync\n(wait_for_state zero-polling listener)"]
+    end
+
+    Producers -->|publish| CentralHub
+    ProgActor -->|emit| SystemBus
+    HealthTask -->|emit| SystemBus
+    ManagerCore -->|emit| SystemBus
+    LogPumps -->|emit| LogBus
+
+    CentralHub -->|subscribe| Consumers
+    SystemBus --> WebSSE_Events
+    SystemBus --> CLIMonitor
+    SystemBus --> InternalWait
+    LogBus --> WebSSE_Logs
+    LogBus --> CLIMonitor
+```
+
+#### 3.3.1 Dual-Track Channel Separation & Zero-Subscriber Optimization
+
+1. **Dual-Track Channel Isolation**:
+   High-frequency log lines (which can burst to tens of thousands of lines per second) are segregated from critical system state events (`StateChanged`, `HealthChanged`, `ConfigReloaded`, `DaemonLifecycle`). This prevents log bursts from saturating the broadcast channel and causing dropped state events (`RecvError::Lagged`).
+2. **Zero-Subscriber No-Op Overhead**:
+   Before performing any serialization or channel cloning, `EventHub::publish_system` and `EventHub::publish_log` verify `self.tx.receiver_count() > 0`. When no clients are subscribed, event publishing incurs zero allocations or performance costs.
+3. **Purely Reactive `wait_for_state`**:
+   Internal commands waiting for state settling (e.g. synchronous CLI operations) subscribe to the `EventHub` rather than executing busy sleep loops (`tokio::time::sleep(50ms)`), achieving instant reaction upon state mutation.
+4. **Server-Sent Events (SSE) & Adaptive Web UI Heartbeat**:
+   The HTTP server exposes `GET /api/v1/events` and `GET /api/v1/logs/stream` (with optional `?token=` query parameter authentication for browsers). The embedded Web UI connects to `/api/v1/events` for millisecond-level state reflection, backing off the legacy polling timer to a 30-second fallback heartbeat.
+
+---
+
 ## 4. Lifecycle & JoinHandle Management
 
 ### 4.1 Task Registry (`ManagedTask`)

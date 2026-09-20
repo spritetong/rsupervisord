@@ -79,11 +79,26 @@ pub struct ManagerHandle {
     command_tx: mpsc::Sender<ManagerCommand>,
     cancel_token: CancellationToken,
     activity_tracker: crate::manager::ActivityTracker,
+    event_hub: crate::manager::EventHub,
 }
 
 impl ManagerHandle {
     pub fn activity_tracker(&self) -> &crate::manager::ActivityTracker {
         &self.activity_tracker
+    }
+
+    pub fn event_hub(&self) -> &crate::manager::EventHub {
+        &self.event_hub
+    }
+
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::manager::SystemEvent> {
+        self.event_hub.subscribe_system()
+    }
+
+    pub fn subscribe_all_logs(&self) -> tokio::sync::broadcast::Receiver<crate::manager::LogEntry> {
+        self.event_hub.subscribe_logs()
     }
 
     pub async fn start_program(&self, name: impl Into<String>) -> Result<(), ProgramError> {
@@ -373,11 +388,15 @@ impl SupervisorManager {
             initial_config.metrics.idle_timeout_secs,
             initial_config.metrics.enabled,
         );
+        let event_hub = crate::manager::EventHub::default();
 
         let mut programs = HashMap::new();
         for (name, cfg) in &programs_map {
-            let prog =
-                ProcessProgram::with_activity_tracker(cfg.clone(), activity_tracker.clone())?;
+            let prog = ProcessProgram::with_options(
+                cfg.clone(),
+                activity_tracker.clone(),
+                event_hub.clone(),
+            )?;
             programs.insert(name.clone(), Box::new(prog) as Box<dyn Program>);
         }
 
@@ -390,6 +409,7 @@ impl SupervisorManager {
             dag,
             command_rx,
             activity_tracker: activity_tracker.clone(),
+            event_hub: event_hub.clone(),
             cancel_token: cancel_token.clone(),
         };
 
@@ -399,6 +419,7 @@ impl SupervisorManager {
             command_tx,
             cancel_token,
             activity_tracker,
+            event_hub,
         };
 
         Ok(Self {
@@ -432,6 +453,7 @@ struct ManagerActor {
     dag: DependencyGraph,
     command_rx: mpsc::Receiver<ManagerCommand>,
     activity_tracker: crate::manager::ActivityTracker,
+    event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
 }
 
@@ -495,6 +517,13 @@ impl ManagerActor {
                             let _ = reply.send(res);
                         }
                         ManagerCommand::Shutdown { reply } => {
+                            self.event_hub.publish_system(crate::manager::SystemEvent::DaemonLifecycle {
+                                action: "shutting_down".to_string(),
+                                timestamp_secs: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                            });
                             self.execute_stop_all(None).await;
                             let _ = reply.send(Ok(()));
                             break;
@@ -625,9 +654,10 @@ impl ManagerActor {
                 let _ = prog.shutdown().await;
             }
 
-            let mut new_prog = ProcessProgram::with_activity_tracker(
+            let mut new_prog = ProcessProgram::with_options(
                 new_cfg.clone(),
                 self.activity_tracker.clone(),
+                self.event_hub.clone(),
             )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
@@ -641,9 +671,10 @@ impl ManagerActor {
         // 3. Added programs: instantiate, register, and start if autostart
         for new_cfg in diff.added {
             let name = &new_cfg.name;
-            let mut new_prog = ProcessProgram::with_activity_tracker(
+            let mut new_prog = ProcessProgram::with_options(
                 new_cfg.clone(),
                 self.activity_tracker.clone(),
+                self.event_hub.clone(),
             )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
@@ -656,6 +687,15 @@ impl ManagerActor {
 
         // 4. Update the active DAG
         self.dag = new_dag;
+
+        // 5. Broadcast ConfigReloaded event to subscribers
+        self.event_hub
+            .publish_system(crate::manager::SystemEvent::ConfigReloaded {
+                added: summary.added.clone(),
+                removed: summary.removed.clone(),
+                modified: summary.modified.clone(),
+                unchanged: summary.unchanged.clone(),
+            });
 
         Ok(summary)
     }

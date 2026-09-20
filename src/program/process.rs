@@ -43,18 +43,35 @@ pub struct ProcessProgram {
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
     started_at: Arc<RwLock<Option<Instant>>>,
+    event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
     actor_handle: Option<JoinHandle<()>>,
 }
 
 impl ProcessProgram {
     pub fn new(config: ProgramConfig) -> Result<Self, ProgramError> {
-        Self::with_activity_tracker(config, crate::manager::ActivityTracker::default())
+        Self::with_options(
+            config,
+            crate::manager::ActivityTracker::default(),
+            crate::manager::EventHub::default(),
+        )
     }
 
     pub fn with_activity_tracker(
         config: ProgramConfig,
         activity_tracker: crate::manager::ActivityTracker,
+    ) -> Result<Self, ProgramError> {
+        Self::with_options(
+            config,
+            activity_tracker,
+            crate::manager::EventHub::default(),
+        )
+    }
+
+    pub fn with_options(
+        config: ProgramConfig,
+        activity_tracker: crate::manager::ActivityTracker,
+        event_hub: crate::manager::EventHub,
     ) -> Result<Self, ProgramError> {
         config.validate()?;
 
@@ -71,6 +88,7 @@ impl ProcessProgram {
             ring_buffer.clone(),
             started_at.clone(),
             activity_tracker,
+            event_hub.clone(),
             cancel_token.clone(),
         );
 
@@ -82,28 +100,52 @@ impl ProcessProgram {
             status_snapshot,
             ring_buffer,
             started_at,
+            event_hub,
             cancel_token,
             actor_handle: Some(actor_handle),
         })
     }
 
-    /// Waits until the program reaches the target state or times out.
+    /// Waits until the program reaches the target state or times out using event-driven notification.
     pub async fn wait_for_state(
         &self,
         target: ProgramState,
         timeout_dur: Duration,
     ) -> Result<(), ProgramError> {
-        let start = Instant::now();
-        while start.elapsed() < timeout_dur {
-            if self.status().state == target {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if self.status().state == target {
+            return Ok(());
         }
-        Err(ProgramError::Timeout {
-            name: self.config.name.clone(),
-            timeout_secs: timeout_dur.as_secs(),
-        })
+
+        let mut rx = self.event_hub.subscribe_system();
+        // Check once again in case state transitioned before subscription
+        if self.status().state == target {
+            return Ok(());
+        }
+
+        let name = &self.config.name;
+        let timeout_future = tokio::time::timeout(timeout_dur, async {
+            while let Ok(event) = rx.recv().await {
+                if let crate::manager::SystemEvent::StateChanged {
+                    name: ref evt_name,
+                    new_state,
+                    ..
+                } = event
+                    && evt_name == name
+                    && new_state == target
+                {
+                    return Ok(());
+                }
+            }
+            Err(ProgramError::ChannelClosed { name: name.clone() })
+        });
+
+        match timeout_future.await {
+            Ok(res) => res,
+            Err(_) => Err(ProgramError::Timeout {
+                name: self.config.name.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            }),
+        }
     }
 }
 
@@ -258,6 +300,7 @@ struct ProgramActor {
     ring_buffer: Arc<RingBuffer>,
     started_at: Arc<RwLock<Option<Instant>>>,
     activity_tracker: crate::manager::ActivityTracker,
+    event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
     current_child: Option<RunningChild>,
     retry_count: u32,
@@ -265,6 +308,7 @@ struct ProgramActor {
 }
 
 impl ProgramActor {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: ProgramConfig,
         command_rx: mpsc::Receiver<ProgramCommand>,
@@ -272,6 +316,7 @@ impl ProgramActor {
         ring_buffer: Arc<RingBuffer>,
         started_at: Arc<RwLock<Option<Instant>>>,
         activity_tracker: crate::manager::ActivityTracker,
+        event_hub: crate::manager::EventHub,
         cancel_token: CancellationToken,
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
@@ -284,6 +329,7 @@ impl ProgramActor {
             ring_buffer,
             started_at,
             activity_tracker,
+            event_hub,
             cancel_token,
             current_child: None,
             retry_count: 0,
@@ -313,17 +359,39 @@ impl ProgramActor {
                 Some(health_event) = self.health_rx.recv(), if has_child && has_health_check => {
                     match health_event {
                         crate::manager::HealthEvent::Healthy => {
-                            let mut snapshot = self.status_snapshot.write();
-                            snapshot.health = crate::program::state::HealthStatus::Healthy;
-                            snapshot.is_healthy = true;
+                            let changed = {
+                                let mut snapshot = self.status_snapshot.write();
+                                let old = snapshot.health;
+                                snapshot.health = crate::program::state::HealthStatus::Healthy;
+                                snapshot.is_healthy = true;
+                                old != crate::program::state::HealthStatus::Healthy
+                            };
+                            if changed {
+                                self.event_hub.publish_system(crate::manager::SystemEvent::HealthChanged {
+                                    name: self.config.name.clone(),
+                                    healthy: true,
+                                    status: crate::program::state::HealthStatus::Healthy,
+                                    reason: None,
+                                });
+                            }
                         }
                         crate::manager::HealthEvent::Unhealthy => {
-                            let should_restart = {
+                            let (should_restart, changed) = {
                                 let mut snapshot = self.status_snapshot.write();
+                                let old = snapshot.health;
                                 snapshot.health = crate::program::state::HealthStatus::Unhealthy;
                                 snapshot.is_healthy = false;
-                                self.config.autorestart != AutoRestartPolicy::Never
+                                (self.config.autorestart != AutoRestartPolicy::Never, old != crate::program::state::HealthStatus::Unhealthy)
                             };
+
+                            if changed {
+                                self.event_hub.publish_system(crate::manager::SystemEvent::HealthChanged {
+                                    name: self.config.name.clone(),
+                                    healthy: false,
+                                    status: crate::program::state::HealthStatus::Unhealthy,
+                                    reason: Some("Health check probe failed consecutively".to_string()),
+                                });
+                            }
 
                             if should_restart {
                                 tracing::warn!(
@@ -513,7 +581,15 @@ impl ProgramActor {
 
         let stdout_pump = if !stdout_disabled {
             stdout.map(|pipe| {
-                crate::logging::spawn_log_pump(pipe, self.ring_buffer.clone(), stdout_rotator, None)
+                crate::logging::spawn_log_pump(
+                    pipe,
+                    self.ring_buffer.clone(),
+                    stdout_rotator,
+                    None,
+                    Some(self.event_hub.clone()),
+                    Some(self.config.name.clone()),
+                    "stdout",
+                )
             })
         } else {
             None
@@ -532,6 +608,9 @@ impl ProgramActor {
                     self.ring_buffer.clone(),
                     stderr_rotator,
                     stderr_prefix,
+                    Some(self.event_hub.clone()),
+                    Some(self.config.name.clone()),
+                    "stderr",
                 )
             })
         } else {
@@ -774,16 +853,32 @@ impl ProgramActor {
         exit_code: Option<i32>,
         description: String,
     ) {
-        let mut snapshot = self.status_snapshot.write();
-        snapshot.state = state;
-        snapshot.pid = pid;
-        snapshot.exit_code = exit_code;
-        snapshot.description = description;
-        if state != ProgramState::Running && state != ProgramState::Starting {
-            snapshot.health = crate::program::state::HealthStatus::None;
-            snapshot.is_healthy = false;
-            snapshot.metrics = None;
-            snapshot.uptime_secs = None;
+        let (old_state, should_emit) = {
+            let mut snapshot = self.status_snapshot.write();
+            let old_state = snapshot.state;
+            snapshot.state = state;
+            snapshot.pid = pid;
+            snapshot.exit_code = exit_code;
+            snapshot.description = description.clone();
+            if state != ProgramState::Running && state != ProgramState::Starting {
+                snapshot.health = crate::program::state::HealthStatus::None;
+                snapshot.is_healthy = false;
+                snapshot.metrics = None;
+                snapshot.uptime_secs = None;
+            }
+            (old_state, old_state != state || exit_code.is_some())
+        };
+
+        if should_emit {
+            self.event_hub
+                .publish_system(crate::manager::SystemEvent::StateChanged {
+                    name: self.config.name.clone(),
+                    old_state,
+                    new_state: state,
+                    pid,
+                    exit_code,
+                    description,
+                });
         }
     }
 }
