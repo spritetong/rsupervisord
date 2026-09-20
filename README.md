@@ -7,7 +7,7 @@
 
 **rsupervisord** is a modern, high-performance, asynchronous process orchestration and monitoring daemon engine written in Rust.
 
-Designed as a modern alternative to legacy tools like Python Supervisor and Go `ochinchina/supervisord`, `rsupervisord` achieves **true zero-process-polling CPU overhead (0% CPU at idle)**, robust descendant process tree lifecycle control via Windows **Job Objects** and Linux **Subreaper/PGID**, DAG-based dependency startup and shutdown, zero-downtime configuration hot-reloads, and an out-of-the-box embedded single-page Web UI with **zero external NPM dependencies**.
+Designed as a modern alternative to legacy tools like Python Supervisor and Go `ochinchina/supervisord`, `rsupervisord` achieves **true zero-process-polling CPU overhead (0% CPU at idle)**, robust descendant process tree lifecycle control via Windows **Job Objects** and Linux **Process Groups (PGID)**, DAG-based dependency startup and shutdown, zero-downtime configuration hot-reloads, and an out-of-the-box embedded single-page Web UI with **zero external NPM dependencies**.
 
 ---
 
@@ -19,7 +19,7 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
   - Programs without health checks sleep in the Tokio reactor with **0 periodic timers and 0 user-space polling wakeups**.
 - 🛡️ **Guaranteed Process Tree Reclamation (No Leaked Orphans)**:
   - **Windows**: Bound to native Win32 `Job Objects` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Even multi-tier grandchild processes are 100% terminated by the Windows kernel if the daemon terminates or stops a service—without relying on `taskkill.exe`.
-  - **Linux / BSD**: Subreaper adoption (`PR_SET_CHILD_SUBREAPER`), isolated process groups (`setpgid`), and group signal dispatching (`killpg`).
+  - **Linux / BSD**: Isolated process groups (`setpgid`), group signal dispatching (`killpg`), and atomic child lifecycle monitoring via `pidfd`.
   - **Scope-Guarded Pre-Attachment**: Early startup errors or cancellations automatically terminate newly spawned child processes via `scopeguard`, eliminating orphan processes before OS tree attachment.
 - 🧰 **Resilient RAII Lifecycles & Zero-Polling API**:
   - Replaces boilerplate `impl Drop` with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard` for OS handles and socket files.
@@ -67,7 +67,7 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
              [ProcessProgram: MySQL]    [ProcessProgram: Core-API]
                         |                          |
              +--------------------+     +--------------------+
-             | Windows Job Object |     | Linux Subreaper/PG |
+             | Windows Job Object |     | Linux Process Group|
              +--------------------+     +--------------------+
 ```
 

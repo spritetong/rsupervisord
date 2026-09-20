@@ -54,13 +54,3 @@ pub async fn wait_for_shutdown_signal() {
         }
     }
 }
-
-/// Configures subreaper status on supported platforms (Linux) to adopt orphaned grandchild processes.
-pub fn setup_subreaper() {
-    #[cfg(unix)]
-    {
-        if let Err(e) = unix::setup_subreaper() {
-            tracing::warn!("Failed to setup subreaper: {}", e);
-        }
-    }
-}

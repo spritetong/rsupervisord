@@ -68,12 +68,12 @@ flowchart TD
 
     subgraph OSPlatform ["OS Native Platform Abstraction Layer"]
         WinJob["Windows: Job Object + IOCP Exit Notification"]
-        PosixSubreaper["Linux: PR_SET_CHILD_SUBREAPER + setpgid + pidfd"]
+        PosixGroups["Linux: Process Groups (setpgid) + pidfd"]
         PosixBsd["BSD: kqueue (EVFILT_PROC)"]
     end
 
-    ProgramA -.-> WinJob & PosixSubreaper
-    ProgramB -.-> WinJob & PosixSubreaper
+    ProgramA -.-> WinJob & PosixGroups
+    ProgramB -.-> WinJob & PosixGroups
     ProgramC -.-> WinJob & PosixBsd
 ```
 
@@ -470,10 +470,10 @@ flowchart TD
 - Configures `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the job handle is closed upon termination or crash, the Windows kernel terminates all descendant processes automatically, eliminating orphan leaks without needing `taskkill.exe`.
 - For graceful stops, sends `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` before falling back to `TerminateJobObject`.
 
-### 7.2 POSIX (Linux / BSD) Platform: Process Groups & Subreaper
+### 7.2 POSIX (Linux / BSD) Platform: Process Groups & Process Isolation
 
-- **Process Groups**: Calls `setpgid(0, 0)` in `pre_exec` to isolate child process groups, delivering signals via `killpg(pgid, signal)`.
-- **Subreaper Activation**: Configures Linux `PR_SET_CHILD_SUBREAPER` on startup so double-forked daemons and orphaned background grandchildren are adopted directly by `rsupervisord` rather than PID 1.
+- **Process Groups & Group Signaling**: Calls `setpgid(0, 0)` in `pre_exec` to place each child process in its own distinct process group. Stop signals (`SIGTERM`, `SIGKILL`, etc.) are dispatched to `-pgid` via `killpg`, ensuring that all direct subprocesses spawned by scripts or interpreters are terminated cleanly together.
+- **Orphan Reaping Architecture (No Subreaper)**: `PR_SET_CHILD_SUBREAPER` is intentionally disabled. Tokio's async process runtime exclusively manages and reaps its direct children. Calling a wildcard `waitpid(-1, WNOHANG)` loop in the daemon would race with Tokio's internal process driver and steal child exit statuses, triggering false `ECHILD` errors and lost exit codes. Instead, detached grandchildren (e.g. double-forked background daemons) are adopted by system init (PID 1, such as systemd or container inits like `tini` / `dumb-init`), which reaps them without interfering with the supervisor's state machine.
 - **Fork-Safe Privilege De-escalation**: Resolves user and group IDs via NSS lookups (`getpwnam_r`, `getgrnam_r`) in the parent process prior to fork. The `pre_exec` hook executes exclusively async-signal-safe primitives (`setpgid`, `umask`, `setgid`, `setuid`) with pre-resolved integer IDs, avoiding deadlock risks from glibc internal locks or allocations post-fork.
 
 ---

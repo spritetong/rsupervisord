@@ -367,23 +367,3 @@ fn parse_user_spec(spec: &str) -> Result<(Option<Uid>, Option<Gid>), ProgramErro
 
     Ok((uid, gid))
 }
-
-/// Configures Linux PR_SET_CHILD_SUBREAPER to adopt orphaned grandchild processes.
-#[cfg(all(unix, target_os = "linux"))]
-pub fn setup_subreaper() -> Result<(), ProgramError> {
-    unsafe {
-        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(ProgramError::PlatformError(format!(
-                "Failed to enable PR_SET_CHILD_SUBREAPER: {}",
-                err
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-pub fn setup_subreaper() -> Result<(), ProgramError> {
-    Ok(())
-}

@@ -51,7 +51,7 @@ flowchart TD
     end
 
     subgraph PlatformLayer ["OS Abstraction Layer"]
-        PosixBackend["Linux/BSD: nix\n[setpgid, pidfd, PR_SET_CHILD_SUBREAPER, setuid/gid, SO_PEERCRED]"]
+        PosixBackend["Linux/BSD: nix\n[setpgid, pidfd, setuid/gid, SO_PEERCRED]"]
         WinBackend["Windows: windows-sys\n[Job Objects, AssignProcess, ConsoleCtrlEvent, RunAs, TokenElevation]"]
     end
 
@@ -132,10 +132,10 @@ To eliminate boilerplate across multiple programs, the engine provides a `progra
 - **Windows Job Object Sandbox**:
   - Each program creates a dedicated Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
   - Child processes are assigned to the Job immediately upon creation. Regardless of how many sub-processes are spawned, the Windows NT kernel guarantees 100% reclamation when stopped or if the daemon terminates.
-- **Linux / BSD Subreaper & Process Groups**:
+- **Linux / BSD Process Groups & Group Signaling**:
   - Child processes call `setpgid(0, 0)` in `pre_exec` to establish an isolated process group.
-  - Termination signals are broadcast to the group via `kill(-pgid, signal)`.
-  - The daemon activates `PR_SET_CHILD_SUBREAPER` on Linux to adopt and reap orphan grandchildren.
+  - Termination signals are broadcast to the entire group via `kill(-pgid, signal)`.
+  - Subreaper is intentionally disabled so Tokio retains exclusive child exit ownership without `ECHILD` race conditions, while detached grandchildren are reclaimed by system init (PID 1).
 
 #### 3.1.6 Hot Reload & Incremental Diff Engine
 
