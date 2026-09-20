@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use crate::cli::transport::Endpoint;
 use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,

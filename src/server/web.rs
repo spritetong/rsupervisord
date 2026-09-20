@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;

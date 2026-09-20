@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use crate::program::state::ProgramState;
 use serde::{Deserialize, Serialize};
 use tabled::Tabled;

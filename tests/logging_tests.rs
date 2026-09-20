@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use rsupervisord::logging::{LogRotator, RingBuffer, parse_byte_size};
 use rsupervisord::program::ProcessProgram;
 use rsupervisord::program::config::{AutoRestartPolicy, ProgramConfig, ProgramLogsConfig};

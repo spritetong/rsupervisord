@@ -4,6 +4,7 @@ installed
 debug
 release
 generated_*
+logs
 env
 __pycache__
 
@@ -22,3 +23,6 @@ __pycache__
 *.swo
 *.swp
 *.tmp
+
+/config.yaml
+/Makefile

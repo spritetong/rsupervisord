@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
 use rsupervisord::program::state::{HealthStatus, ProgramState};

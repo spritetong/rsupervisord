@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
 use rsupervisord::program::ProgramState;
@@ -165,4 +170,32 @@ programs:
     assert_eq!(add_status.state, ProgramState::Running);
 
     manager.shutdown().await.expect("shutdown manager");
+}
+
+#[test]
+fn test_config_example_yaml_parsing() {
+    let example_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config-example.yaml");
+    assert!(example_path.exists(), "config-example.yaml must exist");
+
+    let config =
+        SupervisorConfig::from_file(&example_path).expect("config-example.yaml must be valid");
+    assert_eq!(config.programs.len(), 4);
+    assert!(config.programs.contains_key("redis"));
+    assert!(config.programs.contains_key("api-server"));
+    assert!(config.programs.contains_key("worker-task"));
+    assert!(config.programs.contains_key("web-frontend"));
+
+    let resolved = config
+        .resolve_programs()
+        .expect("resolve programs in config-example.yaml");
+    assert_eq!(resolved.len(), 4);
+
+    let redis = &resolved["redis"];
+    assert_eq!(redis.priority, 10);
+    assert!(redis.health_check.is_some());
+
+    let api = &resolved["api-server"];
+    assert_eq!(api.priority, 20);
+    assert_eq!(api.depends_on, vec!["redis"]);
+    assert!(api.health_check.is_some());
 }

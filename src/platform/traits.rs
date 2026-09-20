@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use crate::error::ProgramError;
 use crate::program::config::StopSignal;
 use std::path::PathBuf;

@@ -1,0 +1,216 @@
+# ==============================================================================
+# rsupervisord Configuration Example (config-example.yaml)
+#
+# Production-grade process supervisor with high concurrency, zero-abort safety,
+# DAG topology scheduling, zero-downtime hot reload, and embedded Web UI.
+#
+# Environment variables in the format ${VAR} or ${VAR:-default} will be automatically
+# expanded upon loading.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Daemon Server Engine Settings
+# ------------------------------------------------------------------------------
+server:
+  # Local IPC socket path (Unix Domain Socket on Unix, Named Pipe / UDS on Windows)
+  # Default on Unix: /var/run/rsupervisord.sock (or /tmp/rsupervisord.sock)
+  # Default on Windows: \\.\pipe\rsupervisord (or C:/run/rsupervisord.sock for Caddy UDS)
+  uds_path: "${RSUPERVISORD_IPC_PATH:-/var/run/rsupervisord.sock}"
+
+  # Optional TCP HTTP listener for the Embedded Web UI and REST API.
+  # If omitted, server will only listen on the local IPC socket.
+  http_bind: "127.0.0.1:8500"
+
+  # Optional Bearer Token authentication for the REST API and Web UI.
+  # Leave blank or omit if authentication is not required for local access.
+  auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
+
+# ------------------------------------------------------------------------------
+# 2. Daemon Logging Settings
+# ------------------------------------------------------------------------------
+logging:
+  # Daemon self-log file destination. If omitted, logs to stdout/stderr.
+  file: "logs/rsupervisord.log"
+
+  # Log verbosity level: trace, debug, info, warn, error (default: info)
+  level: "info"
+
+  # Maximum log file size before rotation (e.g. 10MB, 20MB, 100MB)
+  max_bytes: "20MB"
+
+  # Number of historical rotated backup files to retain
+  backups: 5
+
+# ------------------------------------------------------------------------------
+# 3. Global Default Program Template
+# ------------------------------------------------------------------------------
+# Default values applied to any program that does not explicitly override them.
+program_defaults:
+  # Automatically start this program when the daemon launches (default: true)
+  autostart: true
+
+  # Auto-restart policy:
+  #   - unexpected: restart only if process exits with a code not in exit_codes (default)
+  #   - always:     always restart regardless of exit status
+  #   - never:      never restart automatically
+  autorestart: unexpected
+
+  # Minimum continuous runtime (in seconds) before a process is considered RUNNING (default: 3)
+  start_secs: 3
+
+  # Maximum consecutive retry attempts when entering BACKOFF state (default: 3)
+  start_retries: 3
+
+  # Signal sent for graceful stop: TERM, INT, QUIT, KILL, CTRL_BREAK, CTRL_C
+  # Default: TERM on Unix, CTRL_BREAK on Windows
+  stop_signal: TERM
+
+  # Grace period (in seconds) to wait for exit before force-killing (default: 10)
+  stop_wait_secs: 10
+
+  # Startup and shutdown priority: 0 to 99 (default: 50).
+  # Lower priority values start first and stop last.
+  priority: 50
+
+  # Default logging parameters for program processes
+  logs:
+    max_bytes: "20MB"
+    backups: 3
+    redirect_stderr: false
+
+# ------------------------------------------------------------------------------
+# 4. Supervised Programs
+# ------------------------------------------------------------------------------
+programs:
+
+  # ----------------------------------------------------------------------------
+  # Example 1: Infrastructure Service (Redis)
+  # Low priority (starts first), always restarted, TCP health probe.
+  # ----------------------------------------------------------------------------
+  redis:
+    command: "redis-server --port 6379 --protected-mode no"
+    priority: 10
+    autostart: true
+    autorestart: always
+    start_secs: 2
+
+    # Active health checking probe
+    health_check:
+      type: tcp
+      endpoint: "127.0.0.1:6379"
+      interval_secs: 10
+      timeout_secs: 2
+      failure_threshold: 3
+
+    logs:
+      stdout: "logs/redis.log"
+      redirect_stderr: true
+
+  # ----------------------------------------------------------------------------
+  # Example 2: Backend API Server
+  # Depends on Redis, environment variable expansion, HTTP health check.
+  # ----------------------------------------------------------------------------
+  api-server:
+    command: "./bin/api-server"
+    args:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+    priority: 20
+    depends_on:
+      - "redis"
+
+    directory: "./services/api"
+    # user: "www-data"   # Unix only: unprivileged user to execute process
+    # umask: 022          # Unix file creation mode mask
+
+    environment:
+      APP_ENV: "production"
+      DATABASE_URL: "${DATABASE_URL:-postgres://postgres:secret@127.0.0.1:5432/myapp}"
+      REDIS_URL: "redis://127.0.0.1:6379"
+      LOG_LEVEL: "info"
+
+    autostart: true
+    autorestart: unexpected
+    start_secs: 5
+    start_retries: 5
+    stop_signal: TERM
+    stop_wait_secs: 15
+    exit_codes: [0]
+
+    # HTTP health check probe
+    health_check:
+      type: http
+      url: "http://127.0.0.1:8080/health"
+      expected_status: 200
+      interval_secs: 15
+      timeout_secs: 3
+      failure_threshold: 3
+      initial_delay_secs: 5
+
+    logs:
+      stdout: "logs/api-server.log"
+      stderr: "logs/api-server.err"
+      max_bytes: "50MB"
+      backups: 5
+
+  # ----------------------------------------------------------------------------
+  # Example 3: Background Worker
+  # Depends on API server, Exec health check command, custom exit codes.
+  # ----------------------------------------------------------------------------
+  worker-task:
+    command: "python3 worker.py --concurrency=4"
+    priority: 30
+    depends_on:
+      - "api-server"
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      WORKER_QUEUE: "critical,default,low"
+
+    autorestart: unexpected
+    exit_codes:
+      - 0
+      - 2
+
+    stop_signal: TERM
+    stop_wait_secs: 20
+
+    # Exec health check probe: executes shell command, checks exit code == 0
+    health_check:
+      type: exec
+      command: "python3 check_worker.py"
+      interval_secs: 30
+      timeout_secs: 5
+      failure_threshold: 2
+
+    logs:
+      stdout: "logs/worker.log"
+      redirect_stderr: true
+
+  # ----------------------------------------------------------------------------
+  # Example 4: Web Frontend Service
+  # Higher priority (starts last in DAG), depends on API server.
+  # ----------------------------------------------------------------------------
+  web-frontend:
+    command: "node server.js"
+    priority: 40
+    depends_on:
+      - "api-server"
+
+    directory: "./services/frontend"
+    environment:
+      PORT: "3000"
+      API_BASE_URL: "http://127.0.0.1:8080"
+
+    health_check:
+      type: http
+      url: "http://127.0.0.1:3000/api/health"
+      expected_status: 200
+      interval_secs: 15
+      timeout_secs: 2
+
+    logs:
+      stdout: "logs/frontend.log"
+      redirect_stderr: true

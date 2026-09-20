@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use std::borrow::Cow;
 
 /// Expands environment variables in the format `${VAR}` or `${VAR:-default}` within a raw string.

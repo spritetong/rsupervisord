@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Sprite Tong <spritetong@gmail.com>
+//
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
+
 use crate::logging::ring_buffer::RingBuffer;
 use crate::logging::rotator::LogRotator;
 use std::sync::Arc;

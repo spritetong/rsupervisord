@@ -2,6 +2,11 @@
 name = "rsupervisord"
 version = "0.1.0"
 edition = "2024"
+authors = ["Sprite Tong <spritetong@gmail.com>"]
+repository = "https://github.com/spritetong/rsupervisord"
+license = "MIT"
+description = "High-performance, memory-safe, asynchronous process supervisor with DAG orchestration, zero-downtime hot reload, and embedded Web UI"
+readme = "README.md"
 
 [[bin]]
 name = "rsupervisord"
@@ -10,6 +15,14 @@ path = "src/main.rs"
 [[bin]]
 name = "rsupervisorctl"
 path = "src/bin/rsupervisorctl.rs"
+
+[profile.release]
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+opt-level = "z"
+debug = 0
+strip = true
 
 [dependencies]
 # Async runtime and utilities
