@@ -37,6 +37,8 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub file: Option<PathBuf>,
     #[serde(default = "default_log_level")]
@@ -55,9 +57,42 @@ fn default_backups() -> usize {
     3
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_metrics_idle_timeout() -> u64 {
+    30
+}
+
+fn default_metrics_interval() -> u64 {
+    2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_metrics_interval")]
+    pub interval_secs: u64,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_timeout_secs: default_metrics_idle_timeout(),
+            interval_secs: default_metrics_interval(),
+        }
+    }
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             file: None,
             level: default_log_level(),
             max_bytes: Some("20MB".to_string()),
@@ -129,9 +164,13 @@ pub struct ProgramConfigRaw {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SupervisorConfig {
     #[serde(default)]
+    pub worker_threads: Option<usize>,
+    #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
     #[serde(default)]
     pub program_defaults: ProgramDefaults,
     #[serde(default)]
@@ -236,6 +275,7 @@ impl SupervisorConfig {
                 let def = self.program_defaults.logs.clone().unwrap_or_default();
                 if let Some(ref raw_logs) = raw.logs {
                     ProgramLogsConfig {
+                        enabled: raw_logs.enabled && def.enabled,
                         stdout: raw_logs.stdout.clone().or(def.stdout),
                         stderr: raw_logs.stderr.clone().or(def.stderr),
                         max_bytes: raw_logs.max_bytes.clone().or(def.max_bytes),

@@ -139,6 +139,7 @@ async fn test_process_stdout_file_logging_and_rotation() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = 0;
     config.logs = ProgramLogsConfig {
+        enabled: true,
         stdout: Some(stdout_log.clone()),
         stderr: None,
         max_bytes: Some("25B".to_string()), // Low threshold to force rotation

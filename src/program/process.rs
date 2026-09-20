@@ -42,16 +42,25 @@ pub struct ProcessProgram {
     command_tx: mpsc::Sender<ProgramCommand>,
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
+    started_at: Arc<RwLock<Option<Instant>>>,
     cancel_token: CancellationToken,
     actor_handle: Option<JoinHandle<()>>,
 }
 
 impl ProcessProgram {
     pub fn new(config: ProgramConfig) -> Result<Self, ProgramError> {
+        Self::with_activity_tracker(config, crate::manager::ActivityTracker::default())
+    }
+
+    pub fn with_activity_tracker(
+        config: ProgramConfig,
+        activity_tracker: crate::manager::ActivityTracker,
+    ) -> Result<Self, ProgramError> {
         config.validate()?;
 
         let status_snapshot = Arc::new(RwLock::new(ProgramStatus::new_stopped(&config.name)));
         let ring_buffer = Arc::new(RingBuffer::default());
+        let started_at = Arc::new(RwLock::new(None));
         let cancel_token = CancellationToken::new();
         let (command_tx, command_rx) = mpsc::channel(32);
 
@@ -60,6 +69,8 @@ impl ProcessProgram {
             command_rx,
             status_snapshot.clone(),
             ring_buffer.clone(),
+            started_at.clone(),
+            activity_tracker,
             cancel_token.clone(),
         );
 
@@ -70,6 +81,7 @@ impl ProcessProgram {
             command_tx,
             status_snapshot,
             ring_buffer,
+            started_at,
             cancel_token,
             actor_handle: Some(actor_handle),
         })
@@ -110,7 +122,13 @@ impl Program for ProcessProgram {
     }
 
     fn status(&self) -> ProgramStatus {
-        self.status_snapshot.read().clone()
+        let mut status = self.status_snapshot.read().clone();
+        if (status.state == ProgramState::Running || status.state == ProgramState::Starting)
+            && let Some(started) = *self.started_at.read()
+        {
+            status.uptime_secs = Some(started.elapsed().as_secs());
+        }
+        status
     }
 
     async fn start(&mut self) -> Result<(), ProgramError> {
@@ -238,11 +256,12 @@ struct ProgramActor {
     health_tx: mpsc::Sender<crate::manager::HealthEvent>,
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
+    started_at: Arc<RwLock<Option<Instant>>>,
+    activity_tracker: crate::manager::ActivityTracker,
     cancel_token: CancellationToken,
     current_child: Option<RunningChild>,
     retry_count: u32,
     manual_stop: bool,
-    started_at: Option<Instant>,
 }
 
 impl ProgramActor {
@@ -251,6 +270,8 @@ impl ProgramActor {
         command_rx: mpsc::Receiver<ProgramCommand>,
         status_snapshot: Arc<RwLock<ProgramStatus>>,
         ring_buffer: Arc<RingBuffer>,
+        started_at: Arc<RwLock<Option<Instant>>>,
+        activity_tracker: crate::manager::ActivityTracker,
         cancel_token: CancellationToken,
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
@@ -261,15 +282,17 @@ impl ProgramActor {
             health_tx,
             status_snapshot,
             ring_buffer,
+            started_at,
+            activity_tracker,
             cancel_token,
             current_child: None,
             retry_count: 0,
             manual_stop: false,
-            started_at: None,
         }
     }
 
     async fn run(mut self) {
+        let has_health_check = self.config.health_check.is_some();
         let mut start_deadline: Option<tokio::time::Instant> = None;
         let mut metrics_interval = tokio::time::interval(Duration::from_secs(2));
         metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -277,6 +300,7 @@ impl ProgramActor {
         loop {
             let has_child = self.current_child.is_some();
             let is_waiting_start = start_deadline.is_some();
+            let is_metrics_active = self.activity_tracker.is_metrics_active();
 
             tokio::select! {
                 biased;
@@ -286,7 +310,7 @@ impl ProgramActor {
                     break;
                 }
 
-                Some(health_event) = self.health_rx.recv(), if has_child => {
+                Some(health_event) = self.health_rx.recv(), if has_child && has_health_check => {
                     match health_event {
                         crate::manager::HealthEvent::Healthy => {
                             let mut snapshot = self.status_snapshot.write();
@@ -313,15 +337,12 @@ impl ProgramActor {
                     }
                 }
 
-                _ = metrics_interval.tick(), if has_child => {
+                _ = metrics_interval.tick(), if has_child && is_metrics_active => {
                     if let Some(ref child) = self.current_child
                         && let Ok(m) = child.platform_guard.query_metrics()
                     {
                         let mut snapshot = self.status_snapshot.write();
                         snapshot.metrics = Some(m);
-                        if let Some(started) = self.started_at {
-                            snapshot.uptime_secs = Some(started.elapsed().as_secs());
-                        }
                     }
                 }
 
@@ -356,7 +377,7 @@ impl ProgramActor {
 
                 exit_res = async {
                     match self.current_child.as_mut() {
-                        Some(c) => c.child.wait().await,
+                        Some(c) => c.platform_guard.wait_exit(&mut c.child).await,
                         None => std::future::pending().await,
                     }
                 }, if has_child => {
@@ -427,9 +448,21 @@ impl ProgramActor {
             cmd.env(k, v);
         }
 
-        // Configure async pipes for stdout and stderr capture
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        let stdout_disabled = self.config.logs.is_stdout_disabled();
+        let stderr_disabled = self.config.logs.is_stderr_disabled();
+
+        // Configure async pipes or null stdio for stdout and stderr capture
+        if stdout_disabled {
+            cmd.stdout(std::process::Stdio::null());
+        } else {
+            cmd.stdout(std::process::Stdio::piped());
+        }
+
+        if stderr_disabled {
+            cmd.stderr(std::process::Stdio::null());
+        } else {
+            cmd.stderr(std::process::Stdio::piped());
+        }
 
         // Platform-agnostic pre-spawn configuration via PlatformBackend
         let platform = crate::platform::native_platform();
@@ -456,23 +489,35 @@ impl ProgramActor {
         };
         let backups = self.config.logs.backups.unwrap_or(3);
 
-        let stdout_rotator = if let Some(ref path) = self.config.logs.stdout {
-            crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+        let stdout_rotator = if !stdout_disabled {
+            if let Some(ref path) = self.config.logs.stdout {
+                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        let stderr_rotator = if self.config.logs.redirect_stderr {
-            stdout_rotator.clone()
-        } else if let Some(ref path) = self.config.logs.stderr {
-            crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+        let stderr_rotator = if !stderr_disabled {
+            if self.config.logs.redirect_stderr {
+                stdout_rotator.clone()
+            } else if let Some(ref path) = self.config.logs.stderr {
+                crate::logging::LogRotator::new(path, max_bytes, backups).ok()
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        let stdout_pump = stdout.map(|pipe| {
-            crate::logging::spawn_log_pump(pipe, self.ring_buffer.clone(), stdout_rotator, None)
-        });
+        let stdout_pump = if !stdout_disabled {
+            stdout.map(|pipe| {
+                crate::logging::spawn_log_pump(pipe, self.ring_buffer.clone(), stdout_rotator, None)
+            })
+        } else {
+            None
+        };
 
         let stderr_prefix = if self.config.logs.redirect_stderr {
             None
@@ -480,16 +525,20 @@ impl ProgramActor {
             Some("STDERR".to_string())
         };
 
-        let stderr_pump = stderr.map(|pipe| {
-            crate::logging::spawn_log_pump(
-                pipe,
-                self.ring_buffer.clone(),
-                stderr_rotator,
-                stderr_prefix,
-            )
-        });
+        let stderr_pump = if !stderr_disabled {
+            stderr.map(|pipe| {
+                crate::logging::spawn_log_pump(
+                    pipe,
+                    self.ring_buffer.clone(),
+                    stderr_rotator,
+                    stderr_prefix,
+                )
+            })
+        } else {
+            None
+        };
 
-        self.started_at = Some(Instant::now());
+        *self.started_at.write() = Some(Instant::now());
         let child_cancel = CancellationToken::new();
 
         let health_task = if let Some(ref hcfg) = self.config.health_check {
@@ -547,7 +596,7 @@ impl ProgramActor {
     }
 
     async fn stop_current_child(&mut self, grace_period: Duration) {
-        self.started_at = None;
+        *self.started_at.write() = None;
         if let Some(mut child_info) = self.current_child.take() {
             self.update_status(
                 ProgramState::Stopping,
@@ -562,13 +611,20 @@ impl ProgramActor {
                 .send_stop_signal(self.config.stop_signal);
 
             // Wait for graceful exit; escalate to force_kill if grace period expires
-            let wait_res = tokio::time::timeout(grace_period, child_info.child.wait()).await;
+            let wait_res = tokio::time::timeout(
+                grace_period,
+                child_info.platform_guard.wait_exit(&mut child_info.child),
+            )
+            .await;
             let final_code = match wait_res {
                 Ok(Ok(status)) => status.code(),
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
-                    let _ = child_info.child.wait().await;
+                    let _ = child_info
+                        .platform_guard
+                        .wait_exit(&mut child_info.child)
+                        .await;
                     None
                 }
             };
@@ -601,7 +657,7 @@ impl ProgramActor {
         &mut self,
         exit_res: std::io::Result<std::process::ExitStatus>,
     ) -> bool {
-        self.started_at = None;
+        *self.started_at.write() = None;
         let mut child_info = self.current_child.take();
         let pid = child_info.as_ref().map(|c| c.pid);
         let marked_running = child_info

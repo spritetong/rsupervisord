@@ -114,7 +114,17 @@ pub struct WindowsProcessGuard {
     last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
+#[async_trait]
 impl PlatformProcessGuard for WindowsProcessGuard {
+    async fn wait_exit(
+        &mut self,
+        child: &mut tokio::process::Child,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        // Tokio on Windows registers a kernel event wait on the Win32 process handle (hProcess)
+        // using RegisterWaitForSingleObject. This is 100% event-driven by the NT kernel without polling.
+        child.wait().await
+    }
+
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         match signal {
             StopSignal::CtrlBreak | StopSignal::CtrlC => {

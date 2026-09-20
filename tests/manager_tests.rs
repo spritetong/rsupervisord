@@ -199,3 +199,65 @@ fn test_config_example_yaml_parsing() {
     assert_eq!(api.depends_on, vec!["redis"]);
     assert!(api.health_check.is_some());
 }
+
+#[tokio::test]
+async fn test_activity_tracker_and_idle_timeout() {
+    use rsupervisord::manager::ActivityTracker;
+    let tracker = ActivityTracker::new(1, true); // 1s timeout
+    assert!(tracker.is_metrics_active());
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(
+        !tracker.is_metrics_active(),
+        "Should be inactive after idle timeout"
+    );
+
+    tracker.record_activity();
+    assert!(
+        tracker.is_metrics_active(),
+        "Should be active again after recording activity"
+    );
+
+    // Test idle_timeout_secs: 0 keeps active indefinitely
+    let continuous_tracker = ActivityTracker::new(0, true);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(continuous_tracker.is_metrics_active());
+}
+
+#[tokio::test]
+async fn test_program_with_logs_disabled() {
+    let yaml = format!(
+        r#"
+programs:
+  silent_prog:
+    command: "{cmd}"
+    autostart: true
+    start_secs: 0
+    logs:
+      enabled: false
+"#,
+        cmd = get_sleep_cmd(5),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    handle.start_all().await.expect("start silent program");
+    let status = handle.get_status("silent_prog").await.expect("get status");
+    assert_eq!(status.state, ProgramState::Running);
+    assert!(status.pid.is_some());
+
+    // Verify logs buffer is empty because logs were disabled
+    let logs = handle
+        .read_logs("silent_prog", None)
+        .await
+        .expect("read logs");
+    assert!(
+        logs.is_empty(),
+        "Logs should be completely empty when disabled"
+    );
+
+    handle.stop_all(None).await.expect("stop all");
+    manager.shutdown().await.expect("shutdown");
+}

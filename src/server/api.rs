@@ -70,7 +70,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
         .fallback(crate::server::web::static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            record_activity_middleware,
+        ))
         .with_state(state)
+}
+
+/// Middleware that updates the daemon's client activity tracker on every incoming request.
+async fn record_activity_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    state.manager.activity_tracker().record_activity();
+    next.run(req).await
 }
 
 /// Validates optional bearer token authentication.

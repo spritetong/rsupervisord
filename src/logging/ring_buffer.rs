@@ -36,8 +36,10 @@ impl RingBuffer {
             }
             guard.push_back(line_str.clone());
         }
-        // Broadcast to live streaming subscribers; ignore error when no active receivers exist.
-        let _ = self.broadcast_tx.send(line_str);
+        // Broadcast to live streaming subscribers only when active receivers exist
+        if self.broadcast_tx.receiver_count() > 0 {
+            let _ = self.broadcast_tx.send(line_str);
+        }
     }
 
     /// Retrieves up to `max_lines` most recent log lines from the ring buffer.

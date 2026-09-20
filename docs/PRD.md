@@ -1,63 +1,69 @@
-# rsupervisord: 现代跨平台进程编排与监控守护引擎 (PRD)
+# rsupervisord: Modern Cross-Platform Process Orchestration and Monitoring Daemon Engine (PRD)
 
-| 文档版本 | 状态 | 目标语言 | 运行时目标 |
+| Document Version | Status | Target Language | Runtime Targets |
 | :--- | :--- | :--- | :--- |
-| **v1.1.0** | 待评审 / 已修订 | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
+| **v1.1.0** | Approved / Baseline | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
 
 ---
 
-## 1. 项目愿景与背景 (Vision & Background)
+## 1. Project Vision & Background
 
-### 1.1 背景与痛点
-在容器化、微服务以及各类边缘设备与 Windows 宿主机部署中，进程托管工具（如 Python 编写的 Supervisor、Go 实现的 `ochinchina/supervisord`）被广泛采用。然而现有工具存在明显的历史技术债务与性能痛点：
-1. **高 CPU 开销与忙轮询 (Busy-Polling)**：`ochinchina/supervisord` 在静默监控时，由于频繁的 Ticker 轮询、管道非零拷贝读写及 GC 调度，CPU 消耗甚至堪比在线高并发服务（如 Caddy）。
-2. **Windows 平台管理薄弱**：在 Windows 上无法优雅终结子孙进程树，常出现孤儿进程泄漏，或依赖 `taskkill.exe` 频繁派生外部进程导致系统抖动。
-3. **协议与配置落后**：仍沿用 Python 2 时代的 XML-RPC 协议与陈旧的 INI 配置格式，集成复杂、通信沉重、缺乏现代可观测性。
+### 1.1 Background & Pain Points
 
-### 1.2 项目定位
-`rsupervisord` 是基于 **现代 Rust 技术栈 (Tokio + Axum + OS-Native Async)** 构建的下一代跨平台进程监控与编排引擎：
-- **0% 静默 CPU 占用**：完全基于 OS 内核事件驱动（Linux `pidfd`/`epoll`、BSD `kqueue`、Windows `Job Object`/`IOCP`），杜绝任何 Ticker 忙轮询。
-- **全平台一等公民支持**：抹平 POSIX 与 Windows 进程生命周期差异，利用 Windows 原生 Job Object 实现 100% 可靠的子孙进程树回收。
-- **现代配置与接口**：原生采用 **YAML** 配置（支持全局 `program_defaults` 参数继承），抛弃 XML-RPC，统一采用 **UDS (Unix Domain Socket) / TCP + JSON REST API**。
-- **单二进制自包含**：通过 `rust-embed` 内嵌现代 Web 管理面板与 CLI 控制台，开箱即用，零外部依赖。
+In containerized environments, microservices architectures, edge devices, and Windows host deployments, process supervisors (such as Python-based Supervisor and Go-based `ochinchina/supervisord`) are widely utilized. However, existing tools suffer from noticeable technical debt and severe performance bottlenecks:
+
+1. **High CPU Overhead & Busy-Polling**: In silent monitoring states, tools like `ochinchina/supervisord` consume significant CPU resources—sometimes rivaling active online services like Caddy—due to continuous timer ticks, non-zero-copy pipeline polling, and runtime GC sweeps.
+2. **Fragile Windows Process Tree Management**: Windows lacks POSIX signal abstractions. Existing tools fail to cleanly terminate descendant process trees, resulting in leaked orphan processes, or rely on spawning external `taskkill.exe` processes that cause system churn and latency.
+3. **Outdated Protocols & Configurations**: Relying on Python 2-era XML-RPC protocols and legacy INI configuration files complicates automation, bloats communication, and lacks modern observability.
+
+### 1.2 Project Positioning
+
+`rsupervisord` is a next-generation, cross-platform process supervisor and orchestration daemon built on a **modern Rust stack (Tokio + Axum + OS-Native Async)**:
+
+- **Zero Process Polling in Minimal Feature Set (0% CPU Overhead)**: Purely event-driven via OS kernel notifications (Linux `pidfd`/`epoll`/signals, Windows kernel handle events via `RegisterWaitForSingleObject` and `Job Objects`). Zero background polling timers when health checks are omitted.
+- **First-Class Cross-Platform Architecture**: Strict separation between core business orchestration and platform-specific implementations. The business layer contains zero `#[cfg]` branches, relying on uniform platform traits and Windows native Job Objects for 100% reliable descendant tree reclamation.
+- **Activity-Aware Adaptive Metrics & Disableable Logging**: Automatically pauses CPU/memory sampling during idle periods when no CLI or Web clients are connected. Supports completely disabling process and daemon logging (`Stdio::null()`), eliminating pipeline overhead.
+- **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
+- **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance; replaces XML-RPC with unified **UDS (Unix Domain Socket) / TCP + JSON REST API**.
+- **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
 
 ---
 
-## 2. 核心架构设计 (Architecture Principles)
+## 2. Core Architecture Design
 
 ```mermaid
 flowchart TD
-    subgraph ConfigLayer ["配置与声明层 (YAML Config)"]
-        YAML["rsupervisord.yaml\n(环境变量替换 / program_defaults 继承 / 严格类型)"]
+    subgraph ConfigLayer ["Configuration & Declaration Layer (YAML Config)"]
+        YAML["rsupervisord.yaml\n(Env Var Interpolation / program_defaults Inheritance / Strict Typing)"]
     end
 
-    subgraph ManagerLayer ["管理与编排核心 (Manager & DAG Engine)"]
-        DAG["DAG 依赖拓扑引擎\n(priority: 0~99 / 环校验 / 增量 Diffing)"]
-        Supervisor["Process Manager (Actor 模型)"]
-        EventBus["全局事件总线\n(tokio::sync::broadcast)"]
+    subgraph ManagerLayer ["Orchestration Core (Manager & DAG Engine)"]
+        DAG["DAG Dependency Engine\n(priority: 0~99 / Cycle Detection / Incremental Diffing)"]
+        Supervisor["Process Manager (Actor Model)"]
+        EventBus["Global Event Bus\n(tokio::sync::broadcast)"]
     end
 
-    subgraph ProgramTraitLayer ["托管对象抽象 (Program Trait)"]
+    subgraph ProgramTraitLayer ["Managed Target Abstraction (Program Trait)"]
         Trait["Program Trait\n[start / stop / status / healthcheck]"]
-        ProcessProgram["ProcessProgram (原生 OS 进程实现)"]
+        ProcessProgram["ProcessProgram (Native OS Process Actor)"]
     end
 
-    subgraph PlatformLayer ["底层跨平台抽象 (OS Abstraction)"]
+    subgraph PlatformLayer ["OS Abstraction Layer"]
         PosixBackend["Linux/BSD: nix\n[setpgid, pidfd, PR_SET_CHILD_SUBREAPER, setuid/gid, SO_PEERCRED]"]
         WinBackend["Windows: windows-sys\n[Job Objects, AssignProcess, ConsoleCtrlEvent, RunAs, TokenElevation]"]
     end
 
-    subgraph LoggingLayer ["日志与监控子系统 (Log & Metrics)"]
-        Rotate["file-rotate (按大小/时间滚动 & 归档)"]
-        RingBuf["Memory RingBuffer (最近 2000 行快速回放)"]
+    subgraph LoggingLayer ["Logging & Metrics Subsystem"]
+        Rotate["file-rotate (Size/Time Rotation & Archiving)"]
+        RingBuf["Memory RingBuffer (Recent 2,000 Lines Instant Playback)"]
     end
 
-    subgraph CommunicationLayer ["通信与交互层 (Axum Web Service)"]
-        Endpoints["Axum 统一路由引擎"]
-        UDS["Local UDS (/var/run/rsupervisord.sock 或 Windows AF_UNIX)"]
-        TCP["Remote TCP (支持可选 Token 鉴权)"]
-        WebUI["Embedded Web UI (rust-embed 嵌入式看板)"]
-        CLI["rsupervisorctl (JSON POST 命令行工具，支持 Sync / Async)"]
+    subgraph CommunicationLayer ["Communication Layer (Axum Web Service)"]
+        Endpoints["Axum Unified Router Engine"]
+        UDS["Local UDS (/var/run/rsupervisord.sock or Windows AF_UNIX)"]
+        TCP["Remote TCP (Optional Bearer Token Auth)"]
+        WebUI["Embedded Web UI (rust-embed Dashboard)"]
+        CLI["rsupervisorctl (JSON REST Client, Sync / Async Modes)"]
     end
 
     YAML --> DAG --> Supervisor
@@ -77,178 +83,224 @@ flowchart TD
 
 ---
 
-## 3. 功能规范详述 (Functional Specifications)
+## 3. Functional Specifications
 
-### 3.1 进程与生命周期管理 (Process Management)
+### 3.1 Process & Lifecycle Management
 
-#### 3.1.1 状态机设计 (Finite State Machine)
-每个托管程序遵循确定性状态迁移：
-- `STOPPED`：程序处于停止状态（初态或已显式停止）。
-- `STARTING`：触发启动，进入 `start_secs` 窗口期。
-- `RUNNING`：存活超过 `start_secs`，被正式认定为健康运行。
-- `BACKOFF`：在 `start_secs` 内异常崩溃，正在执行指数退避重试（Backoff）。
-- `STOPPING`：正在接收优雅停止信号（`stopsignal`），等待退出。
-- `EXITED`：正常退出（退出码匹配 `exit_codes`），不再拉起。
-- `FATAL`：重试次数超过 `start_retries`，或遭遇致命初始化错误，停止重试。
+#### 3.1.1 Finite State Machine (FSM)
 
-#### 3.1.2 优先级与依赖图 (Priority & Dependencies DAG)
-- **优先级范围限定**：`priority` 严格取值于 **`[0, 99]`**（数值类型 `u8`，默认值为 `50`）。
-  - **数值越小，优先级越高**；
-  - **启动顺序**：小优先级先启动（0 先于 10，10 先于 99）；
-  - **关机顺序**：高优先级后关闭，低优先级先优雅关闭（99 先关，0 最后关）。
-- **依赖声明**：支持 `depends_on: ["mysql", "redis"]`，必须在所依赖程序达到 `RUNNING` 状态后，本程序才触发启动。
-- **拓扑校验**：Manager 在解析配置后自动构建 DAG，进行环依赖检测（Cycle Detection）。存在环路时守护进程拒绝启动并给出详细环链提示。
-- **分层并发启动**：拓扑图中处于同一层级且没有依赖关系的进程，按照 Priority 分组进行并发拉起，显著缩短集群/批量任务启动总耗时。
+Each managed program transitions across deterministic states:
 
-#### 3.1.3 参数继承模型 (`program_defaults`)
-为降低多进程配置冗余，系统引入 `program_defaults` 全局基础参数继承机制（继承自原工程 `[program-default]` 设计）：
-- 支持继承的通用字段包括：`autostart`, `autorestart`, `start_secs`, `start_retries`, `stop_signal`, `stop_wait_secs`。
-- **三层合并优先级**：
-  $$\text{Program 私有配置} > \text{program\_defaults 全局默认值} > \text{引擎内核 Hardcoded 缺省值}$$
+- `STOPPED`: Initial state or explicitly stopped.
+- `STARTING`: Process spawned; within the `start_secs` observation window.
+- `RUNNING`: Process remained alive past `start_secs`; confirmed healthy and stable.
+- `BACKOFF`: Crashed within `start_secs`; executing exponential backoff delay before restarting.
+- `STOPPING`: Graceful stop signal delivered; awaiting exit before `stop_wait_secs` timeout.
+- `EXITED`: Clean exit matching configured `exit_codes`; will not be automatically restarted.
+- `FATAL`: Crash count exceeded `start_retries`, or unrecoverable initialization error encountered.
 
-#### 3.1.4 权限与隔离支持 (User / UID / GID & CWD)
-- **Unix / BSD**：支持配置 `user: "1001"`、`user: "www-data"` 或 `user: "1001:1001"`。
-  - 在子进程派生前，调用 `nix::unistd::setgid` 与 `setuid` 执行安全降权。
-  - 支持配置 `umask`。
-- **Windows**：支持配置 `user: "Administrator"` 或指定目标服务账户凭据。
-- **工作目录**：显式指定 `directory`，启动前校验存在性与权限。
+#### 3.1.2 Priority & Dependencies DAG
 
-#### 3.1.5 进程树清理与防泄漏 (Process Tree & Group Cleanup)
-- **Windows 强力沙箱**：基于 Windows **Job Object**。
-  - 创建带有 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的专属 Job 句柄。
-  - 子进程创建后立刻 `AssignProcessToJobObject`。该进程不管衍生多少层孙子进程，在被停止或守护崩溃时由 Windows 内核保证整棵进程树 100% 回收，彻底消灭孤儿进程。
-- **Linux / BSD 强力清理**：
-  - 启动前在 `pre_exec` 中设置 `setpgid(0, 0)` 建立独立进程组。
-  - 停止时直接向进程组发送信号：`kill(-pgid, signal)`。
-  - Linux 开启 `PR_SET_CHILD_SUBREAPER`，防止双重 fork 脱离进程组的孤儿进程逃逸。
+- **Priority Range**: `priority` is strictly bounded to **`[0, 99]`** (`u8` type, default `50`).
+  - **Lower values denote higher priority**.
+  - **Startup Order**: Lower numerical values start first (`0` before `10`, `10` before `99`).
+  - **Shutdown Order**: Higher numerical values shut down first (`99` before `10`, `0` last).
+- **Dependency Declarations**: Configured via `depends_on: ["mysql", "redis"]`. Dependent programs are only started after all prerequisites reach the `RUNNING` state.
+- **Topological Validation**: The Manager constructs a directed graph upon loading configuration, validating against cycles. If a cycle is detected, daemon initialization fails with an actionable cycle trace.
+- **Layered Concurrent Startup**: Programs situated on the same topological layer without mutual dependencies are spawned concurrently in batches grouped by priority.
 
-#### 3.1.6 热重载与差异增量更新 (Hot Reload & Diff Engine)
-当执行 `rsupervisorctl reload` 或收到 `SIGHUP` 信号时，Manager 会自动对比前后配置文件并计算差异（Diffing），**严格保证未变化的进程不受任何影响**：
-1. **Unchanged（未变更）**：配置完全一致的进程，**保持原有运行状态与 PID 不变，零闪断、零停机**。
-2. **Added（新增）**：挂载到 Manager 调度拓扑树中，按照其 `autostart` 策略排队启动。
-3. **Removed（已删除）**：优雅停机后，从 Manager 中注销并回收资源。
-4. **Modified（已修改）**：优雅停机旧进程，应用新配置后重新拉起（如有必要）。
+#### 3.1.3 Parameter Inheritance (`program_defaults`)
 
----
+To eliminate boilerplate across multiple programs, the engine provides a `program_defaults` inheritance mechanism:
 
-### 3.2 日志管道与轮转系统 (Log Streaming & Rotation)
+- Inherited fields include: `autostart`, `autorestart`, `start_secs`, `start_retries`, `stop_signal`, `stop_wait_secs`, and `logs`.
+- **Three-Tier Precedence**:
+  $$\text{Program Private Config} > \text{program\_defaults Global Defaults} > \text{Engine Hardcoded Defaults}$$
 
-参考 Windows 上轻量级包装工具（如 `shawl` CLI）的工业实践，直接采用成熟组件 `file-rotate`：
-1. **异步无锁管道捕获**：
-   - 子进程 `stdout` 与 `stderr` 通过 `tokio::process` 的异步 Pipe 无阻塞捕获。
-   - 在数据静默时，OS 线程与 Tokio Worker 均处于休眠状态，无任何 I/O 轮询。
-2. **日志轮转集成（基于 `file-rotate`）**：
-   - **按大小滚动**：`max_bytes: "10MB"`（支持 `KB`, `MB`, `GB` 单位）。
-   - **按时间滚动**：`rotate: daily` 或 `hourly`。
-   - **副本保留**：`backups: 5`（保留历史备份数，自动清理更早日志）。
-   - **自动合并/分离**：支持将 stderr 合流进 stdout，或分别独立滚动落盘。
-3. **内存实时环形缓冲区 (Memory RingBuffer)**：
-   - 每个 Program 维护固定容量（如 2000 行）的有界环形缓冲区。
-   - **CLI 交互**：支持 `rsupervisorctl tail -f <program>` 实时查看，新连接立刻回放最近 N 行。
-   - **Web UI 交互**：通过 Server-Sent Events (SSE) 或 WebSocket 实时在网页端刷屏日志。
+#### 3.1.4 Privilege & Isolation (User / UID / GID & CWD)
+
+- **Unix / BSD**: Supports `user: "1001"`, `user: "www-data"`, or `user: "1001:1001"`. Calls `nix::unistd::setgid` and `setuid` in the pre-exec hook for secure de-escalation, alongside configurable `umask`.
+- **Windows**: Supports service account context execution and RunAs configuration.
+- **Working Directory**: Explicitly configured via `directory`, validated for existence before launch.
+
+#### 3.1.5 Process Tree Cleanup & Leak Prevention
+
+- **Windows Job Object Sandbox**:
+  - Each program creates a dedicated Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+  - Child processes are assigned to the Job immediately upon creation. Regardless of how many sub-processes are spawned, the Windows NT kernel guarantees 100% reclamation when stopped or if the daemon terminates.
+- **Linux / BSD Subreaper & Process Groups**:
+  - Child processes call `setpgid(0, 0)` in `pre_exec` to establish an isolated process group.
+  - Termination signals are broadcast to the group via `kill(-pgid, signal)`.
+  - The daemon activates `PR_SET_CHILD_SUBREAPER` on Linux to adopt and reap orphan grandchildren.
+
+#### 3.1.6 Hot Reload & Incremental Diff Engine
+
+Executing `rsupervisorctl reload` or sending `SIGHUP` triggers an incremental diff comparison between running and new configurations:
+
+1. **Unchanged**: Identical configurations **remain untouched, keeping their original PID and uninterrupted network connections**.
+2. **Added**: Registered into the DAG and started according to their `autostart` policy.
+3. **Removed**: Gracefully terminated, then deregistered and cleaned up.
+4. **Modified**: Gracefully terminated and relaunched with the updated configuration.
+
+#### 3.1.7 Minimal Feature Set Zero-Poll & Event Exit Monitoring
+
+- **Zero-Poll Minimal Feature Set**: When `health_check` is omitted, the program actor omits health check receiver channels from `tokio::select!`. Uptime is computed dynamically on-demand from `started_at` when queried via `status()`, eliminating the legacy 2-second background timer tick. In this state, the actor runs with **0 timers, 0 wakeups, and 0% CPU overhead**.
+- **OS-Optimal Event-Driven Exit Monitoring**: Abstracted via `PlatformProcessGuard::wait_exit`:
+  - Windows: Uses kernel-notified wait callbacks via `RegisterWaitForSingleObject` on process `HANDLE`, achieving zero polling.
+  - Unix: Uses Tokio's native async signal and `pidfd` drivers, with fallback polling abstracted inside platform layers.
 
 ---
 
-### 3.3 控制通道与安全性设计 (Control, IPC & Security)
+### 3.2 Log Streaming & Rotation Subsystem
 
-#### 3.3.1 端点支持
-- **Unix Domain Socket (UDS)**：
-  - Linux / BSD / macOS：默认监听 `/var/run/rsupervisord.sock`（或 `~/.rsupervisord/rsupervisord.sock`）。
-  - Windows 10 (17063+) / 11：默认监听原生 `AF_UNIX` 文件（例如 `C:\ProgramData\rsupervisord\rsupervisord.sock`）。
-- **TCP Socket (可选开启)**：
-  - 监听配置示例：`http_bind: "127.0.0.1:9001"`。
-  - 支持可选的 `auth_token: "secret"` 基础安全验证。
+Built with the production-proven `file-rotate` crate:
 
-#### 3.3.2 严格的 Caller 安全与权限检查 (Caller Security & Compatibility)
-无论通过 UDS 还是本地 IPC 交互，`rsupervisorctl` 接入时均强制进行身份与权限兼容性校验：
-- **Unix / BSD 平台（UID/GID 兼容机制）**：
-  - 通过 Socket 原生凭证提取（Linux `SO_PEERCRED`，BSD/macOS `getpeereid`）获取 Caller 的实际 UID/GID。
-  - **校验准则**：
-    1. 若 `rsupervisord` 运行在 `root` (UID 0)，仅允许 `root` 用户或属组在配置白名单中的客户端操作。
-    2. 若 `rsupervisord` 运行在非 root 用户 (UID X)，仅允许同一 UID X 或 `root` 发起控制。
-    3. 非授权的非相容 UID 发起的连接直接拦截并返回 `403 Forbidden`。
-- **Windows 平台（特权令牌检查）**：
-  - 若 `rsupervisord` 以 Windows 服务形式运行（`NT AUTHORITY\SYSTEM`）或以**管理员提权身份 (`is_admin = true`)** 启动；
-  - 则调用端 `rsupervisorctl` 的发起进程也**必须具备管理员特权令牌 (`is_admin = true`)**（通过 `GetTokenInformation` 校验 `TokenElevation` / `CheckTokenMembership`）。
-  - 若普通权限的 Caller 尝试控制 Elevated 权限的 Daemon，CLI 立即拦截并拒绝执行，输出友好提示：`"Error: rsupervisord is running with elevated administrator privileges. Please run rsupervisorctl in an elevated (Run as Administrator) terminal."`
+1. **Asynchronous Non-Blocking Pipe Capture**:
+   - Captures `stdout` and `stderr` asynchronously via Tokio pipes.
+   - Workers remain idle when no log data is written, incurring zero polling I/O.
+2. **Log Rotation**:
+   - **Size-Based**: `max_bytes: "20MB"` (supports `KB`, `MB`, `GB`).
+   - **Time-Based**: `rotate: daily` or `hourly`.
+   - **Retention**: `backups: 5` (retains recent archives, pruning older files).
+   - **Stream Merging**: Supports redirecting `stderr` into `stdout`.
+3. **In-Memory RingBuffer**:
+   - Maintains a bounded circular buffer (e.g., 2,000 lines) per program.
+   - **CLI**: Supports `rsupervisorctl tail -f <program>`, instantly replaying recent history before streaming.
+   - **Web UI**: Streams logs in real time via Server-Sent Events (SSE).
+4. **Disableable Logging & Channel Optimizations**:
+   - **Program-Level Disabling**: When `logs: { enabled: false }` or paths point to `/dev/null`, `none`, or `off`, the process is spawned with `Stdio::null()`, avoiding pipe allocations and background pump tasks.
+   - **Daemon-Level Disabling**: `logging.enabled: false` or `level: "off"` completely mutes daemon tracing.
+   - **Broadcast Optimization**: Log lines are only cloned into broadcast channels when active subscribers exist (`receiver_count() > 0`).
 
-#### 3.3.3 核心 RESTful JSON API 规范
+---
 
-| 方法 | 路由 | 描述 |
+### 3.3 Control, IPC & Security Design
+
+#### 3.3.1 Transport Endpoints
+
+- **Unix Domain Socket (UDS)**:
+  - Linux / BSD / macOS: Listens on `/var/run/rsupervisord.sock` (or `~/.rsupervisord/rsupervisord.sock`).
+  - Windows 10 (17063+) / 11: Listens natively on AF_UNIX sockets (e.g., `C:\ProgramData\rsupervisord\rsupervisord.sock`), enabling zero-port integration with Caddy / Nginx reverse proxies.
+- **TCP Socket (Optional)**:
+  - Example: `http_bind: "127.0.0.1:9001"`.
+  - Supports optional Bearer token authentication via `auth_token`.
+
+#### 3.3.2 Strict Caller Security & Compatibility Checks
+
+`rsupervisorctl` and API endpoints enforce strict privilege validation:
+
+- **Unix / BSD (Peer Credentials Compatibility)**:
+  - Extracts peer credentials via socket options (Linux `SO_PEERCRED`, BSD/macOS `getpeereid`).
+  - **Rules**:
+    1. If `rsupervisord` runs as `root` (UID 0), only `root` or authorized callers can execute control operations.
+    2. If `rsupervisord` runs under non-root UID X, only UID X or `root` callers are authorized.
+    3. Unauthorized callers receive immediate `403 Forbidden` responses.
+- **Windows (Token Elevation Checks)**:
+  - If `rsupervisord` runs as an elevated administrator (`is_admin = true`) or under `NT AUTHORITY\SYSTEM`;
+  - The calling `rsupervisorctl` process must also hold elevated privileges (`TokenElevation`).
+  - Unelevated callers are intercepted with clear actionable guidance: `"Error: rsupervisord is running with elevated administrator privileges. Please run rsupervisorctl in an elevated (Run as Administrator) terminal."`
+
+#### 3.3.3 Core RESTful JSON API Specification
+
+| Method | Route | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/status` | 获取守护进程及所有 Program 的汇总状态列表 |
-| `GET` | `/api/v1/programs/:name` | 获取指定 Program 的详细配置、状态、指标（PID/CPU/内存） |
-| `POST` | `/api/v1/programs/:name/start` | 启动指定 Program（参数包含 `sync: bool`, `timeout: u64`） |
-| `POST` | `/api/v1/programs/:name/stop` | 停止指定 Program（参数包含 `sync: bool`, `timeout: u64`） |
-| `POST` | `/api/v1/programs/:name/restart` | 重启指定 Program（支持同步/异步等待） |
-| `POST` | `/api/v1/all/start` | 按依赖拓扑全量并发启动所有托管程序 |
-| `POST` | `/api/v1/all/stop` | 按依赖拓扑逆序优雅停止所有托管程序 |
-| `POST` | `/api/v1/reload` | **增量热重载**：仅更新变更程序，不影响未变动进程 |
-| `GET` | `/api/v1/programs/:name/logs` | 获取历史缓冲日志（支持 `lines=100` 参数） |
-| `GET` | `/api/v1/programs/:name/logs/stream`| **SSE (Server-Sent Events)** 实时日志推送通道 |
+| `GET` | `/api/v1/status` | List aggregated status and metrics for all programs |
+| `GET` | `/api/v1/programs/:name` | Get detailed configuration, status, and metrics (PID, CPU %, RSS) |
+| `POST` | `/api/v1/programs/:name/start` | Start program (accepts `sync: bool`, `timeout: u64`) |
+| `POST` | `/api/v1/programs/:name/stop` | Stop program (accepts `sync: bool`, `timeout: u64`) |
+| `POST` | `/api/v1/programs/:name/restart` | Restart program (supports sync/async waiting) |
+| `POST` | `/api/v1/all/start` | Concurrently start all programs based on DAG topological order |
+| `POST` | `/api/v1/all/stop` | Gracefully stop all programs in reverse topological order |
+| `POST` | `/api/v1/reload` | **Incremental Hot Reload**: updates changed programs without interrupting unchanged ones |
+| `GET` | `/api/v1/programs/:name/logs` | Fetch buffered historical logs (`lines=100`) |
+| `GET` | `/api/v1/programs/:name/logs/stream` | **SSE (Server-Sent Events)** real-time live log stream |
+
+#### 3.3.4 Activity-Aware Adaptive Metrics Sampling
+
+- **Idle Timeout & Auto-Pause**: An `ActivityTracker` tracks the timestamp of incoming client interactions. After 30 seconds (`idle_timeout_secs: 30`) of inactivity, CPU and RSS memory metrics sampling across all child processes automatically pauses, eliminating unnecessary `/proc` and kernel queries.
+- **On-Demand Resumption**: Any incoming CLI command (e.g., `rsupervisorctl status`) or Web UI request immediately awakens metrics sampling. Setting `idle_timeout_secs: 0` disables pause mode for continuous monitoring.
 
 ---
 
-### 3.4 交互终端与前端看板 (CLI & Web UI)
+### 3.4 Command-Line Interface (CLI) & Web Dashboard
 
-#### 3.4.1 CLI 交互：同步 (Sync) 与 异步 (Async) 模式
-类似于 Windows 中 `net start/stop`（同步阻塞确认）与 `sc start/stop`（异步触发返回）的区别，`rsupervisorctl` 全面支持两种操作体验：
+#### 3.4.1 CLI Interaction: Sync & Async Modes
 
-- **同步模式 (Sync - 默认推荐)**：
-  - 类似 `net start my-service`。
-  - CLI 发起请求后进入轮询/长轮询等待，直至程序状态确立（成功转移至 `RUNNING` 或 `STOPPED`，或发生 `FATAL`/超时）。
-  - 输出明确的最终结果与耗时：
+Following the operational model of Windows `net start/stop` (synchronous confirmation) versus `sc start/stop` (asynchronous fire-and-return), `rsupervisorctl` supports dual modes:
+
+- **Synchronous Mode (Sync - Default)**:
+  - Blocks and monitors state transitions until the program is confirmed `RUNNING`, `STOPPED`, or failed.
+  - Outputs clear durations and PIDs:
+
     ```text
     $ rsupervisorctl start core-api
     Starting core-api... [OK] (started in 2.1s, PID: 18492)
     ```
-- **异步模式 (Async - 显式启用 `--async` / `-a` 或 `--no-wait`)**：
-  - 类似 `sc start my-service`。
-  - CLI 向 Daemon 递交命令后，Daemon 确认收到并开始调度（状态迁移为 `STARTING` 或 `STOPPING`），CLI 立即返回并退出：
+
+- **Asynchronous Mode (Async - via `--async` / `-a` or `--no-wait`)**:
+  - Submits the command and returns immediately (< 5ms):
+
     ```text
     $ rsupervisorctl start core-api --async
     Command accepted: core-api status changed to STARTING.
     ```
-- **CLI 常用命令集**：
-  - `rsupervisorctl status`：以彩色表格展示全部程序状态、PID、运行时间、Priority、健康状态。
-  - `rsupervisorctl start <name> [--async] [--timeout 30]`：启动程序。
-  - `rsupervisorctl stop <name> [--async] [--timeout 30]`：停止程序。
-  - `rsupervisorctl restart <name> [--async]`：重启程序。
-  - `rsupervisorctl reload`：增量更新配置，显示 `1 unchanged, 1 restarted, 1 added` 等差异报告。
-  - `rsupervisorctl tail -f <name> [--lines=100]`：实时跟踪控制台日志。
 
-#### 3.4.2 内嵌 Web UI (Single-Binary Web Dashboard)
-- 使用 `rust-embed` 将轻量前端静态产物打包进二进制文件。
-- 提供简洁美观的响应式页面：
-  - 进程总览（状态灯、Uptime、PID、Priority）。
-  - 一键控制（Start / Stop / Restart / Reload，支持同步进度条指示）。
-  - 实时日志查看器（暗黑模式终端样式、支持实时滚动与暂停）。
-  - 依赖拓扑可视化视图。
+- **CLI Commands**:
+  - `rsupervisorctl status`: Formatted colored table with status, PID, Uptime, Priority, and Health.
+  - `rsupervisorctl start <name> [--async] [--timeout 30]`: Start a program.
+  - `rsupervisorctl stop <name> [--async] [--timeout 30]`: Stop a program.
+  - `rsupervisorctl restart <name> [--async]`: Restart a program.
+  - `rsupervisorctl reload`: Incrementally reload configuration, reporting added/removed/modified/unchanged counts.
+  - `rsupervisorctl tail -f <name> [--lines=100]`: Live tail console output.
+
+#### 3.4.2 Embedded Web Dashboard
+
+- Embedded via `rust-embed` with a single-file Vue 3 production runtime (`vue.global.prod.js`) and zero NPM dependencies.
+- Modern dark-mode responsive dashboard:
+  - Aggregated stats (Total Programs, Running, Stopped, Degraded, Total CPU %, Total RSS Memory).
+  - Program table with luminous status badges, PID, Uptime, Priority, CPU %, and Memory.
+  - Batch operations with multi-select checkboxes (Batch Start/Stop/Restart, Start All, Stop All).
+  - Zero-downtime hot reload trigger with modal diff breakdown.
+  - SSE real-time terminal log drawer with scroll locking and buffer clearing.
+  - Bearer token authentication with local storage persistence.
 
 ---
 
-## 4. 配置文件设计 (`rsupervisord.yaml`)
+## 4. Configuration Specification (`rsupervisord.yaml`)
 
 ```yaml
 # ==========================================
-# rsupervisord 主全局配置
+# rsupervisord Global Configuration
 # ==========================================
+# Tokio runtime worker threads. Defaults to hardware CPU cores when omitted or null.
+# Set to 1 to activate `current_thread` single-threaded event loop mode for minimal memory overhead.
+# Can be overridden via CLI (--worker-threads <N>) or env var TOKIO_WORKER_THREADS.
+worker_threads: 2
+
 server:
-  # 本地 UDS 监听地址（全平台原生支持）
+  # Native local UDS socket path (Supported on Linux, macOS, BSD, and Windows 10/11)
   uds_path: "/var/run/rsupervisord.sock"
-  # 可选：远程 HTTP 监听
+  # Optional: Remote TCP listener
   http_bind: "127.0.0.1:9001"
   auth_token: ""
 
-# 全局守护进程自身的日志
+# Daemon logging configuration
 logging:
+  # Set to false or level: "off" to completely silence daemon internal logs
+  enabled: true
   file: "/var/log/rsupervisord.log"
   level: "info"
   max_bytes: "20MB"
   backups: 3
 
+# Adaptive metrics collection configuration
+metrics:
+  enabled: true
+  idle_timeout_secs: 30 # Pauses polling after 30s of client inactivity; 0 keeps continuous polling
+  interval_secs: 2      # Sampling interval when active
+
 # ==========================================
-# 通用参数默认值继承 (类似 [program-default])
+# Common Parameter Inheritance (program_defaults)
 # ==========================================
 program_defaults:
   autostart: true
@@ -257,35 +309,40 @@ program_defaults:
   start_retries: 3
   stop_signal: "SIGTERM"
   stop_wait_secs: 10
-  priority: 50 # 默认优先级：范围 [0, 99]
+  priority: 50 # Default priority: range [0, 99]
+  logs:
+    enabled: true
+    max_bytes: "20MB"
+    backups: 3
+    redirect_stderr: false
 
 # ==========================================
-# 托管程序清单
+# Managed Programs
 # ==========================================
 programs:
-  # 基础服务：数据库组件（高优先级先启动，继承 defaults）
+  # Foundation service: Database (high priority, inherits defaults)
   mysql:
     command: "/usr/bin/mysqld_safe"
     directory: "/var/lib/mysql"
     user: "mysql"
-    priority: 10 # 明确取值 [0, 99]，数值小先启动
-    stop_wait_secs: 20 # 覆盖默认的 10 秒
+    priority: 10 # Explicit priority [0, 99], lower values start first
+    stop_wait_secs: 20 # Overrides default 10s
     logs:
       stdout: "/var/log/rsupervisord/mysql.log"
       max_bytes: "50MB"
       backups: 5
 
-  # 核心服务：依赖 mysql 先行运行
+  # Core API service: Depends on mysql
   core-api:
     command: "./server --port 8080"
     directory: "/opt/app"
-    user: "1001:1001" # 支持指定 UID:GID
+    user: "1001:1001" # UID:GID
     environment:
       APP_ENV: "production"
       DATABASE_URL: "${DB_URI:-mysql://localhost/test}"
-    priority: 20 # 范围 [0, 99]
-    depends_on: ["mysql"] # 强依赖拓扑编排
-    autorestart: always # 覆盖默认的 unexpected
+    priority: 20 # Range [0, 99]
+    depends_on: ["mysql"] # Topological orchestration
+    autorestart: always
     health_check:
       type: "http"
       url: "http://127.0.0.1:8080/health"
@@ -298,13 +355,13 @@ programs:
       max_bytes: "20MB"
       backups: 3
 
-  # Web 客户端：Windows 服务示例
+  # Web frontend service: Windows example
   web-frontend:
     command: "node.exe server.js"
     directory: "C:\\inetpub\\wwwroot"
-    priority: 60 # 范围 [0, 99]
+    priority: 60 # Range [0, 99]
     depends_on: ["core-api"]
-    stop_signal: "CTRL_BREAK" # Windows 控制台事件
+    stop_signal: "CTRL_BREAK" # Windows console event
     stop_wait_secs: 5
     logs:
       stdout: "C:\\logs\\frontend.log"
@@ -314,95 +371,112 @@ programs:
 
 ---
 
-## 5. 跨平台技术实现细节 (Technical Stack & Matrix)
+## 5. Technical Stack & Dependencies
 
-### 5.1 依赖库选型 (Production-Grade Crates)
+### 5.1 Crate Selection
 
-| 功能模块 | 推荐 Crate | 选型理由 |
+| Module | Crate | Rationale |
 | :--- | :--- | :--- |
-| **异步运行时** | `tokio (rt-multi-thread, process, io-util, signal)` | 工业级异步基础，全平台统一抽象 |
-| **Trait 异步支持** | `async-trait` | 声明 `Program` trait 接口 |
-| **Web 与通信** | `axum = "0.8"`, `hyper-util`, `serde_json` | 高性能流式 HTTP 引擎，可直接绑定 UDS 与 TCP |
-| **静态内嵌** | `rust-embed`, `mime_guess` | 单二进制交付 Web UI 前端资源 |
-| **配置解析** | `serde_yaml`, `shellexpand` | YAML 严格反序列化与环境变量自动插值 |
-| **CLI 命令行** | `clap = { version = "4", features = ["derive"] }`, `tabled` | 强类型参数解析与美观表格渲染 |
-| **日志与追踪** | `tracing`, `tracing-subscriber`, `file-rotate = "0.7"` | 零开销结构化追踪与工业级文件滚动 |
-| **依赖图算法** | `petgraph = "0.6"` | 用于有向无环图校验与拓扑排序 |
-| **POSIX 绑定** | `nix = { version = "0.29", features = ["process", "signal", "user", "socket"] }` | 安全可靠的 Linux / BSD 原生系统调用与 PeerCred |
-| **Windows 绑定** | `windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }` | 微软官方超轻量 Windows 原生 API 绑定与 TokenElevation 检查 |
+| **Async Runtime** | `tokio = { version = "1", features = ["full"] }` | Production async foundation with customizable worker threads and single-threaded mode |
+| **Trait Async** | `async-trait` | Async interface definitions for `Program` and `PlatformProcessGuard` |
+| **Web & Networking** | `axum = "0.8"`, `hyper-util`, `serde_json` | High-performance streaming HTTP engine natively binding both UDS and TCP |
+| **Static Embedding** | `rust-embed`, `mime_guess` | Single-binary delivery of Vue 3 Web UI assets |
+| **Configuration** | `serde_yaml`, `shellexpand` | Strict YAML serialization and environment variable substitution |
+| **CLI & Output** | `clap = { version = "4", features = ["derive"] }`, `tabled` | Strongly typed argument parsing and ANSI terminal table formatting |
+| **Logging & Tracing** | `tracing`, `tracing-subscriber`, `file-rotate = "0.8"` | Structured logging and industrial-grade file rotation |
+| **Graph Algorithms** | `petgraph = "0.8"` | Directed acyclic graph verification and topological sorting |
+| **POSIX Bindings** | `nix = { version = "0.31", features = ["process", "signal", "user", "socket", "fs"] }` | Safe Linux / BSD system calls and peer credential extraction |
+| **Windows Bindings** | `windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Foundation"] }`, `uds_windows = "1"` | Ultra-lightweight Win32 bindings and native Windows UDS listeners |
 
 ---
 
-## 6. 项目模块目录规划 (Directory Structure)
+## 6. Directory Structure
 
 ```text
 rsupervisord/
-├── Cargo.toml
+├── Cargo.toml                       # Dependencies and compiler optimization metadata
+├── config-example.yaml              # Fully commented production reference configuration
 ├── docs/
-│   └── PRD.md                       # 产品需求与架构设计说明书
-├── web/
-│   ├── dist/                        # 前端预编译静态文件 (HTML/CSS/JS)
-│   └── src/                         # 前端轻量 SPA 源码 (可选 Vue/React/Vanilla)
-└── src/
-    ├── main.rs                      # 入口函数，负责 CLI 分流 (daemon 或 ctl)
-    ├── cli/                         # rsupervisorctl 命令解析与通信处理
-    │   ├── mod.rs
-    │   ├── client.rs                # UDS / HTTP JSON Client (支持 Sync/Async)
-    │   ├── security.rs              # 客户端权限自检 (Windows is_admin 校验)
-    │   └── commands.rs              # status, start, stop, tail 等命令实现
-    ├── config/                      # YAML 配置文件解析与验证
-    │   ├── mod.rs
-    │   ├── schema.rs                # Serde 数据结构、program_defaults 继承逻辑
-    │   ├── diff.rs                  # 配置 Diff 引擎 (支持热重载不影响无变化程序)
-    │   └── validator.rs             # priority [0,99] 范围及语义合法性校验
-    ├── logging/                     # 日志管道与轮转处理
-    │   ├── mod.rs
-    │   ├── rotator.rs               # 集成 file-rotate
-    │   └── ring_buffer.rs           # 内存日志滑动窗口 (供 Web/CLI 流式拉取)
-    ├── manager/                     # 进程编排管理器
-    │   ├── mod.rs
-    │   ├── dag.rs                   # 基于 petgraph 的有向无环依赖图算法
-    │   ├── supervisor.rs            # Manager 核心 Actor、热重载与事件广播
-    │   └── health.rs                # HTTP/TCP/Exec 健康检查探针
-    ├── platform/                    # 跨平台底层隔离抽象
-    │   ├── mod.rs
-    │   ├── unix.rs                  # Linux/BSD: setpgid, pidfd, setuid/gid, SO_PEERCRED
-    │   └── windows.rs               # Windows: Job Object, ConsoleCtrl, RunAs, is_admin 检查
-    ├── program/                     # Program Trait 与实现
-    │   ├── mod.rs                   # Program Trait 抽象定义
-    │   └── process.rs               # ProcessProgram 原生进程托管实现
-    └── server/                      # 通信服务层
-        ├── mod.rs
-        ├── api.rs                   # Axum REST JSON 路由处理 (支持增量热重载)
-        ├── uds.rs                   # Unix Domain Socket 监听适配与权限拦截
-        └── embedded_ui.rs           # rust-embed 静态资源处理
+│   ├── PRD.md                       # Product Requirements Document (Chinese)
+│   ├── PRD_EN.md                    # Product Requirements Document (English)
+│   ├── DESIGN.md                    # System Architecture & Design Specification (Chinese)
+│   └── DESIGN_EN.md                 # System Architecture & Design Specification (English)
+├── web/                             # Embedded Web UI static assets
+│   ├── index.html                   # Modern dark-mode dashboard SPA HTML
+│   └── vue.global.prod.js           # Production single-file Vue 3 runtime (Zero NPM dependencies)
+├── src/
+│   ├── main.rs                      # Daemon entry point and Tokio runtime builder
+│   ├── lib.rs                       # Core library exports and lifecycle builder
+│   ├── bin/
+│   │   └── rsupervisorctl.rs        # Standalone rsupervisorctl CLI binary
+│   ├── cli/                         # CLI client implementation
+│   │   ├── mod.rs
+│   │   ├── client.rs                # UDS / HTTP client transport
+│   │   ├── security.rs              # Client privilege self-checks (Windows is_admin check)
+│   │   └── commands.rs              # status, start, stop, tail commands
+│   ├── config/                      # YAML configuration parsing and validation
+│   │   ├── mod.rs
+│   │   ├── schema.rs                # Serde schema and program_defaults inheritance
+│   │   ├── diff.rs                  # 3-Way diff engine for hot reload
+│   │   └── validator.rs             # Priority [0, 99] and semantic validation
+│   ├── logging/                     # Logging pipeline and file rotation
+│   │   ├── mod.rs
+│   │   ├── rotator.rs               # file-rotate integration
+│   │   └── ring_buffer.rs           # In-memory sliding log buffer with subscriber detection
+│   ├── manager/                     # Process orchestration manager
+│   │   ├── mod.rs
+│   │   ├── activity.rs              # Client activity tracking and idle sampling pause
+│   │   ├── dag.rs                   # petgraph DAG dependency algorithms
+│   │   ├── supervisor.rs            # Core Manager Actor, hot reload, and event broadcast
+│   │   └── health.rs                # HTTP/TCP/Exec health check probes
+│   ├── platform/                    # Cross-platform isolation abstractions
+│   │   ├── mod.rs                   # Uniform platform traits and privilege checks
+│   │   ├── traits.rs                # PlatformProcessGuard trait definition
+│   │   ├── unix.rs                  # Linux/BSD: setpgid, pidfd, wait_exit, SO_PEERCRED
+│   │   └── windows.rs               # Windows: Job Objects, wait_exit, RunAs, is_admin check
+│   ├── program/                     # Program Trait and lifecycle execution
+│   │   ├── mod.rs                   # Program Trait abstraction
+│   │   └── process.rs               # ProcessProgram implementation (Zero-poll event driven)
+│   └── server/                      # Communication server layer
+│       ├── mod.rs
+│       ├── api.rs                   # Axum REST JSON routing and activity middleware
+│       ├── uds.rs                   # Cross-platform native UDS listener and authentication
+│       └── embedded_ui.rs           # rust-embed static asset handler and SPA routing
+└── tests/                           # Integration and unit test suite
 ```
 
 ---
 
-## 7. 实施路线图与里程碑 (Roadmap)
+## 7. Roadmap & Milestones
 
-### Milestone 1: 核心进程监控与 DAG 调度引擎 (Core MVP)
-- [ ] 搭建 `Cargo.toml` 依赖基座与项目模块骨架。
-- [ ] 实现 `rsupervisord.yaml` 的强类型解析、`program_defaults` 参数继承与环境变量替换。
-- [ ] 校验 `priority` 在 `[0, 99]` 范围，构建有向无环图（DAG）校验与拓扑排序算法。
-- [ ] 定义 `Program` Trait，完成 `ProcessProgram` 的启动、停止与退出感知。
-- [ ] 封装 Linux (`nix`) 进程组/降权与 Windows (`windows-sys`) **Job Object**。
-- [ ] 实现增量 Diff 引擎：热重载（`reload`）保证未修改进程保持在线、零停机。
+### Milestone 1: Core Process Monitoring & DAG Orchestration Engine (Core MVP)
 
-### Milestone 2: 工业级日志流转与内存缓冲 (Logging Subsystem)
-- [ ] 集成 `file-rotate` 实现 stdout/stderr 异步无阻塞写入与文件按大小/日期轮转。
-- [ ] 实现内存日志 `RingBuffer`，支持即时回放与订阅者广播。
+- [x] Establish `Cargo.toml` dependencies and project modular structure.
+- [x] Implement `rsupervisord.yaml` strict parsing, `program_defaults` parameter inheritance, and environment variable substitution.
+- [x] Enforce `priority` within `[0, 99]`; build DAG cycle detection and topological sorting.
+- [x] Define `Program` Trait; implement `ProcessProgram` spawn, stop, and exit detection.
+- [x] Encapsulate Linux (`nix`) process group/de-escalation and Windows (`windows-sys`) **Job Objects**.
+- [x] Implement incremental Diff engine for zero-downtime hot reloading (`reload`).
 
-### Milestone 3: Axum 控制服务、权限检查与 CLI (Control & Interface)
-- [ ] 启动 Axum HTTP 引擎，挂载全套 RESTful JSON API。
-- [ ] 实现本地 UDS (`AF_UNIX`) 跨平台绑定（Windows 10/11 & Linux）。
-- [ ] 实现严格的 Caller 身份安全性检查（Unix UID/GID 相容校验，Windows `is_admin` 特权令牌匹配）。
-- [ ] 编写 `rsupervisorctl` CLI，支持同步（Sync，默认阻塞确认）与异步（`--async` 发射即返回）双模式。
+### Milestone 2: Logging Subsystem & Memory Buffering
 
-### Milestone 4: 内嵌 Web 看板与健康探针 (Web UI & Advanced Probes)
-- [ ] 实现 HTTP / TCP / Exec 健康探针状态机。
-- [ ] 使用 `rust-embed` 打包现代化单页 Web 看板，提供实时监控与一键管控。
+- [x] Integrate `file-rotate` for non-blocking asynchronous stdout/stderr logging and size/time rotation.
+- [x] Implement in-memory `RingBuffer` supporting instant history replay and demand-driven broadcast (`receiver_count() > 0`).
+- [x] Provide complete log silencing (`enabled: false` spawns with `Stdio::null()` without pipes).
 
-### Future Milestone: 遗留兼容适配层 (Optional Adaptor Layer)
-- [ ] 预留 Adaptor 接口设计：如未来有需要，可按需实现 INI 转 YAML 转换器及 XML-RPC 转 REST 代理适配层。
+### Milestone 3: Axum Control Service, Security & CLI Interface
+
+- [x] Launch Axum HTTP engine hosting full RESTful JSON APIs.
+- [x] Implement native cross-platform UDS (`AF_UNIX`) bindings (Windows 10/11 & Linux).
+- [x] Implement strict caller privilege checks (Unix UID/GID compatibility, Windows `is_admin` token matching).
+- [x] Build `rsupervisorctl` CLI supporting both synchronous (blocking confirmation) and asynchronous (`--async`) modes.
+
+### Milestone 4: Embedded Web Dashboard & Health Probes
+
+- [x] Implement HTTP / TCP / Exec active health probe state machines.
+- [x] Bundle modern single-page Web Dashboard via `rust-embed` (Zero NPM dependencies, single-file Vue 3).
+- [x] Implement activity awareness to automatically pause CPU and RSS metrics sampling during idle periods.
+
+### Future Milestone: Legacy Compatibility Layer (Optional Adaptor)
+
+- [ ] INI to YAML converter and XML-RPC to REST proxy adaptor layer for legacy supervisor compatibility.

@@ -3,7 +3,9 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    rsupervisord::cli::run().await
+fn main() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(rsupervisord::cli::run())
 }

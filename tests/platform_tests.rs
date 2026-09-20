@@ -105,3 +105,50 @@ async fn test_platform_guard_force_kill() {
     // Process was terminated
     assert!(!exit_status.success());
 }
+
+#[tokio::test]
+async fn test_platform_guard_wait_exit() {
+    let platform = native_platform();
+    let (cmd_str, args) = get_sleep_cmd_and_args(1);
+
+    let mut cmd = tokio::process::Command::new(cmd_str);
+    cmd.args(&args);
+
+    platform
+        .configure_command(&mut cmd, None, None)
+        .expect("configure_command failed");
+
+    let mut child = cmd.spawn().expect("spawn child");
+    let pid = child.id().expect("PID missing");
+
+    let mut guard = platform
+        .attach_child(&child, pid)
+        .expect("attach_child failed");
+
+    let exit_status = tokio::time::timeout(Duration::from_secs(5), guard.wait_exit(&mut child))
+        .await
+        .expect("child wait_exit timeout")
+        .expect("child wait_exit failed");
+
+    assert!(exit_status.success() || exit_status.code().is_some());
+}
+
+#[test]
+fn test_build_tokio_runtime_single_and_multi_threaded() {
+    use rsupervisord::build_tokio_runtime;
+
+    // Single-threaded (current_thread)
+    let rt1 = build_tokio_runtime(Some(1)).expect("build single-threaded runtime");
+    let val1 = rt1.block_on(async { 42 });
+    assert_eq!(val1, 42);
+
+    // Multi-threaded with explicit thread count
+    let rt2 = build_tokio_runtime(Some(2)).expect("build 2-thread runtime");
+    let val2 = rt2.block_on(async { 100 });
+    assert_eq!(val2, 100);
+
+    // Default thread count
+    let rt_default = build_tokio_runtime(None).expect("build default runtime");
+    let val_def = rt_default.block_on(async { 200 });
+    assert_eq!(val_def, 200);
+}

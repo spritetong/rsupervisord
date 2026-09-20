@@ -48,9 +48,35 @@ impl UnixProcessGuard {
             ))),
         }
     }
+
+    /// Fallback polling abstraction for restricted or legacy Unix environments where
+    /// async signals or pidfds are unavailable.
+    pub async fn poll_exit_fallback(
+        &self,
+        child: &mut tokio::process::Child,
+        poll_interval: std::time::Duration,
+    ) -> io::Result<std::process::ExitStatus> {
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
 }
 
+#[async_trait]
 impl PlatformProcessGuard for UnixProcessGuard {
+    async fn wait_exit(
+        &mut self,
+        child: &mut tokio::process::Child,
+    ) -> io::Result<std::process::ExitStatus> {
+        // Optimal Unix OS mechanism:
+        // Tokio's process driver uses pidfd (Linux >= 5.3) or the SIGCHLD signal handler
+        // to wake up asynchronously without continuous user-space polling.
+        child.wait().await
+    }
+
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         let nix_sig = to_nix_signal(signal);
         self.send_signal_to_group(nix_sig)

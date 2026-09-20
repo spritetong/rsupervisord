@@ -8,6 +8,12 @@
 # expanded upon loading.
 # ==============================================================================
 
+# Number of worker threads for Tokio async runtime.
+# If omitted or null, defaults to the number of available CPU cores.
+# Set to 1 to enable single-threaded `current_thread` runtime for minimal memory footprint.
+# Can also be overridden via CLI (--worker-threads <N>) or env var TOKIO_WORKER_THREADS.
+worker_threads: 2
+
 # ------------------------------------------------------------------------------
 # 1. Daemon Server Engine Settings
 # ------------------------------------------------------------------------------
@@ -29,6 +35,9 @@ server:
 # 2. Daemon Logging Settings
 # ------------------------------------------------------------------------------
 logging:
+  # Set to false or loglevel "off" to completely disable daemon logging output.
+  enabled: true
+
   # Daemon self-log file destination. If omitted, logs to stdout/stderr.
   file: "logs/rsupervisord.log"
 
@@ -40,6 +49,21 @@ logging:
 
   # Number of historical rotated backup files to retain
   backups: 5
+
+# ------------------------------------------------------------------------------
+# 3. Process Resource Metrics Monitoring (CPU / Memory)
+# ------------------------------------------------------------------------------
+metrics:
+  # Enable resource utilization metrics collection (default: true)
+  enabled: true
+
+  # Idle timeout in seconds before pausing metrics collection when no CLI or Web UI
+  # connection is actively connected (default: 30s).
+  # Set to 0 to keep continuous background monitoring indefinitely.
+  idle_timeout_secs: 30
+
+  # Metrics refresh interval in seconds when clients are active (default: 2s)
+  interval_secs: 2
 
 # ------------------------------------------------------------------------------
 # 3. Global Default Program Template
@@ -74,6 +98,8 @@ program_defaults:
 
   # Default logging parameters for program processes
   logs:
+    # Set to false to disable all log capture/pumping for processes (spawns with null stdio)
+    enabled: true
     max_bytes: "20MB"
     backups: 3
     redirect_stderr: false

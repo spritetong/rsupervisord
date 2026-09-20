@@ -35,8 +35,10 @@ impl Default for StopSignal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramLogsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub stdout: Option<PathBuf>,
     #[serde(default)]
@@ -47,6 +49,49 @@ pub struct ProgramLogsConfig {
     pub backups: Option<usize>,
     #[serde(default)]
     pub redirect_stderr: bool,
+}
+
+impl Default for ProgramLogsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stdout: None,
+            stderr: None,
+            max_bytes: None,
+            backups: None,
+            redirect_stderr: false,
+        }
+    }
+}
+
+impl ProgramLogsConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn is_stdout_disabled(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if let Some(ref p) = self.stdout {
+            let s = p.to_string_lossy().to_lowercase();
+            s == "/dev/null" || s == "null" || s == "none" || s == "off"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_stderr_disabled(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if let Some(ref p) = self.stderr {
+            let s = p.to_string_lossy().to_lowercase();
+            s == "/dev/null" || s == "null" || s == "none" || s == "off"
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

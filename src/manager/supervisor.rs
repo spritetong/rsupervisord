@@ -78,9 +78,14 @@ pub enum ManagerCommand {
 pub struct ManagerHandle {
     command_tx: mpsc::Sender<ManagerCommand>,
     cancel_token: CancellationToken,
+    activity_tracker: crate::manager::ActivityTracker,
 }
 
 impl ManagerHandle {
+    pub fn activity_tracker(&self) -> &crate::manager::ActivityTracker {
+        &self.activity_tracker
+    }
+
     pub async fn start_program(&self, name: impl Into<String>) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -236,6 +241,7 @@ impl ManagerHandle {
     }
 
     pub async fn get_status(&self, name: &str) -> Result<ProgramStatus, ProgramError> {
+        self.activity_tracker.record_activity();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::GetStatus {
@@ -260,6 +266,7 @@ impl ManagerHandle {
     }
 
     pub async fn get_all_status(&self) -> Result<Vec<ProgramStatus>, ProgramError> {
+        self.activity_tracker.record_activity();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::GetAllStatus { reply: reply_tx })
@@ -362,9 +369,15 @@ impl SupervisorManager {
         let programs_map = initial_config.resolve_programs()?;
         let dag = DependencyGraph::build(&programs_map)?;
 
+        let activity_tracker = crate::manager::ActivityTracker::new(
+            initial_config.metrics.idle_timeout_secs,
+            initial_config.metrics.enabled,
+        );
+
         let mut programs = HashMap::new();
         for (name, cfg) in &programs_map {
-            let prog = ProcessProgram::new(cfg.clone())?;
+            let prog =
+                ProcessProgram::with_activity_tracker(cfg.clone(), activity_tracker.clone())?;
             programs.insert(name.clone(), Box::new(prog) as Box<dyn Program>);
         }
 
@@ -376,6 +389,7 @@ impl SupervisorManager {
             configs: programs_map,
             dag,
             command_rx,
+            activity_tracker: activity_tracker.clone(),
             cancel_token: cancel_token.clone(),
         };
 
@@ -384,6 +398,7 @@ impl SupervisorManager {
         let handle = ManagerHandle {
             command_tx,
             cancel_token,
+            activity_tracker,
         };
 
         Ok(Self {
@@ -416,6 +431,7 @@ struct ManagerActor {
     configs: HashMap<String, ProgramConfig>,
     dag: DependencyGraph,
     command_rx: mpsc::Receiver<ManagerCommand>,
+    activity_tracker: crate::manager::ActivityTracker,
     cancel_token: CancellationToken,
 }
 
@@ -609,7 +625,10 @@ impl ManagerActor {
                 let _ = prog.shutdown().await;
             }
 
-            let mut new_prog = ProcessProgram::new(new_cfg.clone())?;
+            let mut new_prog = ProcessProgram::with_activity_tracker(
+                new_cfg.clone(),
+                self.activity_tracker.clone(),
+            )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }
@@ -622,7 +641,10 @@ impl ManagerActor {
         // 3. Added programs: instantiate, register, and start if autostart
         for new_cfg in diff.added {
             let name = &new_cfg.name;
-            let mut new_prog = ProcessProgram::new(new_cfg.clone())?;
+            let mut new_prog = ProcessProgram::with_activity_tracker(
+                new_cfg.clone(),
+                self.activity_tracker.clone(),
+            )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }

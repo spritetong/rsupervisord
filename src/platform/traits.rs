@@ -29,6 +29,7 @@ pub struct ProcessMetrics {
 
 /// Trait representing an OS-level process guard capable of managing,
 /// signaling, and cleanly terminating a process tree.
+#[async_trait]
 pub trait PlatformProcessGuard: Send + Sync {
     /// Sends a graceful stop signal to the process and its descendants.
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError>;
@@ -43,6 +44,13 @@ pub trait PlatformProcessGuard: Send + Sync {
     fn query_metrics(&self) -> Result<ProcessMetrics, ProgramError> {
         Ok(ProcessMetrics::default())
     }
+
+    /// Asynchronously waits for child process exit using the platform's optimal mechanism
+    /// (e.g. event-driven kernel wait, or encapsulated fallback polling if OS primitives are unavailable).
+    async fn wait_exit(
+        &mut self,
+        child: &mut tokio::process::Child,
+    ) -> io::Result<std::process::ExitStatus>;
 }
 
 /// Trait providing platform-specific abstractions for process configuration,
