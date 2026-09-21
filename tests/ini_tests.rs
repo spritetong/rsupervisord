@@ -33,6 +33,10 @@ fn test_load_compat_supervisord_conf() {
         config.server.uds_path
     );
     assert_eq!(config.server.http_bind.as_deref(), Some("127.0.0.1:9011"));
+    assert_eq!(config.server.uds_username.as_deref(), Some("ctluser"));
+    assert_eq!(config.server.uds_password.as_deref(), Some("ctlpass"));
+    assert_eq!(config.server.username.as_deref(), Some("rpcuser"));
+    assert_eq!(config.server.password.as_deref(), Some("rpcpass"));
 
     // Logging configuration
     assert!(config.logging.enabled);
@@ -175,9 +179,9 @@ fn test_ini_yaml_equivalence() {
     let yaml_str = r#"
     server:
       uds_path: /tmp/supervisor.sock
+      uds_username: testuser
+      uds_password: secret
       http_bind: 127.0.0.1:9001
-      username: testuser
-      password: secret
     logging:
       enabled: true
       file: /var/log/supervisord.log
@@ -214,6 +218,14 @@ fn test_ini_yaml_equivalence() {
 
     let ini_resolved = ini_config.resolve_programs().unwrap();
     let yaml_resolved = yaml_config.resolve_programs().unwrap();
+    assert_eq!(
+        ini_config.server.uds_username,
+        yaml_config.server.uds_username
+    );
+    assert_eq!(
+        ini_config.server.uds_password,
+        yaml_config.server.uds_password
+    );
 
     assert_eq!(ini_resolved.len(), yaml_resolved.len());
     let ini_web = ini_resolved.get("web").unwrap();
@@ -303,4 +315,70 @@ fn test_circular_include_protection() {
     let result = SupervisorConfig::from_file(&file_a);
     // Since b.conf has [include] which is either rejected or circular, it must error cleanly
     assert!(result.is_err());
+}
+
+#[test]
+fn test_yaml_credentials_defaulting() {
+    // 1. When YAML defines username and password, UDS credentials default to them
+    let yaml_default = r#"
+server:
+  username: "alice"
+  password: "alice_password"
+programs:
+  dummy:
+    command: "/bin/true"
+"#;
+    let config = SupervisorConfig::from_yaml_str(yaml_default).unwrap();
+    assert_eq!(config.server.username.as_deref(), Some("alice"));
+    assert_eq!(config.server.password.as_deref(), Some("alice_password"));
+    assert_eq!(config.server.uds_username.as_deref(), Some("alice"));
+    assert_eq!(
+        config.server.uds_password.as_deref(),
+        Some("alice_password")
+    );
+
+    // 2. When YAML explicitly provides uds_username and uds_password, explicit values are preserved
+    let yaml_explicit = r#"
+server:
+  username: "alice"
+  password: "alice_password"
+  uds_username: "bob"
+  uds_password: "bob_password"
+programs:
+  dummy:
+    command: "/bin/true"
+"#;
+    let config_explicit = SupervisorConfig::from_yaml_str(yaml_explicit).unwrap();
+    assert_eq!(config_explicit.server.username.as_deref(), Some("alice"));
+    assert_eq!(
+        config_explicit.server.password.as_deref(),
+        Some("alice_password")
+    );
+    assert_eq!(config_explicit.server.uds_username.as_deref(), Some("bob"));
+    assert_eq!(
+        config_explicit.server.uds_password.as_deref(),
+        Some("bob_password")
+    );
+}
+
+#[test]
+fn test_ini_independent_credentials() {
+    // INI config with only [inet_http_server] must NOT populate UDS credentials
+    let ini_str = r#"
+[inet_http_server]
+port = 127.0.0.1:9001
+username = rpcuser
+password = rpcpass
+
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[program:dummy]
+command = /bin/true
+"#;
+    let config = SupervisorConfig::from_ini_str(ini_str).unwrap();
+    assert_eq!(config.server.username.as_deref(), Some("rpcuser"));
+    assert_eq!(config.server.password.as_deref(), Some("rpcpass"));
+    assert_eq!(config.server.uds_username, None);
+    assert_eq!(config.server.uds_password, None);
 }

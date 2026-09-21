@@ -32,10 +32,10 @@ pub fn adapt_ini_to_config(
             config.server.uds_path = PathBuf::from(file);
         }
         if let Some(username) = sec.get("username") {
-            config.server.username = Some(username.clone());
+            config.server.uds_username = Some(username.clone());
         }
         if let Some(password) = sec.get("password") {
-            config.server.password = Some(password.clone());
+            config.server.uds_password = Some(password.clone());
         }
     }
 

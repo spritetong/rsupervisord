@@ -17,13 +17,17 @@ pub struct ServerConfig {
     #[serde(default = "default_uds_path")]
     pub uds_path: PathBuf,
     #[serde(default)]
+    pub uds_username: Option<String>,
+    #[serde(default)]
+    pub uds_password: Option<String>,
+    #[serde(default)]
     pub http_bind: Option<String>,
+    #[serde(default, alias = "http_username")]
+    pub username: Option<String>,
+    #[serde(default, alias = "http_password")]
+    pub password: Option<String>,
     #[serde(default)]
     pub auth_token: Option<String>,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -35,6 +39,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             uds_path: default_uds_path(),
+            uds_username: None,
+            uds_password: None,
             http_bind: None,
             auth_token: None,
             username: None,
@@ -383,6 +389,13 @@ impl SupervisorConfig {
         let mut config: Self = serde_yaml::from_str(&expanded).map_err(|e| {
             ProgramError::ConfigError(format!("Failed to parse YAML configuration: {}", e))
         })?;
+        // Default UDS credentials from HTTP credentials in YAML frontend if omitted (Scheme B)
+        if config.server.uds_username.is_none() && config.server.username.is_some() {
+            config.server.uds_username = config.server.username.clone();
+        }
+        if config.server.uds_password.is_none() && config.server.password.is_some() {
+            config.server.uds_password = config.server.password.clone();
+        }
         config.config_dir = config_dir.map(|p| p.to_path_buf());
         config.apply_default_paths();
         config.validate()?;

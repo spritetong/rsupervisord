@@ -788,37 +788,17 @@ async fn reload_config(
         }
     };
 
-    let content = match tokio::fs::read_to_string(&config_path).await {
+    // Dispatch on the file extension so `.conf`/`.ini` reloads go through the
+    // compatibility INI pipeline (mirrors the initial load in main.rs).
+    let new_config = match SupervisorConfig::from_file(&config_path) {
         Ok(c) => c,
         Err(e) => {
             return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::err(format!(
-                    "Failed to read config file: {}",
-                    e
-                ))),
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::err(format!("Invalid configuration: {}", e))),
             ));
         }
     };
-
-    let config_dir = config_path.parent().map(|p| {
-        if p.as_os_str().is_empty() {
-            std::path::PathBuf::from(".")
-        } else {
-            p.to_path_buf()
-        }
-    });
-
-    let new_config =
-        match SupervisorConfig::from_yaml_str_with_config_dir(&content, config_dir.as_deref()) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::err(format!("Invalid configuration: {}", e))),
-                ));
-            }
-        };
 
     match state.manager.reload_config(new_config).await {
         Ok(summary) => Ok((

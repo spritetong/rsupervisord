@@ -346,25 +346,16 @@ def _launch_rsupervisord_ini(root: Path) -> Instance:
         stderr=subprocess.STDOUT,
     )
 
-    # rsupervisord collapses [unix_http_server]/[inet_http_server] credentials
-    # into one pair, and the inet pair wins; the stock [supervisorctl] url uses
-    # the unix socket and would 401.  Drive the oracle client over inet instead.
-    ctl_conf = root / "supervisorctl-inet.conf"
-    ctl_conf.write_text(
-        f"[supervisorctl]\nserverurl=http://127.0.0.1:{INET_PORT}\n"
-        f"username={RPC_USER}\npassword={RPC_PASS}\n"
-    )
-
     inst = Instance(
         "rsupervisord",
         root,
         proc,
         uds=root / "run" / "supervisor.sock",
         http_port=INET_PORT,
-        ctl_conf=ctl_conf,
-        rpc_serverurl=f"http://127.0.0.1:{INET_PORT}",
-        rpc_user=RPC_USER,
-        rpc_pass=RPC_PASS,
+        ctl_conf=root / "supervisord.conf",
+        rpc_serverurl=f"unix://{root / 'run' / 'supervisor.sock'}",
+        rpc_user=CTL_USER,
+        rpc_pass=CTL_PASS,
     )
 
     deadline = time.time() + START_TIMEOUT

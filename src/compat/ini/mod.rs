@@ -73,8 +73,8 @@ mod tests {
             config.server.uds_path,
             std::path::PathBuf::from("/tmp/supervisor.sock")
         );
-        assert_eq!(config.server.username.as_deref(), Some("user1"));
-        assert_eq!(config.server.password.as_deref(), Some("pass1"));
+        assert_eq!(config.server.uds_username.as_deref(), Some("user1"));
+        assert_eq!(config.server.uds_password.as_deref(), Some("pass1"));
         assert_eq!(config.server.http_bind.as_deref(), Some("0.0.0.0:9001"));
         assert_eq!(config.logging.level, "warn");
 

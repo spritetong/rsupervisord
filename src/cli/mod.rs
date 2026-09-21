@@ -38,14 +38,20 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         if let Some(ref path) = cfg_path
             && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
         {
-            let ep = if let Some(ref http) = cfg.server.http_bind {
-                Endpoint::parse(http)
+            let (ep, basic) = if let Some(ref http) = cfg.server.http_bind {
+                let ep = Endpoint::parse(http);
+                let basic = match (cfg.server.username, cfg.server.password) {
+                    (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
+                    _ => None,
+                };
+                (ep, basic)
             } else {
-                Endpoint::parse(&cfg.server.uds_path.to_string_lossy())
-            };
-            let basic = match (cfg.server.username, cfg.server.password) {
-                (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
-                _ => None,
+                let ep = Endpoint::parse(&cfg.server.uds_path.to_string_lossy());
+                let basic = match (cfg.server.uds_username, cfg.server.uds_password) {
+                    (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
+                    _ => None,
+                };
+                (ep, basic)
             };
             (ep, basic, cfg.server.auth_token)
         } else {
