@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 pub struct SupervisorClient {
     endpoint: Endpoint,
     auth_token: Option<String>,
+    basic_auth: Option<(String, String)>,
 }
 
 impl SupervisorClient {
@@ -25,6 +26,38 @@ impl SupervisorClient {
         Self {
             endpoint,
             auth_token,
+            basic_auth: None,
+        }
+    }
+
+    /// Creates a new client with both optional token and basic auth credentials.
+    pub fn new_with_auth(
+        endpoint: Endpoint,
+        auth_token: Option<String>,
+        basic_auth: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            endpoint,
+            auth_token,
+            basic_auth,
+        }
+    }
+
+    /// Configures HTTP Basic Authentication credentials on the client.
+    pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
+        self.basic_auth = Some((username, password));
+        self
+    }
+
+    /// Appends the appropriate Authorization header to the request string.
+    fn append_auth_header(&self, buf: &mut String) {
+        if let Some(ref token) = self.auth_token {
+            buf.push_str(&format!("Authorization: Bearer {}\r\n", token));
+        } else if let Some((ref u, ref p)) = self.basic_auth {
+            use base64::Engine;
+            let credentials = format!("{}:{}", u, p);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+            buf.push_str(&format!("Authorization: Basic {}\r\n", encoded));
         }
     }
 
@@ -37,7 +70,19 @@ impl SupervisorClient {
         } else {
             Ok(programs
                 .into_iter()
-                .filter(|p| names.contains(&p.name))
+                .filter(|p| {
+                    names.iter().any(|pattern| {
+                        if let Some((grp, prg)) = pattern.split_once(':') {
+                            if prg == "*" {
+                                p.group == grp
+                            } else {
+                                p.group == grp && p.name == prg
+                            }
+                        } else {
+                            p.name == *pattern || p.group == *pattern
+                        }
+                    })
+                })
                 .collect())
         }
     }
@@ -48,7 +93,7 @@ impl SupervisorClient {
         self.request_json("GET", &path, None).await
     }
 
-    /// Starts a program (or all programs if name is "all").
+    /// Starts a program, group (e.g. "group:*"), or all programs if name is "all".
     pub async fn start(
         &self,
         name: &str,
@@ -57,6 +102,12 @@ impl SupervisorClient {
     ) -> Result<Vec<ActionResponse>> {
         if name == "all" {
             self.request_json("POST", "/api/v1/all/start", None).await
+        } else if let Some(group) = name.strip_suffix(":*") {
+            let path = format!(
+                "/api/v1/groups/{}/start?sync={}&timeout={}",
+                group, sync, timeout_secs
+            );
+            self.request_json("POST", &path, None).await
         } else {
             let path = format!(
                 "/api/v1/programs/{}/start?sync={}&timeout={}",
@@ -67,7 +118,7 @@ impl SupervisorClient {
         }
     }
 
-    /// Stops a program (or all programs if name is "all").
+    /// Stops a program, group (e.g. "group:*"), or all programs if name is "all".
     pub async fn stop(
         &self,
         name: &str,
@@ -76,6 +127,12 @@ impl SupervisorClient {
     ) -> Result<Vec<ActionResponse>> {
         if name == "all" {
             self.request_json("POST", "/api/v1/all/stop", None).await
+        } else if let Some(group) = name.strip_suffix(":*") {
+            let path = format!(
+                "/api/v1/groups/{}/stop?sync={}&timeout={}",
+                group, sync, timeout_secs
+            );
+            self.request_json("POST", &path, None).await
         } else {
             let path = format!(
                 "/api/v1/programs/{}/stop?sync={}&timeout={}",
@@ -86,7 +143,7 @@ impl SupervisorClient {
         }
     }
 
-    /// Restarts a program (or all programs if name is "all").
+    /// Restarts a program, group (e.g. "group:*"), or all programs if name is "all".
     pub async fn restart(
         &self,
         name: &str,
@@ -97,6 +154,12 @@ impl SupervisorClient {
             let stopped = self.stop("all", sync, timeout_secs).await?;
             let started = self.start("all", sync, timeout_secs).await?;
             Ok(started.into_iter().chain(stopped).collect())
+        } else if let Some(group) = name.strip_suffix(":*") {
+            let path = format!(
+                "/api/v1/groups/{}/restart?sync={}&timeout={}",
+                group, sync, timeout_secs
+            );
+            self.request_json("POST", &path, None).await
         } else {
             let path = format!(
                 "/api/v1/programs/{}/restart?sync={}&timeout={}",
@@ -180,9 +243,7 @@ impl SupervisorClient {
         let mut req =
             "GET /api/v1/logs/stream HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
                 .to_string();
-        if let Some(ref token) = self.auth_token {
-            req.push_str(&format!("Authorization: Bearer {}\r\n", token));
-        }
+        self.append_auth_header(&mut req);
         req.push_str("\r\n");
 
         stream.write_all(req.as_bytes()).await?;
@@ -221,9 +282,7 @@ impl SupervisorClient {
         let mut req =
             "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
                 .to_string();
-        if let Some(ref token) = self.auth_token {
-            req.push_str(&format!("Authorization: Bearer {}\r\n", token));
-        }
+        self.append_auth_header(&mut req);
         req.push_str("\r\n");
 
         stream.write_all(req.as_bytes()).await?;
@@ -258,9 +317,7 @@ impl SupervisorClient {
             path_and_query,
             body_bytes.len()
         );
-        if let Some(ref token) = self.auth_token {
-            req_headers.push_str(&format!("Authorization: Bearer {}\r\n", token));
-        }
+        self.append_auth_header(&mut req_headers);
         req_headers.push_str("\r\n");
 
         let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
@@ -291,6 +348,20 @@ impl SupervisorClient {
         let response_str = String::from_utf8_lossy(&raw_response);
         let (status_code, body_str) = parse_http_response(&response_str)?;
 
+        if status_code == 401 {
+            let detail = if let Ok(envelope) =
+                serde_json::from_str::<ApiResponse<serde_json::Value>>(body_str)
+            {
+                envelope
+                    .error
+                    .unwrap_or_else(|| "Invalid or missing credentials".to_string())
+            } else if !body_str.trim().is_empty() {
+                body_str.trim().to_string()
+            } else {
+                "Invalid or missing credentials".to_string()
+            };
+            bail!("Unauthorized (401): {}", detail);
+        }
         if status_code == 403 {
             bail!(
                 "Access denied (403 Forbidden): Caller privileges are insufficient to control rsupervisord."

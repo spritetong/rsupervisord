@@ -26,6 +26,14 @@ pub struct CliArgs {
     #[arg(short = 'k', long = "key", global = true)]
     pub auth_token: Option<String>,
 
+    /// Username for HTTP Basic Authentication (Supervisord compatible)
+    #[arg(short = 'u', long = "user", global = true)]
+    pub user: Option<String>,
+
+    /// Password for HTTP Basic Authentication (Supervisord compatible)
+    #[arg(short = 'P', long = "password", global = true)]
+    pub password: Option<String>,
+
     /// Bypass caller elevation verification
     #[arg(long = "allow-unelevated", global = true)]
     pub allow_unelevated: bool,

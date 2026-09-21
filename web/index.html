@@ -441,6 +441,26 @@
       color: var(--text-dim);
     }
 
+    .badge-group {
+      display: inline-flex;
+      align-items: center;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      color: #a5b4fc;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 7px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .badge-group:hover {
+      background: rgba(99, 102, 241, 0.25);
+      border-color: rgba(99, 102, 241, 0.5);
+      color: #c7d2fe;
+    }
+
     /* Program Name Cell */
     .prog-name {
       font-weight: 600;
@@ -828,6 +848,12 @@
           <option value="STOPPED">Stopped ({{ stats.stopped }})</option>
           <option value="DEGRADED">Degraded / Alert ({{ stats.degraded }})</option>
         </select>
+
+        <!-- Group Filter Dropdown -->
+        <select class="select-dropdown" v-model="filterGroup">
+          <option value="ALL">All Groups ({{ allGroups.length }})</option>
+          <option v-for="g in allGroups" :key="g" :value="g">Group: {{ g }}</option>
+        </select>
       </div>
 
       <div class="toolbar-right">
@@ -903,6 +929,7 @@
               <input type="checkbox" class="checkbox-custom" :checked="allSelected" :indeterminate="indeterminateSelected" @change="toggleSelectAll">
             </th>
             <th>Program</th>
+            <th>Group</th>
             <th>Status</th>
             <th>Health</th>
             <th>PID</th>
@@ -914,7 +941,7 @@
         </thead>
         <tbody>
           <tr v-if="filteredPrograms.length === 0">
-            <td colspan="9">
+            <td colspan="10">
               <div class="empty-state">
                 <p>No programs found matching filter.</p>
               </div>
@@ -932,6 +959,13 @@
                 {{ prog.name }}
               </div>
               <div class="prog-desc" :title="prog.description">{{ prog.description }}</div>
+            </td>
+
+            <!-- Group Badge -->
+            <td>
+              <span class="badge-group" @click="filterGroup = prog.group" :title="'Filter by group ' + prog.group">
+                {{ prog.group || '-' }}
+              </span>
             </td>
 
             <!-- State Badge -->
@@ -1090,6 +1124,10 @@
         <div class="modal-body" v-if="currentDetails">
           <table class="kv-table">
             <tr>
+              <td class="kv-key">Group</td>
+              <td class="kv-val">{{ currentDetails.group || '-' }}</td>
+            </tr>
+            <tr>
               <td class="kv-key">State</td>
               <td class="kv-val">
                 <span class="badge" :class="getStateBadgeClass(currentDetails.state)">
@@ -1233,6 +1271,7 @@
         const selected = ref(new Set());
         const searchQuery = ref('');
         const filterStatus = ref('ALL');
+        const filterGroup = ref('ALL');
         const autoRefresh = ref(true);
         const refreshInterval = ref(3);
         const isLoading = ref(false);
@@ -1325,6 +1364,15 @@
           }
         }
 
+        // Unique groups list
+        const allGroups = computed(() => {
+          const s = new Set();
+          for (const p of programs.value) {
+            if (p.group) s.add(p.group);
+          }
+          return Array.from(s).sort();
+        });
+
         // Filtering
         const filteredPrograms = computed(() => {
           let list = programs.value;
@@ -1333,6 +1381,7 @@
             const q = searchQuery.value.toLowerCase().trim();
             list = list.filter(p =>
               p.name.toLowerCase().includes(q) ||
+              (p.group && p.group.toLowerCase().includes(q)) ||
               (p.description && p.description.toLowerCase().includes(q))
             );
           }
@@ -1348,6 +1397,10 @@
                 ['UNHEALTHY', 'DEGRADED'].includes(p.health)
               );
             }
+          }
+
+          if (filterGroup.value !== 'ALL') {
+            list = list.filter(p => p.group === filterGroup.value);
           }
 
           return list;
@@ -1924,6 +1977,8 @@
           selected,
           searchQuery,
           filterStatus,
+          filterGroup,
+          allGroups,
           autoRefresh,
           refreshInterval,
           sseConnected,

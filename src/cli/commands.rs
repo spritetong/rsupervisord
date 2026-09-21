@@ -37,8 +37,15 @@ pub async fn handle_status(client: &SupervisorClient, names: &[String]) -> Resul
             p.pid
         };
 
+        let display_name = if !p.group.is_empty() && p.group != p.name {
+            format!("{}:{}", p.group, p.name).bold().to_string()
+        } else {
+            p.name.bold().to_string()
+        };
+
         dtos.push(ProgramStatusDto {
-            name: p.name.bold().to_string(),
+            name: display_name,
+            group: p.group,
             state: colored_state,
             health: p.health,
             pid: pid_str,

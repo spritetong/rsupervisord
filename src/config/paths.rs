@@ -168,9 +168,9 @@ pub fn get_default_config_path_fallback(cmd_name: &str) -> PathBuf {
     get_executable_dir().join(format!("{}.yaml", cmd_name))
 }
 
-/// Returns the default Unix Domain Socket (UDS) path.
-/// - Windows: `<config dir>/<cmd_name>.sock`
-/// - Unix: `/var/run/<cmd_name>.sock`
+/// Returns the default local IPC path:
+/// - Windows: Named Pipe `\\.\pipe\<cmd_name>`
+/// - Unix: Unix Domain Socket `/var/run/<cmd_name>.sock`
 pub fn default_uds_path(cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
     #[cfg(unix)]
     {
@@ -179,9 +179,14 @@ pub fn default_uds_path(cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
     }
     #[cfg(windows)]
     {
-        let dir = config_dir.unwrap_or_else(|| Path::new("."));
-        dir.join(format!("{}.sock", cmd_name))
+        let _ = config_dir;
+        default_named_pipe_path(cmd_name)
     }
+}
+
+/// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>`).
+pub fn default_named_pipe_path(cmd_name: &str) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\{}", cmd_name))
 }
 
 /// Returns the default log path for the daemon itself (`<cmd_name>.log`).
@@ -279,7 +284,7 @@ mod tests {
             let win_dir = PathBuf::from(r"C:\myapp");
             assert_eq!(
                 default_uds_path("myappd", Some(&win_dir)),
-                PathBuf::from(r"C:\myapp\myappd.sock")
+                PathBuf::from(r"\\.\pipe\myappd")
             );
             assert_eq!(
                 default_daemon_log_path("myappd", Some(&win_dir)),

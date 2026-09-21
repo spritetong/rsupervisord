@@ -39,6 +39,10 @@ pub struct ProgramStatusDto {
     #[tabled(rename = "PROGRAM")]
     pub name: String,
 
+    #[serde(default)]
+    #[tabled(rename = "GROUP")]
+    pub group: String,
+
     #[tabled(rename = "STATUS")]
     pub state: String,
 
@@ -65,6 +69,8 @@ pub struct ProgramStatusDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramDetailsDto {
     pub name: String,
+    #[serde(default)]
+    pub group: String,
     pub state: ProgramState,
     pub health: String,
     pub pid: Option<u32>,

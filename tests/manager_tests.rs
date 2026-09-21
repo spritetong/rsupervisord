@@ -315,3 +315,80 @@ programs:
         start.elapsed()
     );
 }
+
+#[tokio::test]
+async fn test_manager_start_and_stop_group() {
+    let yaml = format!(
+        r#"
+program_defaults:
+  autostart: false
+  start_secs: 0
+  stop_wait_secs: 2
+
+groups:
+  web_group:
+    programs:
+      - srv_1
+      - srv_2
+
+programs:
+  srv_1:
+    command: "{cmd_1}"
+    priority: 10
+  srv_2:
+    command: "{cmd_2}"
+    priority: 20
+  other_srv:
+    command: "{cmd_3}"
+    priority: 50
+"#,
+        cmd_1 = get_sleep_cmd(10),
+        cmd_2 = get_sleep_cmd(10),
+        cmd_3 = get_sleep_cmd(10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    // Start only web_group
+    let started = handle.start_group("web_group").await.expect("start group");
+    assert_eq!(started.len(), 2);
+    assert!(started.contains(&"srv_1".to_string()));
+    assert!(started.contains(&"srv_2".to_string()));
+
+    // Verify srv_1 and srv_2 are running, while other_srv is still stopped
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let st1 = handle.get_status("srv_1").await.unwrap();
+    let st2 = handle.get_status("srv_2").await.unwrap();
+    let st3 = handle.get_status("other_srv").await.unwrap();
+
+    assert_eq!(st1.state, ProgramState::Running);
+    assert_eq!(st1.group, "web_group");
+    assert_eq!(st1.full_name(), "web_group:srv_1");
+
+    assert_eq!(st2.state, ProgramState::Running);
+    assert_eq!(st2.group, "web_group");
+    assert_eq!(st2.full_name(), "web_group:srv_2");
+
+    assert_eq!(st3.state, ProgramState::Stopped);
+    assert_eq!(st3.group, "other_srv");
+    assert_eq!(st3.full_name(), "other_srv");
+
+    // Also test finding match via full name
+    let st_by_full = handle.get_status("web_group:srv_1").await.unwrap();
+    assert_eq!(st_by_full.name, "srv_1");
+
+    // Stop web_group
+    let stopped = handle
+        .stop_group("web_group", None)
+        .await
+        .expect("stop group");
+    assert_eq!(stopped.len(), 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let st1_after = handle.get_status("srv_1").await.unwrap();
+    assert_eq!(st1_after.state, ProgramState::Stopped);
+
+    manager.shutdown().await.expect("manager shutdown");
+}

@@ -604,3 +604,308 @@ async fn test_windows_uds_raw_socket_tokio_io() {
 
     client_handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn test_server_engine_basic_auth_plaintext() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("basic_auth_plain");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+  username: "admin"
+  password: "secret123"
+
+programs: {{}}
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+    );
+
+    std::fs::write(&config_path, &yaml).expect("write config file");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager_handle,
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let tcp_endpoint = Endpoint::Tcp(format!("127.0.0.1:{}", port));
+
+    // 1. Raw TCP HTTP request without credentials -> 401 with WWW-Authenticate header
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .expect("connect tcp");
+    tokio::io::AsyncWriteExt::write_all(
+        &mut stream,
+        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect("send get");
+    let mut resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
+        .await
+        .expect("read resp");
+    let resp_str = String::from_utf8_lossy(&resp);
+    assert!(
+        resp_str.contains("401 Unauthorized"),
+        "Expected 401: {}",
+        resp_str
+    );
+    assert!(
+        resp_str
+            .to_lowercase()
+            .contains("www-authenticate: basic realm=\"supervisor\""),
+        "Expected WWW-Authenticate header: {}",
+        resp_str
+    );
+
+    // 2. Client with wrong password -> fails with 401
+    let wrong_client = SupervisorClient::new(tcp_endpoint.clone(), None)
+        .with_basic_auth("admin".to_string(), "wrong_pass".to_string());
+    let err_res = wrong_client.status(&[]).await;
+    assert!(err_res.is_err());
+    assert!(err_res.unwrap_err().to_string().contains("401"));
+
+    // 3. Client with correct basic auth -> 200 OK
+    let valid_client = SupervisorClient::new(tcp_endpoint.clone(), None)
+        .with_basic_auth("admin".to_string(), "secret123".to_string());
+    let ok_res = valid_client.status(&[]).await;
+    assert!(ok_res.is_ok());
+
+    // 4. Raw TCP HTTP request with valid Authorization header to Web UI (/) -> 200 OK
+    use base64::Engine;
+    let b64_auth = base64::engine::general_purpose::STANDARD.encode("admin:secret123");
+    let mut stream_auth = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .expect("connect tcp");
+    let auth_req = format!(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n",
+        b64_auth
+    );
+    tokio::io::AsyncWriteExt::write_all(&mut stream_auth, auth_req.as_bytes())
+        .await
+        .expect("send auth req");
+    let mut resp_auth = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream_auth, &mut resp_auth)
+        .await
+        .expect("read resp auth");
+    let resp_auth_str = String::from_utf8_lossy(&resp_auth);
+    assert!(
+        resp_auth_str.contains("200 OK"),
+        "Expected 200 OK for authenticated web UI request: {}",
+        resp_auth_str
+    );
+
+    // 5. Local IPC client (without basic auth) continues to work
+    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
+    let ipc_client = SupervisorClient::new(ipc_endpoint, None);
+    let ipc_res = ipc_client.status(&[]).await;
+    assert!(ipc_res.is_ok());
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_server_engine_basic_auth_sha1() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("basic_auth_sha1");
+
+    // sha1("thepassword") = 82ab876d1387bfafe46cc1c8a2ef074eae50cb1d
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+  username: "test1"
+  password: "{{SHA}}82ab876d1387bfafe46cc1c8a2ef074eae50cb1d"
+
+programs: {{}}
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+    );
+
+    std::fs::write(&config_path, &yaml).expect("write config file");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager_handle,
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let tcp_endpoint = Endpoint::Tcp(format!("127.0.0.1:{}", port));
+
+    // Client with valid plaintext password matching SHA-1 hash -> succeeds
+    let valid_client = SupervisorClient::new(tcp_endpoint.clone(), None)
+        .with_basic_auth("test1".to_string(), "thepassword".to_string());
+    let ok_res = valid_client.status(&[]).await;
+    assert!(ok_res.is_ok());
+
+    // Client with wrong password -> fails with 401
+    let wrong_client = SupervisorClient::new(tcp_endpoint.clone(), None)
+        .with_basic_auth("test1".to_string(), "badpassword".to_string());
+    let err_res = wrong_client.status(&[]).await;
+    assert!(err_res.is_err());
+    assert!(err_res.unwrap_err().to_string().contains("401"));
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_server_engine_group_api_and_cli_operations() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("config.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("group_test");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+
+groups:
+  cluster_group:
+    programs:
+      - node1
+      - node2
+
+programs:
+  node1:
+    command: |-
+      {cmd1}
+    autostart: false
+    start_secs: 0
+    stop_wait_secs: 2
+  node2:
+    command: |-
+      {cmd2}
+    autostart: false
+    start_secs: 0
+    stop_wait_secs: 2
+  single_worker:
+    command: |-
+      {cmd3}
+    autostart: false
+    start_secs: 0
+    stop_wait_secs: 2
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+        cmd1 = get_worker_command("node1", 10),
+        cmd2 = get_worker_command("node2", 10),
+        cmd3 = get_worker_command("worker", 10),
+    );
+
+    std::fs::write(&config_path, &yaml).expect("write config file");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager_handle,
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
+
+    // 1. Check all status: group fields populated
+    let all = client.status(&[]).await.expect("status all");
+    assert_eq!(all.len(), 3);
+    let n1 = all.iter().find(|p| p.name == "node1").unwrap();
+    let n2 = all.iter().find(|p| p.name == "node2").unwrap();
+    let sw = all.iter().find(|p| p.name == "single_worker").unwrap();
+    assert_eq!(n1.group, "cluster_group");
+    assert_eq!(n2.group, "cluster_group");
+    assert_eq!(sw.group, "single_worker");
+
+    // 2. Filter status by group:*
+    let group_status = client
+        .status(&["cluster_group:*".to_string()])
+        .await
+        .expect("status group:*");
+    assert_eq!(group_status.len(), 2);
+    assert!(group_status.iter().all(|p| p.group == "cluster_group"));
+
+    // 3. Filter status by group:program
+    let single_in_group = client
+        .status(&["cluster_group:node1".to_string()])
+        .await
+        .expect("status group:prog");
+    assert_eq!(single_in_group.len(), 1);
+    assert_eq!(single_in_group[0].name, "node1");
+
+    // 4. Start by group wildcard
+    let start_resp = client
+        .start("cluster_group:*", false, 5)
+        .await
+        .expect("start group:*");
+    assert_eq!(start_resp.len(), 2);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st1 = client.get_program("node1").await.unwrap();
+    let st2 = client.get_program("node2").await.unwrap();
+    let st3 = client.get_program("single_worker").await.unwrap();
+    assert_eq!(st1.state, ProgramState::Running);
+    assert_eq!(st1.group, "cluster_group");
+    assert_eq!(st2.state, ProgramState::Running);
+    assert_eq!(st2.group, "cluster_group");
+    assert_eq!(st3.state, ProgramState::Stopped);
+
+    // 5. Stop by group wildcard
+    let stop_resp = client
+        .stop("cluster_group:*", false, 5)
+        .await
+        .expect("stop group:*");
+    assert_eq!(stop_resp.len(), 2);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st1_after = client.get_program("node1").await.unwrap();
+    assert_eq!(st1_after.state, ProgramState::Stopped);
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}

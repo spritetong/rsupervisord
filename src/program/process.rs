@@ -76,7 +76,10 @@ impl ProcessProgram {
     ) -> Result<Self, ProgramError> {
         config.validate()?;
 
-        let status_snapshot = Arc::new(RwLock::new(ProgramStatus::new_stopped(&config.name)));
+        let status_snapshot = Arc::new(RwLock::new(ProgramStatus::new_stopped_with_group(
+            &config.name,
+            &config.group,
+        )));
         let ring_buffer = Arc::new(RingBuffer::default());
         let started_at = Arc::new(RwLock::new(None));
         let cancel_token = CancellationToken::new();

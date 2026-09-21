@@ -31,6 +31,12 @@ server:
   # Leave blank or omit if authentication is not required for local access.
   auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
 
+  # Optional HTTP Basic Authentication for the TCP HTTP listener (Supervisor compatible).
+  # Supports cleartext password or SHA-1 hash prefixed with {SHA}
+  # e.g. "{SHA}82ab876d1387bfafe46cc1c8a2ef074eae50cb1d"
+  username: "${SUPERVISOR_HTTP_USER:-}"
+  password: "${SUPERVISOR_HTTP_PASSWORD:-}"
+
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings
 # ------------------------------------------------------------------------------
@@ -105,7 +111,18 @@ program_defaults:
     redirect_stderr: false
 
 # ------------------------------------------------------------------------------
-# 4. Supervised Programs
+# 4. Process Groups (Supervisor compatible)
+# ------------------------------------------------------------------------------
+# Organize multiple programs into named groups for batch status, start, stop,
+# and restart operations (e.g. `rsupervisorctl start web:*`).
+groups:
+  web:
+    programs:
+      - api-server
+    priority: 80
+
+# ------------------------------------------------------------------------------
+# 5. Supervised Programs
 # ------------------------------------------------------------------------------
 programs:
 

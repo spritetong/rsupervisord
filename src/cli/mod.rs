@@ -27,9 +27,9 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
     // Check caller privileges
     security::validate_caller_privileges(args.allow_unelevated)?;
 
-    // Determine target daemon endpoint
-    let endpoint = if let Some(ref s) = args.server {
-        Endpoint::parse(s)
+    // Determine target daemon endpoint & configuration credentials
+    let (endpoint, cfg_basic_auth, cfg_token) = if let Some(ref s) = args.server {
+        (Endpoint::parse(s), None, None)
     } else {
         let cmd_name = crate::config::paths::get_cmd_name();
         let cfg_path = args
@@ -38,17 +38,31 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         if let Some(ref path) = cfg_path
             && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
         {
-            if let Some(ref http) = cfg.server.http_bind {
+            let ep = if let Some(ref http) = cfg.server.http_bind {
                 Endpoint::parse(http)
             } else {
                 Endpoint::parse(&cfg.server.uds_path.to_string_lossy())
-            }
+            };
+            let basic = match (cfg.server.username, cfg.server.password) {
+                (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
+                _ => None,
+            };
+            (ep, basic, cfg.server.auth_token)
         } else {
-            Endpoint::default_local()
+            (Endpoint::default_local(), None, None)
         }
     };
 
-    let client = SupervisorClient::new(endpoint, args.auth_token);
+    let basic_auth = match (args.user, args.password) {
+        (Some(u), Some(p)) => Some((u, p)),
+        (Some(u), None) => Some((u, String::new())),
+        (None, Some(p)) => Some((String::new(), p)),
+        (None, None) => cfg_basic_auth,
+    };
+
+    let auth_token = args.auth_token.or(cfg_token);
+
+    let client = SupervisorClient::new_with_auth(endpoint, auth_token, basic_auth);
 
     // Default to 'status' if no subcommand was explicitly provided
     let command = args

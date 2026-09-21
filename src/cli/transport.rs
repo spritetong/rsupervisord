@@ -42,7 +42,7 @@ impl Endpoint {
     /// Returns the system default local IPC endpoint.
     pub fn default_local() -> Self {
         let default_path = crate::platform::native_platform().default_uds_path();
-        Self::Ipc(default_path)
+        Self::parse(&default_path.to_string_lossy())
     }
 
     /// Connects to the daemon endpoint asynchronously.
@@ -50,6 +50,11 @@ impl Endpoint {
         let platform = crate::platform::native_platform();
         match self {
             Self::Ipc(path) => {
+                #[cfg(windows)]
+                if path.to_string_lossy().starts_with(r"\\.\pipe\") {
+                    let stream = platform.connect_named_pipe(path).await?;
+                    return Ok(StreamTransport::new(stream));
+                }
                 let stream = platform.connect_ipc(path).await?;
                 Ok(StreamTransport::new(stream))
             }
@@ -99,5 +104,43 @@ impl AsyncWrite for StreamTransport {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_endpoint_parse() {
+        assert_eq!(
+            Endpoint::parse("http://127.0.0.1:8500"),
+            Endpoint::Tcp("127.0.0.1:8500".to_string())
+        );
+        assert_eq!(
+            Endpoint::parse("tcp://localhost:9001"),
+            Endpoint::Tcp("localhost:9001".to_string())
+        );
+        assert_eq!(
+            Endpoint::parse("127.0.0.1:8500"),
+            Endpoint::Tcp("127.0.0.1:8500".to_string())
+        );
+        assert_eq!(
+            Endpoint::parse(r"\\.\pipe\testpipe"),
+            Endpoint::NamedPipe(PathBuf::from(r"\\.\pipe\testpipe"))
+        );
+        assert_eq!(
+            Endpoint::parse("/tmp/supervisor.sock"),
+            Endpoint::Ipc(PathBuf::from("/tmp/supervisor.sock"))
+        );
+    }
+
+    #[test]
+    fn test_endpoint_default_local() {
+        let ep = Endpoint::default_local();
+        #[cfg(windows)]
+        assert!(matches!(ep, Endpoint::NamedPipe(_)));
+        #[cfg(unix)]
+        assert!(matches!(ep, Endpoint::Ipc(_)));
     }
 }

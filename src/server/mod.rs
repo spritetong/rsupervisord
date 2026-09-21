@@ -4,10 +4,12 @@
 // SPDX-License-Identifier: MIT
 
 pub mod api;
+pub mod auth;
 pub mod uds;
 pub mod web;
 
 pub use api::{AppState, build_router};
+pub use auth::{BasicAuthConfig, ServerAuthState, inet_http_auth_middleware};
 pub use uds::run_ipc_listener;
 pub use web::WebAssets;
 
@@ -30,11 +32,16 @@ impl ServerEngine {
         server_config: ServerConfig,
     ) -> Self {
         let auth_token = server_config.auth_token.clone();
+        let basic_auth = BasicAuthConfig::new(
+            server_config.username.clone(),
+            server_config.password.clone(),
+        );
         Self {
             state: AppState {
                 manager,
                 config_path,
                 auth_token,
+                basic_auth,
             },
             server_config,
         }
@@ -42,22 +49,31 @@ impl ServerEngine {
 
     /// Spawns and manages all configured listeners until cancel_token is triggered.
     pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
-        let router = build_router(self.state);
+        let router = build_router(self.state.clone());
         let mut set = tokio::task::JoinSet::new();
 
         // 1. Local IPC listener (UDS on Unix, Named Pipe on Windows)
         let ipc_path = self.server_config.uds_path.clone();
-        let ipc_router = router.clone();
-        let ipc_token = cancel_token.clone();
-        set.spawn(async move {
-            if let Err(e) = run_ipc_listener(&ipc_path, ipc_router, ipc_token).await {
-                tracing::error!("run_ipc_listener failed on {:?}: {}", ipc_path, e);
-            }
-        });
+        if !ipc_path.as_os_str().is_empty() {
+            let ipc_router = router.clone();
+            let ipc_token = cancel_token.clone();
+            set.spawn(async move {
+                if let Err(e) = run_ipc_listener(&ipc_path, ipc_router, ipc_token).await {
+                    tracing::error!("run_ipc_listener failed on {:?}: {}", ipc_path, e);
+                }
+            });
+        }
 
         // 2. Optional TCP listener
         if let Some(ref bind_addr) = self.server_config.http_bind {
-            let tcp_router = router.clone();
+            let auth_state = ServerAuthState {
+                basic_auth: self.state.basic_auth.clone(),
+                auth_token: self.state.auth_token.clone(),
+            };
+            let tcp_router = router.clone().layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                inet_http_auth_middleware,
+            ));
             let tcp_token = cancel_token.clone();
             let addr = bind_addr.clone();
             set.spawn(async move {

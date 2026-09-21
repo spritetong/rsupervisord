@@ -20,6 +20,10 @@ pub struct ServerConfig {
     pub http_bind: Option<String>,
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -33,7 +37,31 @@ impl Default for ServerConfig {
             uds_path: default_uds_path(),
             http_bind: None,
             auth_token: None,
+            username: None,
+            password: None,
         }
+    }
+}
+
+/// Normalizes an HTTP bind address according to standard supervisor conventions:
+/// - `:9001` -> `0.0.0.0:9001`
+/// - `*:9001` -> `0.0.0.0:9001`
+/// - `9001` -> `0.0.0.0:9001`
+/// - `127.0.0.1:9001` -> `127.0.0.1:9001`
+pub fn normalize_http_bind(bind: &str) -> String {
+    let trimmed = bind.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(port) = trimmed.strip_prefix('*') {
+        let port_part = port.strip_prefix(':').unwrap_or(port);
+        format!("0.0.0.0:{}", port_part)
+    } else if let Some(port) = trimmed.strip_prefix(':') {
+        format!("0.0.0.0:{}", port)
+    } else if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        format!("0.0.0.0:{}", trimmed)
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -183,6 +211,18 @@ pub struct ProgramConfigRaw {
     pub logs: Option<ProgramLogsConfigRaw>,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// Process group configuration definition.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GroupConfigRaw {
+    #[serde(default)]
+    pub programs: Vec<String>,
+    #[serde(default)]
+    pub priority: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +239,8 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub program_defaults: ProgramDefaults,
     #[serde(default)]
+    pub groups: HashMap<String, GroupConfigRaw>,
+    #[serde(default)]
     pub programs: HashMap<String, ProgramConfigRaw>,
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
@@ -212,6 +254,7 @@ impl Default for SupervisorConfig {
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             program_defaults: ProgramDefaults::default(),
+            groups: HashMap::new(),
             programs: HashMap::new(),
             config_dir: None,
         };
@@ -262,7 +305,7 @@ impl SupervisorConfig {
     pub fn apply_default_paths(&mut self) {
         let cmd_name = crate::config::paths::get_cmd_name();
         let default_no_dir = crate::config::paths::default_uds_path(&cmd_name, None);
-        if self.server.uds_path.as_os_str().is_empty() || self.server.uds_path == default_no_dir {
+        if self.server.uds_path == default_no_dir {
             self.server.uds_path =
                 crate::config::paths::default_uds_path(&cmd_name, self.config_dir.as_deref());
         }
@@ -271,6 +314,9 @@ impl SupervisorConfig {
                 &cmd_name,
                 self.config_dir.as_deref(),
             ));
+        }
+        if let Some(ref bind) = self.server.http_bind {
+            self.server.http_bind = Some(normalize_http_bind(bind));
         }
     }
 
@@ -303,6 +349,26 @@ impl SupervisorConfig {
                 )));
             }
         }
+
+        for (group_name, group_cfg) in &self.groups {
+            if let Some(p) = group_cfg.priority
+                && p > 99
+            {
+                return Err(ProgramError::ConfigError(format!(
+                    "Group '{}' priority {} must be in range [0, 99]",
+                    group_name, p
+                )));
+            }
+            for prog in &group_cfg.programs {
+                if !self.programs.contains_key(prog) {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Group '{}' references unknown program '{}'",
+                        group_name, prog
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -428,6 +494,19 @@ impl SupervisorConfig {
                 .clone()
                 .or_else(|| self.program_defaults.health_check.clone());
 
+            let group = if let Some(ref g) = raw.group {
+                g.clone()
+            } else {
+                let mut found_group = None;
+                for (g_name, g_cfg) in &self.groups {
+                    if g_cfg.programs.iter().any(|p| p == name) {
+                        found_group = Some(g_name.clone());
+                        break;
+                    }
+                }
+                found_group.unwrap_or_else(|| name.clone())
+            };
+
             let prog = ProgramConfig {
                 name: name.clone(),
                 command,
@@ -447,6 +526,7 @@ impl SupervisorConfig {
                 umask: raw.umask,
                 logs,
                 health_check,
+                group,
             };
 
             resolved.insert(name.clone(), prog);
@@ -547,5 +627,82 @@ programs:
         assert!(override_logs.enabled);
         assert!(!override_logs.redirect_stderr);
         assert!(override_logs.stdout.is_some());
+    }
+
+    #[test]
+    fn test_server_config_basic_auth_fields() {
+        let yaml = r#"
+server:
+  http_bind: ":9001"
+  username: "admin"
+  password: "thepassword"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        assert_eq!(config.server.http_bind.as_deref(), Some("0.0.0.0:9001"));
+        assert_eq!(config.server.username.as_deref(), Some("admin"));
+        assert_eq!(config.server.password.as_deref(), Some("thepassword"));
+    }
+
+    #[test]
+    fn test_group_config_resolution_and_validation() {
+        let yaml = r#"
+groups:
+  web:
+    programs:
+      - frontend
+      - backend
+    priority: 80
+programs:
+  frontend:
+    command: "echo front"
+  backend:
+    command: "echo back"
+  worker:
+    command: "echo worker"
+    group: "jobs"
+  standalone:
+    command: "echo alone"
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let resolved = config.resolve_programs().unwrap();
+
+        assert_eq!(resolved["frontend"].group, "web");
+        assert_eq!(resolved["backend"].group, "web");
+        assert_eq!(resolved["worker"].group, "jobs");
+        // standalone has no explicit group, so default group is its own name
+        assert_eq!(resolved["standalone"].group, "standalone");
+
+        assert_eq!(resolved["frontend"].full_name(), "web:frontend");
+        assert_eq!(resolved["worker"].full_name(), "jobs:worker");
+        assert_eq!(resolved["standalone"].full_name(), "standalone");
+
+        // Test unknown program in group validation
+        let invalid_yaml = r#"
+groups:
+  web:
+    programs:
+      - nonexistent
+programs:
+  frontend:
+    command: "echo front"
+"#;
+        let invalid_res = SupervisorConfig::from_yaml_str(invalid_yaml);
+        assert!(invalid_res.is_err());
+        assert!(
+            invalid_res
+                .unwrap_err()
+                .to_string()
+                .contains("unknown program")
+        );
+    }
+
+    #[test]
+    fn test_normalize_http_bind() {
+        assert_eq!(normalize_http_bind(":9001"), "0.0.0.0:9001");
+        assert_eq!(normalize_http_bind("*:9001"), "0.0.0.0:9001");
+        assert_eq!(normalize_http_bind("9001"), "0.0.0.0:9001");
+        assert_eq!(normalize_http_bind("127.0.0.1:9001"), "127.0.0.1:9001");
+        assert_eq!(normalize_http_bind("localhost:9001"), "localhost:9001");
     }
 }

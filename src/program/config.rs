@@ -140,6 +140,20 @@ pub struct ProgramConfig {
     pub logs: ProgramLogsConfig,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    pub group: String,
+}
+
+impl ProgramConfig {
+    /// Returns the full name including group (e.g. "group:program") if a distinct group is assigned,
+    /// or just the program name otherwise.
+    pub fn full_name(&self) -> String {
+        if !self.group.is_empty() && self.group != self.name {
+            format!("{}:{}", self.group, self.name)
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,8 +232,10 @@ fn default_exit_codes() -> Vec<i32> {
 
 impl ProgramConfig {
     pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
+        let n = name.into();
         Self {
-            name: name.into(),
+            group: n.clone(),
+            name: n,
             command: command.into(),
             args: Vec::new(),
             directory: None,

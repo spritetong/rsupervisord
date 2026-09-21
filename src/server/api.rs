@@ -29,6 +29,7 @@ pub struct AppState {
     pub manager: ManagerHandle,
     pub config_path: Option<PathBuf>,
     pub auth_token: Option<String>,
+    pub basic_auth: Option<crate::server::auth::BasicAuthConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +71,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/programs/{name}/start", post(start_program))
         .route("/api/v1/programs/{name}/stop", post(stop_program))
         .route("/api/v1/programs/{name}/restart", post(restart_program))
+        .route("/api/v1/groups/{group}/start", post(start_group))
+        .route("/api/v1/groups/{group}/stop", post(stop_group))
+        .route("/api/v1/groups/{group}/restart", post(restart_group))
         .route("/api/v1/all/start", post(start_all))
         .route("/api/v1/all/stop", post(stop_all))
         .route("/api/v1/reload", post(reload_config))
@@ -95,18 +99,31 @@ async fn record_activity_middleware(
     next.run(req).await
 }
 
-/// Validates optional bearer token authentication.
-fn check_auth(headers: &HeaderMap, auth_token: &Option<String>) -> Result<(), StatusCode> {
-    check_auth_with_query(headers, auth_token, None)
+/// Validates optional bearer token or basic authentication.
+fn check_auth(headers: &HeaderMap, state: &AppState) -> Result<(), StatusCode> {
+    check_auth_with_query(headers, state, None)
 }
 
-/// Validates optional bearer token authentication from either Authorization header or query parameter.
+/// Validates optional authentication from Authorization header (Bearer or Basic) or query parameter.
 fn check_auth_with_query(
     headers: &HeaderMap,
-    auth_token: &Option<String>,
+    state: &AppState,
     query_token: Option<&str>,
 ) -> Result<(), StatusCode> {
-    if let Some(expected_token) = auth_token
+    // 1. If basic auth is provided in Authorization header, verify it
+    if let Some(auth_val) = headers.get("Authorization").and_then(|v| v.to_str().ok())
+        && let Some((u, p)) = crate::server::auth::extract_basic_auth(auth_val)
+        && let Some(ref basic) = state.basic_auth
+    {
+        if basic.verify(&u, &p) {
+            return Ok(());
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    // 2. If auth_token is configured, verify bearer token
+    if let Some(ref expected_token) = state.auth_token
         && !expected_token.is_empty()
     {
         if let Some(q) = query_token
@@ -119,10 +136,12 @@ fn check_auth_with_query(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let expected_bearer = format!("Bearer {}", expected_token);
-        if auth_header != expected_bearer && auth_header != expected_token {
-            return Err(StatusCode::UNAUTHORIZED);
+        if auth_header == expected_bearer || auth_header == expected_token {
+            return Ok(());
         }
+        return Err(StatusCode::UNAUTHORIZED);
     }
+
     Ok(())
 }
 
@@ -142,7 +161,7 @@ async fn get_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<ProgramStatusDto>>>, StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let statuses = state
         .manager
@@ -168,6 +187,7 @@ async fn get_status(
 
             ProgramStatusDto {
                 name: s.name,
+                group: s.group,
                 state: format!("{:?}", s.state).to_uppercase(),
                 health: s.health.to_string(),
                 pid: s
@@ -191,7 +211,7 @@ async fn get_program_details(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<(StatusCode, Json<ApiResponse<ProgramDetailsDto>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let status = match state.manager.get_status(&name).await {
         Ok(s) => s,
@@ -211,6 +231,7 @@ async fn get_program_details(
 
     let dto = ProgramDetailsDto {
         name: status.name,
+        group: status.group,
         state: status.state,
         health: status.health.to_string(),
         pid: status.pid,
@@ -231,7 +252,7 @@ async fn start_program(
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let start_time = Instant::now();
     if let Err(e) = state.manager.start_program(&name).await {
@@ -345,7 +366,7 @@ async fn stop_program(
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let start_time = Instant::now();
     let timeout_secs = query.timeout.min(86400);
@@ -427,7 +448,7 @@ async fn restart_program(
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let start_time = Instant::now();
     let timeout_secs = query.timeout.min(86400);
@@ -506,12 +527,136 @@ async fn restart_program(
     ))
 }
 
+/// POST /api/v1/groups/:group/start
+async fn start_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Query(_query): Query<ActionQuery>,
+) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
+    check_auth(&headers, &state)?;
+    let start_time = Instant::now();
+    let procs = match state.manager.start_group(&group).await {
+        Ok(p) => p,
+        Err(e) => {
+            let status_code = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return Ok((
+                status_code,
+                Json(ApiResponse::err(format!("Start group failed: {}", e))),
+            ));
+        }
+    };
+    let mut responses = Vec::new();
+    for name in procs {
+        let (p_state, pid, desc) = if let Ok(st) = state.manager.get_status(&name).await {
+            (st.state, st.pid, st.description)
+        } else {
+            (ProgramState::Starting, None, "Start requested".to_string())
+        };
+        responses.push(ActionResponse {
+            name,
+            state: p_state,
+            pid,
+            description: desc,
+            elapsed_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
+    Ok((StatusCode::OK, Json(ApiResponse::ok(responses))))
+}
+
+/// POST /api/v1/groups/:group/stop
+async fn stop_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Query(_query): Query<ActionQuery>,
+) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
+    check_auth(&headers, &state)?;
+    let start_time = Instant::now();
+    let procs = match state.manager.stop_group(&group, None).await {
+        Ok(p) => p,
+        Err(e) => {
+            let status_code = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return Ok((
+                status_code,
+                Json(ApiResponse::err(format!("Stop group failed: {}", e))),
+            ));
+        }
+    };
+    let mut responses = Vec::new();
+    for name in procs {
+        let (p_state, pid, desc) = if let Ok(st) = state.manager.get_status(&name).await {
+            (st.state, st.pid, st.description)
+        } else {
+            (ProgramState::Stopped, None, "Stop requested".to_string())
+        };
+        responses.push(ActionResponse {
+            name,
+            state: p_state,
+            pid,
+            description: desc,
+            elapsed_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
+    Ok((StatusCode::OK, Json(ApiResponse::ok(responses))))
+}
+
+/// POST /api/v1/groups/:group/restart
+async fn restart_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Query(_query): Query<ActionQuery>,
+) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
+    check_auth(&headers, &state)?;
+    let start_time = Instant::now();
+    let procs = match state.manager.restart_group(&group, None).await {
+        Ok(p) => p,
+        Err(e) => {
+            let status_code = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return Ok((
+                status_code,
+                Json(ApiResponse::err(format!("Restart group failed: {}", e))),
+            ));
+        }
+    };
+    let mut responses = Vec::new();
+    for name in procs {
+        let (p_state, pid, desc) = if let Ok(st) = state.manager.get_status(&name).await {
+            (st.state, st.pid, st.description)
+        } else {
+            (
+                ProgramState::Starting,
+                None,
+                "Restart requested".to_string(),
+            )
+        };
+        responses.push(ActionResponse {
+            name,
+            state: p_state,
+            pid,
+            description: desc,
+            elapsed_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
+    Ok((StatusCode::OK, Json(ApiResponse::ok(responses))))
+}
+
 /// POST /api/v1/all/start
 async fn start_all(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let start_time = Instant::now();
     if let Err(e) = state.manager.start_all().await {
@@ -542,7 +687,7 @@ async fn stop_all(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let start_time = Instant::now();
     if let Err(e) = state.manager.stop_all(None).await {
@@ -573,7 +718,7 @@ async fn reload_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<ReloadResponse>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     let config_path = match state.config_path {
         Some(ref p) => p.clone(),
@@ -643,7 +788,7 @@ async fn read_logs(
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<LogLinesResponse>>), StatusCode> {
-    check_auth(&headers, &state.auth_token)?;
+    check_auth(&headers, &state)?;
 
     match state.manager.read_logs(&name, Some(query.lines)).await {
         Ok(lines) => Ok((
@@ -670,7 +815,7 @@ async fn stream_logs(
     Path(name): Path<String>,
     Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
+    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
 
     let rx = state
         .manager
@@ -696,7 +841,7 @@ async fn stream_system_events(
     headers: HeaderMap,
     Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
+    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
 
     let rx = state.manager.subscribe_events();
     let stream_guard = state.manager.activity_tracker().enter_stream();
@@ -721,7 +866,7 @@ async fn stream_all_logs(
     headers: HeaderMap,
     Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state.auth_token, auth_query.token.as_deref())?;
+    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
 
     let rx = state.manager.subscribe_all_logs();
     let stream_guard = state.manager.activity_tracker().enter_stream();

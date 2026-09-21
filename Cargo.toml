@@ -67,6 +67,8 @@ tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 rust-embed = "8.5"
 mime_guess = "2.0"
+base64 = "0.23"
+sha1 = "0.11"
 
 # Platform abstractions
 [target.'cfg(unix)'.dependencies]

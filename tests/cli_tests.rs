@@ -89,6 +89,7 @@ async fn test_cli_client_against_mock_daemon() {
                     let dtos = vec![
                         ProgramStatusDto {
                             name: "mysql".to_string(),
+                            group: "mysql".to_string(),
                             state: "RUNNING".to_string(),
                             health: "HEALTHY".to_string(),
                             pid: "1234".to_string(),
@@ -99,6 +100,7 @@ async fn test_cli_client_against_mock_daemon() {
                         },
                         ProgramStatusDto {
                             name: "web".to_string(),
+                            group: "web".to_string(),
                             state: "STOPPED".to_string(),
                             health: "-".to_string(),
                             pid: "-".to_string(),
@@ -199,6 +201,7 @@ async fn test_cli_command_handlers_execution() {
             let _ = socket.read(&mut buf).await;
             let dtos = vec![ProgramStatusDto {
                 name: "demo".to_string(),
+                group: "demo".to_string(),
                 state: "RUNNING".to_string(),
                 health: "HEALTHY".to_string(),
                 pid: "42".to_string(),

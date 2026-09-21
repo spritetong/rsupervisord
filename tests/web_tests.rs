@@ -17,6 +17,7 @@ fn create_test_app_state() -> AppState {
         manager: manager.handle(),
         config_path: None,
         auth_token: None,
+        basic_auth: None,
     }
 }
 

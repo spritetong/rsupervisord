@@ -58,6 +58,8 @@ impl ProgramState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProgramStatus {
     pub name: String,
+    #[serde(default)]
+    pub group: String,
     pub state: ProgramState,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
@@ -70,8 +72,10 @@ pub struct ProgramStatus {
 
 impl ProgramStatus {
     pub fn new_stopped(name: impl Into<String>) -> Self {
+        let n = name.into();
         Self {
-            name: name.into(),
+            group: n.clone(),
+            name: n,
             state: ProgramState::Stopped,
             pid: None,
             uptime_secs: None,
@@ -80,6 +84,32 @@ impl ProgramStatus {
             health: HealthStatus::None,
             metrics: None,
             description: "Stopped".to_string(),
+        }
+    }
+
+    pub fn new_stopped_with_group(name: impl Into<String>, group: impl Into<String>) -> Self {
+        let n = name.into();
+        let g = group.into();
+        Self {
+            group: if g.is_empty() { n.clone() } else { g },
+            name: n,
+            state: ProgramState::Stopped,
+            pid: None,
+            uptime_secs: None,
+            exit_code: None,
+            is_healthy: false,
+            health: HealthStatus::None,
+            metrics: None,
+            description: "Stopped".to_string(),
+        }
+    }
+
+    /// Full name formatted as "group:name" if group is distinct from name, or "name" otherwise.
+    pub fn full_name(&self) -> String {
+        if !self.group.is_empty() && self.group != self.name {
+            format!("{}:{}", self.group, self.name)
+        } else {
+            self.name.clone()
         }
     }
 }

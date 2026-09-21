@@ -42,6 +42,20 @@ pub enum ManagerCommand {
         grace_period: Option<Duration>,
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
+    StartGroup {
+        group: String,
+        reply: oneshot::Sender<Result<Vec<String>, ProgramError>>,
+    },
+    StopGroup {
+        group: String,
+        grace_period: Option<Duration>,
+        reply: oneshot::Sender<Result<Vec<String>, ProgramError>>,
+    },
+    RestartGroup {
+        group: String,
+        grace_period: Option<Duration>,
+        reply: oneshot::Sender<Result<Vec<String>, ProgramError>>,
+    },
     StartAll {
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
@@ -178,6 +192,88 @@ impl ManagerHandle {
             .unwrap_or(Duration::from_secs(10))
             .checked_add(Duration::from_secs(25))
             .unwrap_or(Duration::from_secs(86400));
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn start_group(&self, group: impl Into<String>) -> Result<Vec<String>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::StartGroup {
+                group: group.into(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(60);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn stop_group(
+        &self,
+        group: impl Into<String>,
+        grace_period: Option<Duration>,
+    ) -> Result<Vec<String>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::StopGroup {
+                group: group.into(),
+                grace_period,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(60);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn restart_group(
+        &self,
+        group: impl Into<String>,
+        grace_period: Option<Duration>,
+    ) -> Result<Vec<String>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::RestartGroup {
+                group: group.into(),
+                grace_period,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(120);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -498,6 +594,26 @@ impl ManagerActor {
                                 let _ = reply.send(res);
                             }
                         }
+                        ManagerCommand::StartGroup { group, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: format!("group '{}'", group) }));
+                            } else {
+                                let res = self.execute_start_group(&group).await;
+                                let _ = reply.send(res);
+                            }
+                        }
+                        ManagerCommand::StopGroup { group, grace_period, reply } => {
+                            let res = self.execute_stop_group(&group, grace_period).await;
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::RestartGroup { group, grace_period, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: format!("group '{}'", group) }));
+                            } else {
+                                let res = self.execute_restart_group(&group, grace_period).await;
+                                let _ = reply.send(res);
+                            }
+                        }
                         ManagerCommand::StartAll { reply } => {
                             if self.is_shutting_down {
                                 let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
@@ -519,9 +635,15 @@ impl ManagerActor {
                             }
                         }
                         ManagerCommand::GetStatus { name, reply } => {
-                            let res = self.programs.get(&name).map(|p| p.status()).ok_or_else(|| {
-                                ProgramError::NotFound { name: name.clone() }
-                            });
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .map(|p| p.status())
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
                             let _ = reply.send(res);
                         }
                         ManagerCommand::GetAllStatus { reply } => {
@@ -529,15 +651,27 @@ impl ManagerActor {
                             let _ = reply.send(statuses);
                         }
                         ManagerCommand::ReadLogs { name, lines, reply } => {
-                            let res = self.programs.get(&name).map(|p| p.read_logs(lines)).ok_or_else(|| {
-                                ProgramError::NotFound { name: name.clone() }
-                            });
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .map(|p| p.read_logs(lines))
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
                             let _ = reply.send(res);
                         }
                         ManagerCommand::SubscribeLogs { name, reply } => {
-                            let res = self.programs.get(&name).map(|p| p.subscribe_logs()).ok_or_else(|| {
-                                ProgramError::NotFound { name: name.clone() }
-                            });
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .map(|p| p.subscribe_logs())
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
                             let _ = reply.send(res);
                         }
                         ManagerCommand::Shutdown { reply } => {
@@ -564,15 +698,104 @@ impl ManagerActor {
         }
     }
 
-    async fn execute_start_program(&mut self, name: &str) -> Result<(), ProgramError> {
-        let prog = self
-            .programs
-            .get_mut(name)
-            .ok_or_else(|| ProgramError::NotFound {
-                name: name.to_string(),
-            })?;
+    /// Matches programs according to standard supervisord syntax:
+    /// - `group:*` matches all programs in `group`
+    /// - `group:program` matches specific program in `group`
+    /// - `program` matches program by direct name, or group by group name
+    fn find_match(&self, pattern: &str) -> Vec<String> {
+        let trimmed = pattern.trim();
+        if let Some((group_part, prog_part)) = trimmed.split_once(':') {
+            let mut matches = Vec::new();
+            for (p_name, cfg) in &self.configs {
+                if cfg.group == group_part && (prog_part == "*" || prog_part == p_name) {
+                    matches.push(p_name.clone());
+                }
+            }
+            matches
+        } else if self.programs.contains_key(trimmed) {
+            vec![trimmed.to_string()]
+        } else {
+            let matches: Vec<String> = self
+                .configs
+                .iter()
+                .filter(|(_, cfg)| cfg.group == trimmed)
+                .map(|(p_name, _)| p_name.clone())
+                .collect();
+            matches
+        }
+    }
 
-        prog.start().await
+    async fn execute_start_group(&mut self, group: &str) -> Result<Vec<String>, ProgramError> {
+        let mut targets = self.find_match(&format!("{}:*", group));
+        if targets.is_empty() {
+            targets = self.find_match(group);
+        }
+        if targets.is_empty() {
+            return Err(ProgramError::NotFound {
+                name: format!("group '{}'", group),
+            });
+        }
+        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(50));
+        for name in &targets {
+            if let Some(prog) = self.programs.get_mut(name) {
+                prog.start().await?;
+            }
+        }
+        Ok(targets)
+    }
+
+    async fn execute_stop_group(
+        &mut self,
+        group: &str,
+        grace_period: Option<Duration>,
+    ) -> Result<Vec<String>, ProgramError> {
+        let mut targets = self.find_match(&format!("{}:*", group));
+        if targets.is_empty() {
+            targets = self.find_match(group);
+        }
+        if targets.is_empty() {
+            return Err(ProgramError::NotFound {
+                name: format!("group '{}'", group),
+            });
+        }
+        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(50));
+        for name in targets.iter().rev() {
+            let default_wait = self
+                .configs
+                .get(name)
+                .map(|c| c.stop_wait_secs)
+                .unwrap_or(10);
+            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+            if let Some(prog) = self.programs.get_mut(name) {
+                prog.stop(period).await?;
+            }
+        }
+        Ok(targets)
+    }
+
+    async fn execute_restart_group(
+        &mut self,
+        group: &str,
+        grace_period: Option<Duration>,
+    ) -> Result<Vec<String>, ProgramError> {
+        let stopped = self.execute_stop_group(group, grace_period).await?;
+        self.execute_start_group(group).await?;
+        Ok(stopped)
+    }
+
+    async fn execute_start_program(&mut self, name: &str) -> Result<(), ProgramError> {
+        let targets = self.find_match(name);
+        if targets.is_empty() {
+            return Err(ProgramError::NotFound {
+                name: name.to_string(),
+            });
+        }
+        for target in targets {
+            if let Some(prog) = self.programs.get_mut(&target) {
+                prog.start().await?;
+            }
+        }
+        Ok(())
     }
 
     async fn execute_stop_program(
@@ -580,21 +803,24 @@ impl ManagerActor {
         name: &str,
         grace_period: Option<Duration>,
     ) -> Result<(), ProgramError> {
-        let default_wait = self
-            .configs
-            .get(name)
-            .map(|c| c.stop_wait_secs)
-            .unwrap_or(10);
-        let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
-
-        let prog = self
-            .programs
-            .get_mut(name)
-            .ok_or_else(|| ProgramError::NotFound {
+        let targets = self.find_match(name);
+        if targets.is_empty() {
+            return Err(ProgramError::NotFound {
                 name: name.to_string(),
-            })?;
-
-        prog.stop(period).await
+            });
+        }
+        for target in targets.iter().rev() {
+            let default_wait = self
+                .configs
+                .get(target)
+                .map(|c| c.stop_wait_secs)
+                .unwrap_or(10);
+            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+            if let Some(prog) = self.programs.get_mut(target) {
+                prog.stop(period).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn execute_restart_program(
@@ -602,21 +828,24 @@ impl ManagerActor {
         name: &str,
         grace_period: Option<Duration>,
     ) -> Result<(), ProgramError> {
-        let default_wait = self
-            .configs
-            .get(name)
-            .map(|c| c.stop_wait_secs)
-            .unwrap_or(10);
-        let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
-
-        let prog = self
-            .programs
-            .get_mut(name)
-            .ok_or_else(|| ProgramError::NotFound {
+        let targets = self.find_match(name);
+        if targets.is_empty() {
+            return Err(ProgramError::NotFound {
                 name: name.to_string(),
-            })?;
-
-        prog.restart(period).await
+            });
+        }
+        for target in targets.iter().rev() {
+            let default_wait = self
+                .configs
+                .get(target)
+                .map(|c| c.stop_wait_secs)
+                .unwrap_or(10);
+            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+            if let Some(prog) = self.programs.get_mut(target) {
+                prog.restart(period).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Starts all programs in layers according to the DAG topology (concurrently within each layer).
