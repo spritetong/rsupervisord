@@ -9,7 +9,7 @@ pub mod paths;
 pub mod schema;
 
 pub use diff::ConfigDiff;
-pub use expand::{MacroExpander, expand_env_vars};
+pub use expand::{MacroExpander, StringExpression, expand_env_vars};
 pub use paths::PathResolver;
 pub use schema::{
     LoggingConfig, MetricsConfig, ProgramConfigRaw, ProgramDefaults, ServerConfig, SupervisorConfig,

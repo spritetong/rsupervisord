@@ -311,8 +311,9 @@ impl SupervisorConfig {
         yaml_content: &str,
         config_dir: Option<&std::path::Path>,
     ) -> Result<Self, ProgramError> {
-        // Expand environment variables first
-        let expanded = crate::config::expand::expand_env_vars(yaml_content);
+        // Expand environment variables and patterns first
+        let expanded = crate::config::expand::MacroExpander::new()
+            .expand_with_config_dir(yaml_content, config_dir);
         let mut config: Self = serde_yaml::from_str(&expanded).map_err(|e| {
             ProgramError::ConfigError(format!("Failed to parse YAML configuration: {}", e))
         })?;

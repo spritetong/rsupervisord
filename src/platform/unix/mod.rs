@@ -273,6 +273,15 @@ impl PlatformBackend for UnixPlatformBackend {
         Some(PathBuf::from(format!("/etc/{}", cmd_name)))
     }
 
+    fn hostname(&self) -> String {
+        if let Ok(h) = nix::unistd::gethostname() {
+            if let Ok(s) = h.into_string() {
+                return s;
+            }
+        }
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
+    }
+
     fn service(&self) -> &dyn PlatformService {
         &UnixService
     }

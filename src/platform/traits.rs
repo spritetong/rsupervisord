@@ -113,6 +113,11 @@ pub trait PlatformBackend: Send + Sync {
     /// Returns the platform default system configuration directory if applicable (e.g. /etc/<cmd_name> on Unix).
     fn default_system_config_dir(&self, cmd_name: &str) -> Option<PathBuf>;
 
+    /// Returns the host node name (hostname).
+    fn hostname(&self) -> String {
+        "localhost".to_string()
+    }
+
     /// Returns the platform system service manager.
     fn service(&self) -> &dyn PlatformService;
 }

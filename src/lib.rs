@@ -15,7 +15,7 @@ pub mod program;
 pub mod server;
 pub mod service;
 
-pub use config::{ConfigDiff, SupervisorConfig};
+pub use config::{ConfigDiff, StringExpression, SupervisorConfig};
 pub use daemon::{DaemonArgs, SupervisorDaemon, run_daemon};
 pub use error::{CliError, ConfigError, ProgramError, ServiceError, SupervisorError};
 pub use manager::{

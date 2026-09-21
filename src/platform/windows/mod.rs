@@ -420,6 +420,10 @@ impl PlatformBackend for WindowsPlatformBackend {
         None
     }
 
+    fn hostname(&self) -> String {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string())
+    }
+
     fn service(&self) -> &dyn PlatformService {
         &WindowsService
     }

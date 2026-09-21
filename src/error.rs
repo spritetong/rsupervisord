@@ -160,6 +160,9 @@ pub enum ConfigError {
     #[error("Environment macro expansion error for '{var}': {reason}")]
     EnvironmentExpansion { var: String, reason: String },
 
+    #[error("Configuration expansion error: {message}")]
+    Expansion { message: String },
+
     #[error("Invalid value for field '{field}': {message}")]
     InvalidValue { field: String, message: String },
 
