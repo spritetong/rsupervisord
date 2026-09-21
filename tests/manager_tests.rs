@@ -5,7 +5,7 @@
 
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
-use rsupervisord::program::ProgramState;
+use rsupervisord::program::{ProgramState, StopSignal};
 
 fn get_sleep_cmd(secs: u64) -> String {
     #[cfg(unix)]
@@ -190,17 +190,18 @@ fn test_config_example_yaml_parsing() {
 
     let config =
         SupervisorConfig::from_file(&example_path).expect("config-example.yaml must be valid");
-    assert_eq!(config.programs.len(), 5);
+    assert_eq!(config.programs.len(), 6);
     assert!(config.programs.contains_key("redis"));
     assert!(config.programs.contains_key("api-server"));
     assert!(config.programs.contains_key("worker-task"));
     assert!(config.programs.contains_key("web-frontend"));
     assert!(config.programs.contains_key("nightly-backup"));
+    assert!(config.programs.contains_key("microservice"));
 
     let resolved = config
         .resolve_programs()
         .expect("resolve programs in config-example.yaml");
-    assert_eq!(resolved.len(), 5);
+    assert_eq!(resolved.len(), 6);
 
     let redis = &resolved["redis"];
     assert_eq!(redis.priority, 10);
@@ -216,6 +217,19 @@ fn test_config_example_yaml_parsing() {
     assert_eq!(backup.cron_stop.as_deref(), Some("0 4 * * *"));
     assert!(backup.pre_start.is_some());
     assert!(backup.pre_stop.is_some());
+
+    let micro = &resolved["microservice"];
+    assert!(micro.restart_when_binary_changed);
+    assert_eq!(
+        micro.restart_directory_monitor.as_deref(),
+        Some(std::path::Path::new("./config"))
+    );
+    assert_eq!(micro.restart_file_pattern.as_deref(), Some("*.json"));
+    assert_eq!(
+        micro.restart_signal_when_file_changed,
+        Some(StopSignal::Hup)
+    );
+    assert_eq!(micro.restart_debounce_secs, 5);
 }
 
 #[tokio::test]

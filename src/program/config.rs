@@ -93,6 +93,14 @@ pub enum StopSignal {
     #[serde(alias = "SIGKILL", alias = "KILL", alias = "sigkill", alias = "kill")]
     Kill,
     #[strum(
+        serialize = "HUP",
+        serialize = "SIGHUP",
+        serialize = "sighup",
+        serialize = "hup"
+    )]
+    #[serde(alias = "SIGHUP", alias = "HUP", alias = "sighup", alias = "hup")]
+    Hup,
+    #[strum(
         serialize = "CTRL_BREAK",
         serialize = "ctrl_break",
         serialize = "ctrlbreak",
@@ -231,6 +239,26 @@ pub struct ProgramConfig {
     pub pre_start_ignore_failure: bool,
     #[serde(default = "default_hook_timeout_secs")]
     pub hook_timeout_secs: u64,
+    #[serde(default)]
+    pub restart_when_binary_changed: bool,
+    #[serde(default)]
+    pub restart_signal_when_binary_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_binary_changed: Option<String>,
+    #[serde(default)]
+    pub restart_directory_monitor: Option<PathBuf>,
+    #[serde(default)]
+    pub restart_file_pattern: Option<String>,
+    #[serde(default)]
+    pub restart_signal_when_file_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_file_changed: Option<String>,
+    #[serde(default = "default_restart_debounce_secs")]
+    pub restart_debounce_secs: u64,
+}
+
+fn default_restart_debounce_secs() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +368,14 @@ impl ProgramConfig {
             pre_stop: None,
             pre_start_ignore_failure: false,
             hook_timeout_secs: default_hook_timeout_secs(),
+            restart_when_binary_changed: false,
+            restart_signal_when_binary_changed: None,
+            restart_cmd_when_binary_changed: None,
+            restart_directory_monitor: None,
+            restart_file_pattern: None,
+            restart_signal_when_file_changed: None,
+            restart_cmd_when_file_changed: None,
+            restart_debounce_secs: default_restart_debounce_secs(),
         }
     }
 

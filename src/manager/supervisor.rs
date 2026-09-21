@@ -7,7 +7,7 @@ use crate::config::diff::ConfigDiff;
 use crate::config::schema::SupervisorConfig;
 use crate::error::ProgramError;
 use crate::manager::dag::DependencyGraph;
-use crate::program::config::ProgramConfig;
+use crate::program::config::{ProgramConfig, StopSignal};
 use crate::program::process::ProcessProgram;
 use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
@@ -40,6 +40,11 @@ pub enum ManagerCommand {
     RestartProgram {
         name: String,
         grace_period: Option<Duration>,
+        reply: oneshot::Sender<Result<(), ProgramError>>,
+    },
+    SignalProgram {
+        name: String,
+        signal: StopSignal,
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
     StartGroup {
@@ -102,6 +107,19 @@ pub struct ManagerHandle {
 }
 
 impl ManagerHandle {
+    #[doc(hidden)]
+    pub fn new_mock_for_test(
+        command_tx: mpsc::Sender<ManagerCommand>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        Self {
+            command_tx,
+            cancel_token,
+            activity_tracker: crate::manager::ActivityTracker::default(),
+            event_hub: crate::manager::EventHub::default(),
+        }
+    }
+
     pub fn activity_tracker(&self) -> &crate::manager::ActivityTracker {
         &self.activity_tracker
     }
@@ -201,6 +219,35 @@ impl ManagerHandle {
             .unwrap_or(Duration::from_secs(10))
             .checked_add(Duration::from_secs(25))
             .unwrap_or(Duration::from_secs(86400));
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn signal_program(
+        &self,
+        name: impl Into<String>,
+        signal: StopSignal,
+    ) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::SignalProgram {
+                name: name.into(),
+                signal,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(10);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -574,28 +621,34 @@ impl SupervisorManagerBuilder {
         let (command_tx, command_rx) = mpsc::channel(64);
         let cron_table = crate::manager::cron::CronTable::from_configs(&programs_map);
 
+        let handle = ManagerHandle {
+            command_tx,
+            cancel_token: cancel_token.clone(),
+            activity_tracker: activity_tracker.clone(),
+            event_hub: event_hub.clone(),
+        };
+
+        let watch_handle = crate::manager::WatchService::spawn(
+            handle.clone(),
+            programs_map.clone(),
+            cancel_token.clone(),
+        );
+
         let actor = ManagerActor {
             programs,
             configs: programs_map,
             dag,
             cron_table,
+            watch_handle,
             command_rx,
-            activity_tracker: activity_tracker.clone(),
-            event_hub: event_hub.clone(),
+            activity_tracker,
+            event_hub,
             cancel_token: cancel_token.clone(),
             is_shutting_down: false,
         };
 
         let actor_handle = tokio::spawn(actor.run());
-
-        let handle = ManagerHandle {
-            command_tx,
-            cancel_token: cancel_token.clone(),
-            activity_tracker,
-            event_hub,
-        };
-
-        let cancel_guard = cancel_token.clone().drop_guard();
+        let cancel_guard = cancel_token.drop_guard();
 
         Ok(SupervisorManager {
             handle,
@@ -639,6 +692,7 @@ struct ManagerActor {
     configs: HashMap<String, ProgramConfig>,
     dag: DependencyGraph,
     cron_table: crate::manager::cron::CronTable,
+    watch_handle: crate::manager::WatchServiceHandle,
     command_rx: mpsc::Receiver<ManagerCommand>,
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
@@ -689,6 +743,16 @@ impl ManagerActor {
                             } else {
                                 let res = self.execute_restart_program(&name, grace_period).await;
                                 let _ = reply.send(res);
+                            }
+                        }
+                        ManagerCommand::SignalProgram { name, signal, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
+                            } else if let Some(prog) = self.programs.get(&name) {
+                                let res = prog.signal(signal).await;
+                                let _ = reply.send(res);
+                            } else {
+                                let _ = reply.send(Err(ProgramError::NotFound { name }));
                             }
                         }
                         ManagerCommand::StartGroup { group, reply } => {
@@ -1111,7 +1175,10 @@ impl ManagerActor {
         // 5. Rebuild cron table with updated configurations
         self.cron_table = crate::manager::cron::CronTable::from_configs(&self.configs);
 
-        // 6. Broadcast ConfigReloaded event to subscribers
+        // 6. Update watch service with new program configurations
+        self.watch_handle.update_configs(self.configs.clone()).await;
+
+        // 7. Broadcast ConfigReloaded event to subscribers
         self.event_hub
             .publish_system(crate::manager::SystemEvent::ConfigReloaded {
                 added: summary.added.clone(),

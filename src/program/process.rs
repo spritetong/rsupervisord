@@ -6,7 +6,7 @@
 use crate::error::ProgramError;
 use crate::logging::RingBuffer;
 use crate::platform::PlatformProcessGuard;
-use crate::program::config::{AutoRestartPolicy, ProgramConfig};
+use crate::program::config::{AutoRestartPolicy, ProgramConfig, StopSignal};
 use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
 use async_trait::async_trait;
@@ -29,6 +29,10 @@ pub enum ProgramCommand {
     },
     Restart {
         grace_period: Duration,
+        reply: oneshot::Sender<Result<(), ProgramError>>,
+    },
+    Signal {
+        signal: StopSignal,
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
     Shutdown {
@@ -291,6 +295,30 @@ impl Program for ProcessProgram {
 
     fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String> {
         self.ring_buffer.subscribe()
+    }
+
+    async fn signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ProgramCommand::Signal {
+                signal,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: self.config.name.clone(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(10);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: self.config.name.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: self.config.name.clone(),
+            })?
     }
 
     async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ProgramError> {
@@ -805,6 +833,16 @@ impl ProgramActor {
                     .await;
                 let _ = reply.send(Ok(()));
                 self.cancel_token.cancel();
+            }
+            ProgramCommand::Signal { signal, reply } => {
+                if let Some(ref child) = self.current_child {
+                    let res = child.platform_guard.send_stop_signal(signal);
+                    let _ = reply.send(res);
+                } else {
+                    let _ = reply.send(Err(ProgramError::NotRunning {
+                        name: self.config.name.clone(),
+                    }));
+                }
             }
         }
     }

@@ -283,6 +283,47 @@ impl PlatformBackend for UnixPlatformBackend {
         std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
     }
 
+    fn resolve_executable(&self, command: &str, working_dir: Option<&Path>) -> Option<PathBuf> {
+        let base_path = Path::new(command);
+
+        if base_path.is_absolute() {
+            if base_path.is_file() {
+                return base_path
+                    .canonicalize()
+                    .ok()
+                    .or_else(|| Some(base_path.to_path_buf()));
+            }
+            return None;
+        }
+
+        if command.contains('/') {
+            let wd = working_dir.unwrap_or_else(|| Path::new("."));
+            let candidate = wd.join(base_path);
+            if candidate.is_file() {
+                return candidate.canonicalize().ok().or(Some(candidate));
+            }
+            return None;
+        }
+
+        if let Some(wd) = working_dir {
+            let candidate = wd.join(base_path);
+            if candidate.is_file() {
+                return candidate.canonicalize().ok().or(Some(candidate));
+            }
+        }
+
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let candidate = dir.join(base_path);
+                if candidate.is_file() {
+                    return candidate.canonicalize().ok().or(Some(candidate));
+                }
+            }
+        }
+
+        None
+    }
+
     fn service(&self) -> &dyn PlatformService {
         &UnixService
     }
@@ -366,6 +407,7 @@ pub fn to_nix_signal(sig: StopSignal) -> Signal {
         StopSignal::Int => Signal::SIGINT,
         StopSignal::Quit => Signal::SIGQUIT,
         StopSignal::Kill => Signal::SIGKILL,
+        StopSignal::Hup => Signal::SIGHUP,
         StopSignal::CtrlBreak => Signal::SIGTERM,
         StopSignal::CtrlC => Signal::SIGINT,
     }

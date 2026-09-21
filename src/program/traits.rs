@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::ProgramError;
+use crate::program::config::StopSignal;
 use crate::program::state::ProgramStatus;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -40,6 +41,9 @@ pub trait Program: Send + Sync {
 
     /// Subscribes to real-time incoming log events.
     fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String>;
+
+    /// Asynchronously sends a signal to the running program process tree.
+    async fn signal(&self, signal: StopSignal) -> Result<(), ProgramError>;
 
     /// Asynchronously sends input data to the process's standard input.
     async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ProgramError>;

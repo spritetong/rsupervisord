@@ -9,6 +9,7 @@ pub mod dag;
 pub mod event;
 pub mod health;
 pub mod supervisor;
+pub mod watch;
 
 pub use activity::ActivityTracker;
 pub use cron::{CronAction, CronTable};
@@ -18,3 +19,4 @@ pub use health::{HealthEvent, HealthProbeRunner};
 pub use supervisor::{
     ManagerCommand, ManagerHandle, ReloadSummary, SupervisorManager, SupervisorManagerBuilder,
 };
+pub use watch::{WatchRule, WatchService, WatchServiceHandle};

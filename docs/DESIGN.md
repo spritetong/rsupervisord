@@ -980,5 +980,38 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
 | **System Service Architecture** | `PlatformService` trait, zero `#[cfg]` outside platform/, Windows SCM hardening | Panic safety, SCM heartbeat, SC_ACTION_RESTART, zero orphan processes | ✅ `service_tests.rs` + Windows SCM integration |
 | **Windows GUI & Console Close** | Send `WM_CLOSE`, `Ctrl+Close`, and `Ctrl+C` to daemon | Immediate graceful shutdown triggered | ✅ Verified with `test_windows_gui_wm_close_shutdown_signal` |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 101/101 passed; Linux: 99/99 passed |
+| **File & Binary Change Monitoring** | Inode-resilient parent watch, wildcard file patterns, multi-chunk settling debounce | Zero mid-write ETXTBSY/sharing locks; graceful signal / restart | ✅ `watch_tests.rs` (3 tests passed) |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 116/116 passed; Linux: 114/114 passed |
+
+---
+
+## 18. File and Binary Change Monitoring & Debounced Auto-Restart (`WatchService`)
+
+### 18.1 Go Supervisord Compatibility & Evolution
+`rsupervisord` models its file change detection and binary change restart after Go's `ochinchina/supervisord`, while eliminating its race conditions and excessive polling:
+- `restart_when_binary_changed: bool` (default: `false`): Automatically detects modifications to the target executable binary.
+- `restart_signal_when_binary_changed: Option<StopSignal>`: If specified, sends a graceful reload signal (e.g. `SIGHUP`) instead of stopping and restarting the process.
+- `restart_cmd_when_binary_changed: Option<String>`: Custom restart command executed when the binary changes.
+- `restart_directory_monitor: Option<PathBuf>`: Path to a directory monitored recursively for changes.
+- `restart_file_pattern: Option<String>`: Glob/wildcard filter (e.g. `*.json`, `*.conf`) matching modified files within `restart_directory_monitor`.
+- `restart_signal_when_file_changed: Option<StopSignal>`: Signal sent when matching directory files change.
+- `restart_cmd_when_file_changed: Option<String>`: Custom restart command executed when matching directory files change.
+- `restart_debounce_secs: u64` (default: `5`): Settling debounce window in seconds (stability-first).
+
+### 18.2 Inode-Resilient Directory Watching & Atomic Renames
+Directly watching an executable binary file via OS filesystem notifications (inotify on Linux, ReadDirectoryChangesW on Windows) suffers from inode invalidation: modern compilers (Rust, Go, C++) write into temporary files and perform atomic renames (`rename` or `MoveFileExW`) to replace the target executable.
+`rsupervisord` solves this by:
+1. Resolving the true binary location using `PlatformBackend::resolve_executable` (evaluating relative directories, executable extensions, and PATH).
+2. Registering the **parent directory** with `notify::RecommendedWatcher`.
+3. Filtering raw filesystem events strictly by canonicalized path comparison or wildcard filename matching.
+
+### 18.3 Stability-First Multi-Chunk Write Debouncing Engine
+Compilers and package managers write large binaries in chunks over several seconds. Premature restarts during mid-write result in corrupted executions, `ETXTBSY` (Linux), or file-sharing lock violations (`ERROR_SHARING_VIOLATION` on Windows).
+`WatchService` implements an asynchronous debouncing loop:
+1. **Settling Window Coalescing**: Consecutive write/create/rename events reset the debounce timer (`default: 5s`).
+2. **File Accessibility & Size Verification**: Before triggering the action, `WatchService` attempts to open the modified target file in read-only mode and verifies its size > 0. If the file is locked by a compiler or linker, the trigger backs off gracefully until the file stabilizes.
+3. **Execution Dispatch**: Depending on configuration, the manager executes:
+   - `ManagerHandle::signal_program(name, signal)` for non-destructive in-flight reload (e.g. SIGHUP).
+   - Shell command execution (`restart_cmd_when_*`).
+   - `ManagerHandle::restart_program(name, None)` for standard full process restart.
 

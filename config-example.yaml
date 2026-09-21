@@ -290,3 +290,40 @@ programs:
       stdout: "logs/backup.log"
       redirect_stderr: true
 
+  # ----------------------------------------------------------------------------
+  # Example 6: Hot-Reloading Microservice with Binary / Config Watcher
+  # Automatically reloads or restarts when binary or configuration files change.
+  # Compatible with Go ochinchina/supervisord extended directives.
+  # ----------------------------------------------------------------------------
+  microservice:
+    command: "./bin/microservice --config ./config/service.json"
+    priority: 50
+    autostart: true
+    autorestart: unexpected
+
+    # Automatically watch executable binary and restart on update:
+    restart_when_binary_changed: true
+
+    # Optional graceful reload signal instead of full restart (e.g. SIGHUP):
+    # restart_signal_when_binary_changed: SIGHUP
+
+    # Or custom command to execute upon binary change:
+    # restart_cmd_when_binary_changed: "systemctl reload myapp"
+
+    # Monitor a configuration directory for changes:
+    restart_directory_monitor: "./config"
+
+    # Glob/wildcard pattern matching files within the monitored directory:
+    restart_file_pattern: "*.json"
+
+    # Signal or command to trigger when matching files change:
+    restart_signal_when_file_changed: SIGHUP
+
+    # Settling debounce window in seconds (default: 5).
+    # Coalesces multi-chunk compiler writes and protects against lock conflicts.
+    restart_debounce_secs: 5
+
+    logs:
+      stdout: "logs/microservice.log"
+      redirect_stderr: true
+

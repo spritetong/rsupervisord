@@ -425,6 +425,64 @@ impl PlatformBackend for WindowsPlatformBackend {
         std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string())
     }
 
+    fn resolve_executable(&self, command: &str, working_dir: Option<&Path>) -> Option<PathBuf> {
+        let base_path = Path::new(command);
+        let extensions = ["", ".exe", ".cmd", ".bat"];
+
+        let try_dir = |dir: &Path| -> Option<PathBuf> {
+            for ext in &extensions {
+                let candidate = if ext.is_empty() || command.ends_with(ext) {
+                    dir.join(base_path)
+                } else {
+                    dir.join(format!("{}{}", command, ext))
+                };
+                if candidate.is_file() {
+                    return candidate.canonicalize().ok().or(Some(candidate));
+                }
+            }
+            None
+        };
+
+        if base_path.is_absolute() {
+            for ext in &extensions {
+                let candidate = if ext.is_empty() || command.ends_with(ext) {
+                    base_path.to_path_buf()
+                } else {
+                    PathBuf::from(format!("{}{}", command, ext))
+                };
+                if candidate.is_file() {
+                    return candidate.canonicalize().ok().or(Some(candidate));
+                }
+            }
+            return None;
+        }
+
+        if command.contains('/') || command.contains('\\') {
+            let wd = working_dir.unwrap_or_else(|| Path::new("."));
+            return try_dir(wd);
+        }
+
+        if let Some(wd) = working_dir
+            && let Some(p) = try_dir(wd)
+        {
+            return Some(p);
+        }
+
+        if let Some(p) = try_dir(Path::new(".")) {
+            return Some(p);
+        }
+
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                if let Some(p) = try_dir(&dir) {
+                    return Some(p);
+                }
+            }
+        }
+
+        None
+    }
+
     fn service(&self) -> &dyn PlatformService {
         &WindowsService
     }

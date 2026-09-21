@@ -118,6 +118,9 @@ pub trait PlatformBackend: Send + Sync {
         "localhost".to_string()
     }
 
+    /// Resolves an executable binary path against the working directory and system PATH.
+    fn resolve_executable(&self, command: &str, working_dir: Option<&Path>) -> Option<PathBuf>;
+
     /// Returns the platform system service manager.
     fn service(&self) -> &dyn PlatformService;
 }

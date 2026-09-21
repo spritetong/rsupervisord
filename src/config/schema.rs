@@ -169,6 +169,22 @@ pub struct ProgramDefaults {
     pub numprocs_start: Option<usize>,
     #[serde(default)]
     pub process_name: Option<String>,
+    #[serde(default)]
+    pub restart_when_binary_changed: Option<bool>,
+    #[serde(default)]
+    pub restart_signal_when_binary_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_binary_changed: Option<String>,
+    #[serde(default)]
+    pub restart_directory_monitor: Option<PathBuf>,
+    #[serde(default)]
+    pub restart_file_pattern: Option<String>,
+    #[serde(default)]
+    pub restart_signal_when_file_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_file_changed: Option<String>,
+    #[serde(default)]
+    pub restart_debounce_secs: Option<u64>,
 }
 
 /// Raw representation of program log configuration with optional booleans for inheritance.
@@ -245,6 +261,22 @@ pub struct ProgramConfigRaw {
     pub numprocs_start: Option<usize>,
     #[serde(default)]
     pub process_name: Option<String>,
+    #[serde(default)]
+    pub restart_when_binary_changed: Option<bool>,
+    #[serde(default)]
+    pub restart_signal_when_binary_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_binary_changed: Option<String>,
+    #[serde(default)]
+    pub restart_directory_monitor: Option<PathBuf>,
+    #[serde(default)]
+    pub restart_file_pattern: Option<String>,
+    #[serde(default)]
+    pub restart_signal_when_file_changed: Option<StopSignal>,
+    #[serde(default)]
+    pub restart_cmd_when_file_changed: Option<String>,
+    #[serde(default)]
+    pub restart_debounce_secs: Option<u64>,
 }
 
 /// Process group configuration definition.
@@ -774,6 +806,69 @@ impl SupervisorConfig {
                     None
                 };
 
+                let restart_when_binary_changed = raw
+                    .restart_when_binary_changed
+                    .or(self.program_defaults.restart_when_binary_changed)
+                    .unwrap_or(false);
+
+                let restart_signal_when_binary_changed = raw
+                    .restart_signal_when_binary_changed
+                    .or(self.program_defaults.restart_signal_when_binary_changed);
+
+                let restart_cmd_when_binary_changed = if let Some(cmd) =
+                    raw.restart_cmd_when_binary_changed.as_ref().or(self
+                        .program_defaults
+                        .restart_cmd_when_binary_changed
+                        .as_ref())
+                {
+                    Some(
+                        expr.eval_named(cmd, "restart_cmd_when_binary_changed")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                let restart_directory_monitor = if let Some(dir) = raw
+                    .restart_directory_monitor
+                    .as_ref()
+                    .or(self.program_defaults.restart_directory_monitor.as_ref())
+                {
+                    let evaluated_dir = expr
+                        .eval_named(&dir.to_string_lossy(), "restart_directory_monitor")
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    Some(PathBuf::from(evaluated_dir))
+                } else {
+                    None
+                };
+
+                let restart_file_pattern = raw
+                    .restart_file_pattern
+                    .clone()
+                    .or_else(|| self.program_defaults.restart_file_pattern.clone());
+
+                let restart_signal_when_file_changed = raw
+                    .restart_signal_when_file_changed
+                    .or(self.program_defaults.restart_signal_when_file_changed);
+
+                let restart_cmd_when_file_changed = if let Some(cmd) = raw
+                    .restart_cmd_when_file_changed
+                    .as_ref()
+                    .or(self.program_defaults.restart_cmd_when_file_changed.as_ref())
+                {
+                    Some(
+                        expr.eval_named(cmd, "restart_cmd_when_file_changed")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                let restart_debounce_secs = raw
+                    .restart_debounce_secs
+                    .or(self.program_defaults.restart_debounce_secs)
+                    .unwrap_or(5);
+
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
                     command,
@@ -800,6 +895,14 @@ impl SupervisorConfig {
                     pre_stop,
                     pre_start_ignore_failure,
                     hook_timeout_secs,
+                    restart_when_binary_changed,
+                    restart_signal_when_binary_changed,
+                    restart_cmd_when_binary_changed,
+                    restart_directory_monitor,
+                    restart_file_pattern,
+                    restart_signal_when_file_changed,
+                    restart_cmd_when_file_changed,
+                    restart_debounce_secs,
                 };
 
                 if resolved.contains_key(instance_name) {
@@ -1118,5 +1221,46 @@ programs:
         assert_eq!(normalize_http_bind("9001"), "0.0.0.0:9001");
         assert_eq!(normalize_http_bind("127.0.0.1:9001"), "127.0.0.1:9001");
         assert_eq!(normalize_http_bind("localhost:9001"), "localhost:9001");
+    }
+
+    #[test]
+    fn test_restart_watch_fields_and_debounce_defaults() {
+        let yaml = r#"
+program_defaults:
+  restart_debounce_secs: 10
+programs:
+  default_debounce_prog:
+    command: "app1"
+    restart_when_binary_changed: true
+    restart_signal_when_binary_changed: "HUP"
+  custom_debounce_prog:
+    command: "app2"
+    restart_directory_monitor: "src/%(program_name)s"
+    restart_file_pattern: "*.rs"
+    restart_debounce_secs: 2
+    restart_signal_when_file_changed: "SIGTERM"
+  vanilla_prog:
+    command: "app3"
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        let p1 = &resolved["default_debounce_prog"];
+        assert!(p1.restart_when_binary_changed);
+        assert_eq!(p1.restart_signal_when_binary_changed, Some(StopSignal::Hup));
+        assert_eq!(p1.restart_debounce_secs, 10); // Inherited from defaults
+
+        let p2 = &resolved["custom_debounce_prog"];
+        assert_eq!(
+            p2.restart_directory_monitor,
+            Some(PathBuf::from("src/custom_debounce_prog"))
+        );
+        assert_eq!(p2.restart_file_pattern.as_deref(), Some("*.rs"));
+        assert_eq!(p2.restart_debounce_secs, 2); // Overridden
+        assert_eq!(p2.restart_signal_when_file_changed, Some(StopSignal::Term));
+
+        let p3 = &resolved["vanilla_prog"];
+        assert!(!p3.restart_when_binary_changed);
+        assert_eq!(p3.restart_debounce_secs, 10); // Inherited from defaults
     }
 }
