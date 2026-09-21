@@ -3,9 +3,12 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
+pub mod service;
+pub use service::UnixService;
+
 use crate::error::ProgramError;
 use crate::platform::traits::{
-    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard,
+    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -112,33 +115,35 @@ impl PlatformProcessGuard for UnixProcessGuard {
 
         // 2. Read /proc/{pid}/stat for CPU times (fields 14 utime and 15 stime)
         let stat_path = format!("/proc/{}/stat", self.pid);
-        if let Ok(content) = std::fs::read_to_string(&stat_path)
-            && let Some(last_paren_idx) = content.rfind(')')
-        {
-            let rest = &content[last_paren_idx + 1..];
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            if fields.len() > 12 {
-                let utime = fields[11].parse::<u64>().unwrap_or(0);
-                let stime = fields[12].parse::<u64>().unwrap_or(0);
-                let total_ticks = utime + stime;
-                let now = std::time::Instant::now();
+        if let Ok(content) = std::fs::read_to_string(&stat_path) {
+            if let Some(last_paren_idx) = content.rfind(')') {
+                let rest = &content[last_paren_idx + 1..];
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                if fields.len() > 12 {
+                    let utime = fields[11].parse::<u64>().unwrap_or(0);
+                    let stime = fields[12].parse::<u64>().unwrap_or(0);
+                    let total_ticks = utime + stime;
+                    let now = std::time::Instant::now();
 
-                if let Ok(mut lock) = self.last_cpu_sample.lock() {
-                    if let Some((prev_instant, prev_ticks)) = *lock {
-                        let delta_ticks = total_ticks.saturating_sub(prev_ticks);
-                        let elapsed_secs = now.duration_since(prev_instant).as_secs_f64();
-                        if elapsed_secs > 0.0 {
-                            let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-                            let ticks_per_sec = if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
-                            let cpus = std::thread::available_parallelism()
-                                .map(|n| n.get())
-                                .unwrap_or(1) as f64;
-                            let pct =
-                                (delta_ticks as f64 / ticks_per_sec / elapsed_secs) * 100.0 / cpus;
-                            cpu_percent = (pct as f32).max(0.0);
+                    if let Ok(mut lock) = self.last_cpu_sample.lock() {
+                        if let Some((prev_instant, prev_ticks)) = *lock {
+                            let delta_ticks = total_ticks.saturating_sub(prev_ticks);
+                            let elapsed_secs = now.duration_since(prev_instant).as_secs_f64();
+                            if elapsed_secs > 0.0 {
+                                let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+                                let ticks_per_sec =
+                                    if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
+                                let cpus = std::thread::available_parallelism()
+                                    .map(|n| n.get())
+                                    .unwrap_or(1) as f64;
+                                let pct = (delta_ticks as f64 / ticks_per_sec / elapsed_secs)
+                                    * 100.0
+                                    / cpus;
+                                cpu_percent = (pct as f32).max(0.0);
+                            }
                         }
+                        *lock = Some((now, total_ticks));
                     }
-                    *lock = Some((now, total_ticks));
                 }
             }
         }
@@ -206,7 +211,11 @@ impl PlatformBackend for UnixPlatformBackend {
 
     fn default_uds_path(&self) -> PathBuf {
         let cmd_name = crate::config::paths::get_cmd_name();
-        crate::config::paths::default_uds_path(&cmd_name, None)
+        self.default_local_ipc_path(&cmd_name, None)
+    }
+
+    fn default_local_ipc_path(&self, cmd_name: &str, _config_dir: Option<&Path>) -> PathBuf {
+        PathBuf::from(format!("/var/run/{}.sock", cmd_name))
     }
 
     fn is_elevated(&self) -> bool {
@@ -245,6 +254,27 @@ impl PlatformBackend for UnixPlatformBackend {
     fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>> {
         let listener = UnixIpcListener::bind(path)?;
         Ok(Box::new(listener))
+    }
+
+    fn default_daemon_log_path(&self, cmd_name: &str, _config_dir: Option<&Path>) -> PathBuf {
+        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, cmd_name))
+    }
+
+    fn default_program_log_path(
+        &self,
+        cmd_name: &str,
+        program_name: &str,
+        _config_dir: Option<&Path>,
+    ) -> PathBuf {
+        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, program_name))
+    }
+
+    fn default_system_config_dir(&self, cmd_name: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(format!("/etc/{}", cmd_name)))
+    }
+
+    fn service(&self) -> &dyn PlatformService {
+        &UnixService
     }
 }
 

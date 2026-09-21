@@ -3,9 +3,12 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
+pub mod service;
+pub use service::WindowsService;
+
 use crate::error::ProgramError;
 use crate::platform::traits::{
-    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard,
+    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -320,7 +323,11 @@ impl PlatformBackend for WindowsPlatformBackend {
 
     fn default_uds_path(&self) -> PathBuf {
         let cmd_name = crate::config::paths::get_cmd_name();
-        crate::config::paths::default_uds_path(&cmd_name, None)
+        self.default_local_ipc_path(&cmd_name, None)
+    }
+
+    fn default_local_ipc_path(&self, cmd_name: &str, _config_dir: Option<&Path>) -> PathBuf {
+        PathBuf::from(format!(r"\\.\pipe\{}", cmd_name))
     }
 
     fn is_elevated(&self) -> bool {
@@ -392,6 +399,29 @@ impl PlatformBackend for WindowsPlatformBackend {
             let listener = WindowsUdsListener::bind(path)?;
             Ok(Box::new(listener))
         }
+    }
+
+    fn default_daemon_log_path(&self, cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
+        let dir = config_dir.unwrap_or_else(|| Path::new("."));
+        dir.join("logs").join(format!("{}.log", cmd_name))
+    }
+
+    fn default_program_log_path(
+        &self,
+        _cmd_name: &str,
+        program_name: &str,
+        config_dir: Option<&Path>,
+    ) -> PathBuf {
+        let dir = config_dir.unwrap_or_else(|| Path::new("."));
+        dir.join("logs").join(format!("{}.log", program_name))
+    }
+
+    fn default_system_config_dir(&self, _cmd_name: &str) -> Option<PathBuf> {
+        None
+    }
+
+    fn service(&self) -> &dyn PlatformService {
+        &WindowsService
     }
 }
 

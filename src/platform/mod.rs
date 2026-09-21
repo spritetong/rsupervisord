@@ -9,7 +9,9 @@ pub mod unix;
 #[cfg(windows)]
 pub mod windows;
 
-pub use traits::{AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard};
+pub use traits::{
+    AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
+};
 
 /// Returns the native platform backend singleton.
 pub fn native_platform() -> &'static dyn PlatformBackend {

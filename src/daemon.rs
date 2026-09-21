@@ -56,8 +56,7 @@ pub struct DaemonArgs {
     #[arg(long = "restart")]
     pub restart: bool,
 
-    /// Run as a Windows service (invoked by SCM)
-    #[cfg(windows)]
+    /// Run as a system service (e.g. Windows SCM)
     #[arg(long = "service")]
     pub service: bool,
 }

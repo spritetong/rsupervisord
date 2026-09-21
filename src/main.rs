@@ -51,10 +51,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Windows Service Control Manager invocation via --service
-    #[cfg(windows)]
+    // System service invocation via --service (e.g. Windows SCM dispatcher)
     if daemon_args.service {
-        return rsupervisord::service::windows::run_as_service(daemon_args, config_path, cmd_name);
+        return rsupervisord::service::run_service(daemon_args, config_path, cmd_name);
     }
 
     let file_threads = if config_path.exists() {

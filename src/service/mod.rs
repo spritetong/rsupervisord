@@ -3,14 +3,8 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
-#[cfg(unix)]
-pub mod linux;
-
-#[cfg(windows)]
-pub mod windows;
-
 use crate::daemon::DaemonArgs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Inspects command-line service flags and executes service management actions if specified.
 ///
@@ -38,41 +32,25 @@ pub fn handle_service_command(
         return Ok(false);
     }
 
-    #[cfg(windows)]
-    {
-        if args.install {
-            windows::install_service(cmd_name, config_path)?;
-        } else if args.uninstall {
-            windows::uninstall_service(cmd_name)?;
-        } else if args.start {
-            windows::start_service(cmd_name)?;
-        } else if args.stop {
-            windows::stop_service(cmd_name)?;
-        } else if args.restart {
-            windows::restart_service(cmd_name)?;
-        }
-        Ok(true)
+    let service = crate::platform::native_platform().service();
+    if args.install {
+        service.install(cmd_name, config_path)?;
+    } else if args.uninstall {
+        service.uninstall(cmd_name)?;
+    } else if args.start {
+        service.start(cmd_name)?;
+    } else if args.stop {
+        service.stop(cmd_name)?;
+    } else if args.restart {
+        service.restart(cmd_name)?;
     }
 
-    #[cfg(unix)]
-    {
-        if args.install {
-            linux::install_service(cmd_name, config_path)?;
-        } else if args.uninstall {
-            linux::uninstall_service(cmd_name)?;
-        } else if args.start {
-            linux::start_service(cmd_name)?;
-        } else if args.stop {
-            linux::stop_service(cmd_name)?;
-        } else if args.restart {
-            linux::restart_service(cmd_name)?;
-        }
-        Ok(true)
-    }
+    Ok(true)
+}
 
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = (cmd_name, config_path);
-        anyhow::bail!("Service management is not supported on this platform.");
-    }
+/// Runs the daemon as a system service.
+pub fn run_service(args: DaemonArgs, config_path: PathBuf, cmd_name: String) -> anyhow::Result<()> {
+    crate::platform::native_platform()
+        .service()
+        .run_service(args, config_path, cmd_name)
 }

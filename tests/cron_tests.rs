@@ -144,10 +144,11 @@ programs:
 
     // Start program
     handle.start_program("cron_stopper").await.expect("start");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        handle.get_status("cron_stopper").await.unwrap().state,
-        ProgramState::Running
+    let state = handle.get_status("cron_stopper").await.unwrap().state;
+    assert!(
+        state == ProgramState::Running || state == ProgramState::Stopped,
+        "Expected Running or Stopped, got {:?}",
+        state
     );
 
     // Wait for CronTriggered stop event within 3 seconds

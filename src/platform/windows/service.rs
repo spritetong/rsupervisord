@@ -5,6 +5,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -12,8 +13,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use windows_service::define_windows_service;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceDependency, ServiceErrorControl,
-    ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+    ServiceDependency, ServiceErrorControl, ServiceExitCode, ServiceFailureActions,
+    ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus,
+    ServiceType,
 };
 use windows_service::service_control_handler::{
     self, ServiceControlHandlerResult, ServiceStatusHandle,
@@ -23,6 +26,9 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::config::SupervisorConfig;
 use crate::daemon::DaemonArgs;
+use crate::platform::traits::PlatformService;
+
+pub struct WindowsService;
 
 static SERVICE_CONTEXT: OnceLock<(DaemonArgs, PathBuf, String)> = OnceLock::new();
 
@@ -30,8 +36,40 @@ define_windows_service!(ffi_service_main, my_service_main);
 
 /// Entry point called by the Windows Service Control Manager on a background thread.
 fn my_service_main(_arguments: Vec<OsString>) {
-    if let Err(e) = run_service_loop() {
-        tracing::error!("Windows service loop terminated with error: {}", e);
+    // 1. Working directory correction:
+    // When invoked by SCM under NT AUTHORITY\SYSTEM, current working directory defaults to C:\Windows\System32.
+    // Switch to the binary's directory so relative paths and log locations resolve predictably.
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        let _ = std::env::set_current_dir(parent);
+    }
+
+    // 2. Wrap the entire service execution loop in catch_unwind to prevent unwinding across the FFI boundary
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_service_loop));
+
+    match result {
+        Ok(Ok(())) => {
+            tracing::info!("Windows service execution terminated cleanly");
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Windows service loop exited with error: {:#}", e);
+            eprintln!("Windows service error: {:#}", e);
+        }
+        Err(panic_err) => {
+            let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "Unknown panic payload"
+            };
+            tracing::error!(
+                "CRITICAL: Windows service caught panic in service loop: {}",
+                panic_msg
+            );
+            eprintln!("CRITICAL: Windows service caught panic: {}", panic_msg);
+        }
     }
 }
 
@@ -39,7 +77,7 @@ fn run_service_loop() -> anyhow::Result<()> {
     let (daemon_args, config_path, service_name) = SERVICE_CONTEXT
         .get()
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Service execution context is not initialized"))?;
+        .ok_or_else(|| anyhow::anyhow!("Windows service execution context is not initialized"))?;
 
     let shutdown_token = CancellationToken::new();
     let shutdown_token_clone = shutdown_token.clone();
@@ -47,20 +85,27 @@ fn run_service_loop() -> anyhow::Result<()> {
     let status_handle_cell: Arc<Mutex<Option<ServiceStatusHandle>>> = Arc::new(Mutex::new(None));
     let status_handle_cell_clone = status_handle_cell.clone();
 
+    // Atomic flag indicating shutdown has been requested
+    let is_stopping = Arc::new(AtomicBool::new(false));
+    let is_stopping_clone = is_stopping.clone();
+
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 tracing::info!("Received stop/shutdown event from Windows Service Control Manager");
+                is_stopping_clone.store(true, Ordering::SeqCst);
+
                 if let Ok(guard) = status_handle_cell_clone.lock()
                     && let Some(handle) = *guard
                 {
+                    // Report StopPending with a generous wait hint (45s) to allow child process drain
                     let _ = handle.set_service_status(ServiceStatus {
                         service_type: ServiceType::OWN_PROCESS,
                         current_state: ServiceState::StopPending,
                         controls_accepted: ServiceControlAccept::empty(),
                         exit_code: ServiceExitCode::Win32(0),
                         checkpoint: 1,
-                        wait_hint: Duration::from_secs(30),
+                        wait_hint: Duration::from_secs(45),
                         process_id: None,
                     });
                 }
@@ -77,58 +122,137 @@ fn run_service_loop() -> anyhow::Result<()> {
         *guard = Some(status_handle);
     }
 
-    // Report running state to SCM
-    status_handle.set_service_status(ServiceStatus {
+    // Step 1: Report StartPending immediately so SCM watchdog knows startup is in progress
+    let _ = status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
+        checkpoint: 1,
+        wait_hint: Duration::from_secs(30),
         process_id: None,
-    })?;
+    });
 
-    // Determine Tokio worker threads
-    let file_threads = if config_path.exists() {
-        SupervisorConfig::from_file(&config_path)
-            .ok()
-            .and_then(|c| c.worker_threads.map(|w| w as u32))
-    } else {
-        None
-    };
+    let mut final_exit_code = ServiceExitCode::Win32(0);
 
-    let worker_threads = daemon_args
-        .worker_threads
-        .map(|w| w as u32)
-        .or(file_threads);
+    // Scope guard guaranteeing ServiceState::Stopped is ALWAYS reported to SCM upon abnormal or early exit
+    let stopped_guard = scopeguard::guard(status_handle, |handle| {
+        let _ = handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(1),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        });
+    });
 
-    let rt = crate::build_tokio_runtime(worker_threads)?;
-    let daemon_result = rt.block_on(crate::daemon::run_daemon(
-        daemon_args,
-        config_path,
-        Some(shutdown_token),
-    ));
+    let res = (|| -> anyhow::Result<()> {
+        // Step 2: Determine Tokio worker threads and build runtime
+        let file_threads = if config_path.exists() {
+            SupervisorConfig::from_file(&config_path)
+                .ok()
+                .and_then(|c| c.worker_threads.map(|w| w as u32))
+        } else {
+            None
+        };
 
-    let exit_code = match daemon_result {
-        Ok(()) => ServiceExitCode::Win32(0),
-        Err(e) => {
-            tracing::error!("Daemon exited with error: {}", e);
-            ServiceExitCode::Win32(1)
+        let worker_threads = daemon_args
+            .worker_threads
+            .map(|w| w as u32)
+            .or(file_threads);
+
+        let rt = crate::build_tokio_runtime(worker_threads)?;
+
+        // Step 3: Transition to Running state before entering supervisor daemon
+        status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Running,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })?;
+
+        // Step 4: Start background SCM shutdown heartbeat thread
+        // If SCM issues Stop, child process termination may take multiple seconds.
+        // The heartbeat thread periodically increments the checkpoint with a 45s wait hint
+        // so SCM never terminates the service prematurely during a graceful shutdown.
+        let status_handle_hb = status_handle_cell.clone();
+        let is_stopping_hb = is_stopping.clone();
+        let hb_terminated = Arc::new(AtomicBool::new(false));
+        let hb_terminated_clone = hb_terminated.clone();
+
+        let hb_thread = thread::Builder::new()
+            .name(format!("{}-scm-heartbeat", service_name))
+            .spawn(move || {
+                let mut checkpoint = 2u32;
+                while !hb_terminated_clone.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_secs(3));
+                    if hb_terminated_clone.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if is_stopping_hb.load(Ordering::SeqCst)
+                        && let Ok(guard) = status_handle_hb.lock()
+                        && let Some(handle) = *guard
+                    {
+                        let _ = handle.set_service_status(ServiceStatus {
+                            service_type: ServiceType::OWN_PROCESS,
+                            current_state: ServiceState::StopPending,
+                            controls_accepted: ServiceControlAccept::empty(),
+                            exit_code: ServiceExitCode::Win32(0),
+                            checkpoint,
+                            wait_hint: Duration::from_secs(45),
+                            process_id: None,
+                        });
+                        checkpoint = checkpoint.saturating_add(1);
+                    }
+                }
+            });
+
+        // Step 5: Execute supervisor daemon
+        let daemon_result = rt.block_on(crate::daemon::run_daemon(
+            daemon_args,
+            config_path,
+            Some(shutdown_token),
+        ));
+
+        // Stop heartbeat thread cleanly
+        hb_terminated.store(true, Ordering::SeqCst);
+        if let Ok(handle) = hb_thread {
+            let _ = handle.join();
         }
-    };
 
-    // Report stopped state to SCM
+        if let Err(e) = daemon_result {
+            final_exit_code = ServiceExitCode::Win32(1);
+            return Err(e);
+        }
+
+        Ok(())
+    })();
+
+    if let Err(ref e) = res {
+        tracing::error!("Daemon exited with error: {:#}", e);
+        if final_exit_code == ServiceExitCode::Win32(0) {
+            final_exit_code = ServiceExitCode::Win32(1);
+        }
+    }
+
+    // Step 6: Disarm scope guard and report Stopped state to SCM with the determined exit code
+    let status_handle = scopeguard::ScopeGuard::into_inner(stopped_guard);
     let _ = status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code,
+        exit_code: final_exit_code,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
     });
 
-    Ok(())
+    res
 }
 
 /// Runs the daemon as a Windows Service managed by the SCM.
@@ -152,7 +276,7 @@ pub fn run_as_service(
     Ok(())
 }
 
-/// Installs the binary as an auto-start Windows system service.
+/// Installs the binary as an auto-start Windows system service with crash recovery.
 pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
     if !crate::platform::native_platform().is_elevated() {
         anyhow::bail!(
@@ -161,23 +285,29 @@ pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Re
     }
 
     let exe_path = std::env::current_exe()?;
-    let mut launch_arguments = vec![OsString::from("--service")];
-
-    if let Some(cfg) = config_path {
-        let abs_path = if cfg.is_absolute() {
+    let abs_cfg_path = if let Some(cfg) = config_path {
+        if cfg.is_absolute() {
             cfg.to_path_buf()
         } else {
             std::env::current_dir()?.join(cfg)
-        };
-        if !abs_path.exists() {
-            eprintln!(
-                "Warning: Configuration file {:?} does not exist yet. Please ensure it is present before starting the service.",
-                abs_path
-            );
         }
-        launch_arguments.push(OsString::from("-c"));
-        launch_arguments.push(abs_path.into_os_string());
+    } else {
+        crate::config::paths::find_default_config_path(cmd_name)
+            .unwrap_or_else(|| crate::config::paths::get_default_config_path_fallback(cmd_name))
+    };
+
+    if !abs_cfg_path.exists() {
+        eprintln!(
+            "Warning: Configuration file {:?} does not exist yet. Please ensure it is present before starting the service.",
+            abs_cfg_path
+        );
     }
+
+    let launch_arguments = vec![
+        OsString::from("--service"),
+        OsString::from("-c"),
+        abs_cfg_path.into_os_string(),
+    ];
 
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -218,6 +348,33 @@ pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Re
         "High-performance asynchronous process supervision daemon with DAG orchestration",
     );
 
+    // Configure delayed auto-start so dependencies finish loading before service start
+    let _ = service.set_delayed_auto_start(true);
+
+    // Configure SC_ACTION_RESTART crash recovery actions (restart after 5s, 10s, 30s)
+    let actions = vec![
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(5),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(10),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(30),
+        },
+    ];
+    let failure_actions = ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(actions),
+    };
+    let _ = service.update_failure_actions(failure_actions);
+    let _ = service.set_failure_actions_on_non_crash_failures(true);
+
     println!("Successfully installed Windows service: {}", cmd_name);
     Ok(())
 }
@@ -242,7 +399,7 @@ pub fn uninstall_service(cmd_name: &str) -> anyhow::Result<()> {
     {
         println!("Stopping service '{}' before uninstallation...", cmd_name);
         let _ = service.stop();
-        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(10));
+        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(15));
     }
 
     service.delete()?;
@@ -272,7 +429,7 @@ pub fn start_service(cmd_name: &str) -> anyhow::Result<()> {
     println!("Starting service '{}'...", cmd_name);
     service.start(&[] as &[&OsStr])?;
 
-    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(10))? {
+    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(15))? {
         println!("Service '{}' started successfully.", cmd_name);
     } else {
         println!("Service start requested, but service state is still pending.");
@@ -303,7 +460,7 @@ pub fn stop_service(cmd_name: &str) -> anyhow::Result<()> {
     println!("Stopping service '{}'...", cmd_name);
     service.stop()?;
 
-    if wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(10))? {
+    if wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(30))? {
         println!("Service '{}' stopped successfully.", cmd_name);
     } else {
         println!("Service stop requested, but service state is still pending.");
@@ -331,13 +488,13 @@ pub fn restart_service(cmd_name: &str) -> anyhow::Result<()> {
     if status.current_state != ServiceState::Stopped {
         println!("Stopping service '{}'...", cmd_name);
         let _ = service.stop();
-        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(10));
+        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(30));
     }
 
     println!("Starting service '{}'...", cmd_name);
     service.start(&[] as &[&OsStr])?;
 
-    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(10))? {
+    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(15))? {
         println!("Service '{}' restarted successfully.", cmd_name);
     } else {
         println!("Service restart requested, but service state is still pending.");
@@ -361,4 +518,35 @@ fn wait_for_state(
         }
     }
     Ok(false)
+}
+
+impl PlatformService for WindowsService {
+    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
+        install_service(cmd_name, config_path)
+    }
+
+    fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()> {
+        uninstall_service(cmd_name)
+    }
+
+    fn start(&self, cmd_name: &str) -> anyhow::Result<()> {
+        start_service(cmd_name)
+    }
+
+    fn stop(&self, cmd_name: &str) -> anyhow::Result<()> {
+        stop_service(cmd_name)
+    }
+
+    fn restart(&self, cmd_name: &str) -> anyhow::Result<()> {
+        restart_service(cmd_name)
+    }
+
+    fn run_service(
+        &self,
+        daemon_args: DaemonArgs,
+        config_path: PathBuf,
+        cmd_name: String,
+    ) -> anyhow::Result<()> {
+        run_as_service(daemon_args, config_path, cmd_name)
+    }
 }

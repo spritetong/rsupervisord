@@ -920,13 +920,54 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 
 ---
 
-## 16. Verification Matrix
+## 16. Platform Service Architecture & Windows SCM Resilience (`PlatformService`)
+
+### 16.1 Zero-CFG Platform Boundary
+To achieve strict architectural decoupling, service management is abstracted under the `PlatformService` trait in `src/platform/traits.rs`:
+- Methods: `install`, `uninstall`, `start`, `stop`, `restart`, `run_service`.
+- Outside of `src/platform/`, the entire codebase (including `src/service/mod.rs`, `src/daemon.rs`, `src/main.rs`, and `src/cli/transport.rs`) contains **zero `#[cfg(windows)]` or `#[cfg(unix)]` branches**.
+- Service operations are uniformly dispatched via `crate::platform::native_platform().service()`.
+
+### 16.2 Windows SCM Service Stability & Fault Hardening
+Running as an NT Service under the Windows Service Control Manager (SCM) entails specific constraints and failure modes. `rsupervisord` applies a comprehensive defense-in-depth design:
+
+1. **FFI Panic Barrier (`catch_unwind`)**:
+   - `my_service_main` wraps the service execution loop in `std::panic::catch_unwind(AssertUnwindSafe(...))`.
+   - Panics cannot cross the FFI boundary into the Windows C dispatcher (which would cause UB or instant OS abort).
+   - In case of a panic, an emergency alert is logged and `ServiceState::Stopped` with a failure exit code (`Win32(1)`) is guaranteed before the thread returns.
+
+2. **Immediate `StartPending` Status Reporting**:
+   - Immediately upon registering the service control handler, the service reports `ServiceState::StartPending` with a 30s wait hint and checkpoint 1.
+   - This prevents SCM 1053 errors ("The service did not respond to the start or control request in a timely fashion") during runtime initialization or config loading.
+   - Once the Tokio runtime is active, the service transitions to `ServiceState::Running`.
+
+3. **StopPending Heartbeat Thread**:
+   - Gracefully stopping multiple child processes may require up to `stop_wait_secs` (e.g. 10–30s).
+   - A dedicated background heartbeat thread (`<service>-scm-heartbeat`) increments checkpoints every 3s and sends `StopPending` status updates with a 45s wait hint.
+   - SCM is kept continuously informed that shutdown is progressing, preventing premature `TerminateProcess` kills.
+
+4. **Guaranteed Final State Reporting via ScopeGuard**:
+   - A RAII `scopeguard` wraps the service status handle. If the loop exits unexpectedly or panics, the guard triggers and reports `ServiceState::Stopped` with an error code.
+   - On normal completion, the guard is disarmed via `ScopeGuard::into_inner`, reporting `Stopped` with the true exit code (`Win32(0)` on success, `Win32(1)` on error).
+
+5. **Crash Recovery & Auto-Restart Actions (`SC_ACTION_RESTART`)**:
+   - During service installation, SCM is configured with progressive restart delays (5s, 10s, 30s) and `ServiceFailureResetPeriod::After(Duration::from_secs(86400))` (1 day).
+   - `set_failure_actions_on_non_crash_failures(true)` ensures recovery actions also trigger if the daemon terminates with a non-zero exit code without an unhandled OS crash.
+   - Auto-start is configured with `delayed_auto_start = true` so system dependencies (network, disk) are fully ready.
+
+6. **Automatic Working Directory Correction**:
+   - Under `NT AUTHORITY\SYSTEM`, the default working directory is `C:\Windows\System32`.
+   - On entry, `my_service_main` switches current working directory to the directory containing the binary, preventing relative path and logging failures.
+
+---
+
+## 17. Verification Matrix
 
 | Verification Item | Methodology | Target | Test Status |
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 99 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 101 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
 | **Windows Native IPC** | Bind Named Pipe (`\\.\pipe\...`) & AF_UNIX; connect CLI & reverse proxy | Zero-port, elevation-free high-compatibility IPC | ✅ Named Pipe + AF_UNIX dual listeners verified |
@@ -937,7 +978,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
-| **System Service Lifecycles** | Install, uninstall, start, stop, restart, and SCM loop | Zero resource leaks, clean drain | ✅ Verified across Windows SCM & Linux systemd |
+| **System Service Architecture** | `PlatformService` trait, zero `#[cfg]` outside platform/, Windows SCM hardening | Panic safety, SCM heartbeat, SC_ACTION_RESTART, zero orphan processes | ✅ `service_tests.rs` + Windows SCM integration |
 | **Windows GUI & Console Close** | Send `WM_CLOSE`, `Ctrl+Close`, and `Ctrl+C` to daemon | Immediate graceful shutdown triggered | ✅ Verified with `test_windows_gui_wm_close_shutdown_signal` |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 99/99 passed; Linux: 97/97 passed |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 101/101 passed; Linux: 99/99 passed |
 

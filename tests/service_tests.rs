@@ -48,12 +48,9 @@ fn test_daemon_args_service_flags() {
         Some(std::path::Path::new("/etc/rsupervisord/config.yaml"))
     );
 
-    #[cfg(windows)]
-    {
-        // Test --service flag on Windows
-        let args = DaemonArgs::try_parse_from(["rsupervisord", "--service"]).unwrap();
-        assert!(args.service);
-    }
+    // Test --service flag
+    let args = DaemonArgs::try_parse_from(["rsupervisord", "--service"]).unwrap();
+    assert!(args.service);
 }
 
 #[test]

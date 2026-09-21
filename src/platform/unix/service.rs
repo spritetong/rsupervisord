@@ -6,6 +6,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::daemon::DaemonArgs;
+use crate::platform::traits::PlatformService;
+
+pub struct UnixService;
+
 /// Generates systemd service unit file content.
 pub fn generate_systemd_unit(cmd_name: &str, exe_path: &Path, config_path: &Path) -> String {
     format!(
@@ -147,4 +152,37 @@ pub fn restart_service(cmd_name: &str) -> anyhow::Result<()> {
     run_systemctl(&["restart", &service_name], false)?;
     println!("Service '{}' restarted successfully.", service_name);
     Ok(())
+}
+
+impl PlatformService for UnixService {
+    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
+        install_service(cmd_name, config_path)
+    }
+
+    fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()> {
+        uninstall_service(cmd_name)
+    }
+
+    fn start(&self, cmd_name: &str) -> anyhow::Result<()> {
+        start_service(cmd_name)
+    }
+
+    fn stop(&self, cmd_name: &str) -> anyhow::Result<()> {
+        stop_service(cmd_name)
+    }
+
+    fn restart(&self, cmd_name: &str) -> anyhow::Result<()> {
+        restart_service(cmd_name)
+    }
+
+    fn run_service(
+        &self,
+        _daemon_args: DaemonArgs,
+        _config_path: PathBuf,
+        _cmd_name: String,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "Running via '--service' is only supported on Windows (Service Control Manager). On Linux/Unix, systemd manages standard processes directly."
+        )
+    }
 }

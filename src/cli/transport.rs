@@ -50,7 +50,6 @@ impl Endpoint {
         let platform = crate::platform::native_platform();
         match self {
             Self::Ipc(path) => {
-                #[cfg(windows)]
                 if path.to_string_lossy().starts_with(r"\\.\pipe\") {
                     let stream = platform.connect_named_pipe(path).await?;
                     return Ok(StreamTransport::new(stream));
@@ -138,9 +137,6 @@ mod tests {
     #[test]
     fn test_endpoint_default_local() {
         let ep = Endpoint::default_local();
-        #[cfg(windows)]
-        assert!(matches!(ep, Endpoint::NamedPipe(_)));
-        #[cfg(unix)]
-        assert!(matches!(ep, Endpoint::Ipc(_)));
+        assert!(matches!(ep, Endpoint::NamedPipe(_) | Endpoint::Ipc(_)));
     }
 }

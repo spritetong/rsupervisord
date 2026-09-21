@@ -75,6 +75,9 @@ pub trait PlatformBackend: Send + Sync {
     /// Returns the platform default path for Unix Domain Sockets (UDS).
     fn default_uds_path(&self) -> PathBuf;
 
+    /// Returns the platform default local IPC path (named pipe or UDS) for a given command name.
+    fn default_local_ipc_path(&self, cmd_name: &str, config_dir: Option<&Path>) -> PathBuf;
+
     /// Checks if the current process runs with elevated (administrator / root) privileges.
     fn is_elevated(&self) -> bool;
 
@@ -95,4 +98,47 @@ pub trait PlatformBackend: Send + Sync {
 
     /// Binds an OS-level IPC listener at the given path.
     fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>>;
+
+    /// Returns the platform default daemon log path.
+    fn default_daemon_log_path(&self, cmd_name: &str, config_dir: Option<&Path>) -> PathBuf;
+
+    /// Returns the platform default program log path.
+    fn default_program_log_path(
+        &self,
+        cmd_name: &str,
+        program_name: &str,
+        config_dir: Option<&Path>,
+    ) -> PathBuf;
+
+    /// Returns the platform default system configuration directory if applicable (e.g. /etc/<cmd_name> on Unix).
+    fn default_system_config_dir(&self, cmd_name: &str) -> Option<PathBuf>;
+
+    /// Returns the platform system service manager.
+    fn service(&self) -> &dyn PlatformService;
+}
+
+/// Trait representing platform-specific system service management and execution.
+pub trait PlatformService: Send + Sync {
+    /// Installs the binary as an auto-start system service.
+    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()>;
+
+    /// Uninstalls the system service.
+    fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()>;
+
+    /// Starts the installed system service.
+    fn start(&self, cmd_name: &str) -> anyhow::Result<()>;
+
+    /// Stops the running system service.
+    fn stop(&self, cmd_name: &str) -> anyhow::Result<()>;
+
+    /// Restarts the system service.
+    fn restart(&self, cmd_name: &str) -> anyhow::Result<()>;
+
+    /// Runs the process as a system service (e.g. Windows SCM dispatcher).
+    fn run_service(
+        &self,
+        daemon_args: crate::daemon::DaemonArgs,
+        config_path: PathBuf,
+        cmd_name: String,
+    ) -> anyhow::Result<()>;
 }

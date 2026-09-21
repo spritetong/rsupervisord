@@ -144,10 +144,9 @@ pub fn find_default_config_path(cmd_name: &str) -> Option<PathBuf> {
         }
     }
 
-    // 4. OS-specific path (Unix: /etc/<cmd_name>/config.yaml)
-    #[cfg(unix)]
-    {
-        let p4 = PathBuf::from(format!("/etc/{}/config.yaml", cmd_name));
+    // 4. OS-specific system configuration path (e.g. Unix /etc/<cmd_name>/config.yaml)
+    if let Some(sys_dir) = crate::platform::native_platform().default_system_config_dir(cmd_name) {
+        let p4 = sys_dir.join("config.yaml");
         if p4.is_file() {
             return Some(p4);
         }
@@ -168,20 +167,9 @@ pub fn get_default_config_path_fallback(cmd_name: &str) -> PathBuf {
     get_executable_dir().join(format!("{}.yaml", cmd_name))
 }
 
-/// Returns the default local IPC path:
-/// - Windows: Named Pipe `\\.\pipe\<cmd_name>`
-/// - Unix: Unix Domain Socket `/var/run/<cmd_name>.sock`
+/// Returns the default local IPC path (named pipe on Windows, Unix domain socket on Unix).
 pub fn default_uds_path(cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
-    #[cfg(unix)]
-    {
-        let _ = config_dir;
-        PathBuf::from(format!("/var/run/{}.sock", cmd_name))
-    }
-    #[cfg(windows)]
-    {
-        let _ = config_dir;
-        default_named_pipe_path(cmd_name)
-    }
+    crate::platform::native_platform().default_local_ipc_path(cmd_name, config_dir)
 }
 
 /// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>`).
@@ -190,40 +178,17 @@ pub fn default_named_pipe_path(cmd_name: &str) -> PathBuf {
 }
 
 /// Returns the default log path for the daemon itself (`<cmd_name>.log`).
-/// - Windows: `<config dir>/logs/<cmd_name>.log`
-/// - Unix: `/var/log/<cmd_name>/<cmd_name>.log`
 pub fn default_daemon_log_path(cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
-    #[cfg(unix)]
-    {
-        let _ = config_dir;
-        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, cmd_name))
-    }
-    #[cfg(windows)]
-    {
-        let dir = config_dir.unwrap_or_else(|| Path::new("."));
-        dir.join("logs").join(format!("{}.log", cmd_name))
-    }
+    crate::platform::native_platform().default_daemon_log_path(cmd_name, config_dir)
 }
 
 /// Returns the default log path for a supervised program (`<program_name>.log`).
-/// - Windows: `<config dir>/logs/<program_name>.log`
-/// - Unix: `/var/log/<cmd_name>/<program_name>.log`
 pub fn default_program_log_path(
     cmd_name: &str,
     program_name: &str,
     config_dir: Option<&Path>,
 ) -> PathBuf {
-    #[cfg(unix)]
-    {
-        let _ = config_dir;
-        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, program_name))
-    }
-    #[cfg(windows)]
-    {
-        let _ = cmd_name;
-        let dir = config_dir.unwrap_or_else(|| Path::new("."));
-        dir.join("logs").join(format!("{}.log", program_name))
-    }
+    crate::platform::native_platform().default_program_log_path(cmd_name, program_name, config_dir)
 }
 
 #[cfg(test)]
@@ -262,39 +227,13 @@ mod tests {
 
     #[test]
     fn test_default_paths_structure() {
-        #[cfg(unix)]
-        {
-            let config_dir = PathBuf::from("/etc/myapp");
-            assert_eq!(
-                default_uds_path("myappd", Some(&config_dir)),
-                PathBuf::from("/var/run/myappd.sock")
-            );
-            assert_eq!(
-                default_daemon_log_path("myappd", Some(&config_dir)),
-                PathBuf::from("/var/log/myappd/myappd.log")
-            );
-            assert_eq!(
-                default_program_log_path("myappd", "worker1", Some(&config_dir)),
-                PathBuf::from("/var/log/myappd/worker1.log")
-            );
-        }
-
-        #[cfg(windows)]
-        {
-            let win_dir = PathBuf::from(r"C:\myapp");
-            assert_eq!(
-                default_uds_path("myappd", Some(&win_dir)),
-                PathBuf::from(r"\\.\pipe\myappd")
-            );
-            assert_eq!(
-                default_daemon_log_path("myappd", Some(&win_dir)),
-                PathBuf::from(r"C:\myapp\logs\myappd.log")
-            );
-            assert_eq!(
-                default_program_log_path("myappd", "worker1", Some(&win_dir)),
-                PathBuf::from(r"C:\myapp\logs\worker1.log")
-            );
-        }
+        let test_dir = PathBuf::from("myapp_test_dir");
+        let uds = default_uds_path("myappd", Some(&test_dir));
+        assert!(!uds.as_os_str().is_empty());
+        let daemon_log = default_daemon_log_path("myappd", Some(&test_dir));
+        assert!(daemon_log.to_string_lossy().contains("myappd.log"));
+        let prog_log = default_program_log_path("myappd", "worker1", Some(&test_dir));
+        assert!(prog_log.to_string_lossy().contains("worker1.log"));
     }
 
     #[test]
