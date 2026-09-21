@@ -163,6 +163,12 @@ pub struct ProgramDefaults {
     pub pre_start_ignore_failure: Option<bool>,
     #[serde(default)]
     pub hook_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub numprocs: Option<usize>,
+    #[serde(default)]
+    pub numprocs_start: Option<usize>,
+    #[serde(default)]
+    pub process_name: Option<String>,
 }
 
 /// Raw representation of program log configuration with optional booleans for inheritance.
@@ -233,6 +239,12 @@ pub struct ProgramConfigRaw {
     pub pre_start_ignore_failure: Option<bool>,
     #[serde(default)]
     pub hook_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub numprocs: Option<usize>,
+    #[serde(default)]
+    pub numprocs_start: Option<usize>,
+    #[serde(default)]
+    pub process_name: Option<String>,
 }
 
 /// Process group configuration definition.
@@ -385,6 +397,26 @@ impl SupervisorConfig {
                     reason: e.to_string(),
                 });
             }
+
+            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
+            if numprocs == 0 {
+                return Err(ProgramError::ConfigError(format!(
+                    "Program '{}' numprocs must be greater than 0",
+                    name
+                )));
+            }
+            if numprocs > 1
+                && let Some(p_template) = raw
+                    .process_name
+                    .as_ref()
+                    .or(self.program_defaults.process_name.as_ref())
+                && !p_template.contains("process_num")
+            {
+                return Err(ProgramError::ConfigError(format!(
+                    "Program '{}' with numprocs > 1 specifies process_name '{}' which does not contain 'process_num'",
+                    name, p_template
+                )));
+            }
         }
 
         for (group_name, group_cfg) in &self.groups {
@@ -409,20 +441,84 @@ impl SupervisorConfig {
         Ok(())
     }
 
-    /// Resolves all raw program definitions by applying program_defaults and splitting commands.
+    /// Resolves all raw program definitions by expanding numprocs, applying program_defaults,
+    /// interpolating template expressions, and mapping inter-program dependencies.
     pub fn resolve_programs(&self) -> Result<HashMap<String, ProgramConfig>, ProgramError> {
-        let mut resolved = HashMap::new();
+        // Phase 1: Determine instance names for every raw program definition
+        let mut program_instances: HashMap<String, Vec<String>> =
+            HashMap::with_capacity(self.programs.len());
 
-        for (name, raw) in &self.programs {
+        for (base_name, raw) in &self.programs {
+            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
+            let numprocs_start = raw
+                .numprocs_start
+                .or(self.program_defaults.numprocs_start)
+                .unwrap_or(0);
+            let process_name_template = raw
+                .process_name
+                .as_ref()
+                .or(self.program_defaults.process_name.as_ref());
+
+            let group = if let Some(ref g) = raw.group {
+                g.clone()
+            } else {
+                let mut found_group = None;
+                for (g_name, g_cfg) in &self.groups {
+                    if g_cfg.programs.iter().any(|p| p == base_name) {
+                        found_group = Some(g_name.clone());
+                        break;
+                    }
+                }
+                found_group.unwrap_or_else(|| base_name.clone())
+            };
+
+            let mut instances = Vec::with_capacity(numprocs);
+            if numprocs == 1 && process_name_template.is_none() {
+                instances.push(base_name.clone());
+            } else {
+                for idx in 0..numprocs {
+                    let process_num = numprocs_start + idx;
+                    let instance_name = if let Some(template) = process_name_template {
+                        let expr = crate::config::expand::StringExpression::with_config_dir(
+                            self.config_dir
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new(".")),
+                        )
+                        .with_program_context(
+                            base_name,
+                            &group,
+                            process_num,
+                            numprocs,
+                        );
+                        expr.eval_named(template, "process_name")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?
+                    } else {
+                        format!("{}:{}", base_name, process_num)
+                    };
+                    instances.push(instance_name);
+                }
+            }
+            program_instances.insert(base_name.clone(), instances);
+        }
+
+        // Phase 2: Expand and resolve ProgramConfig for each instance
+        let mut resolved: HashMap<String, ProgramConfig> = HashMap::new();
+
+        for (base_name, raw) in &self.programs {
+            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
+            let numprocs_start = raw
+                .numprocs_start
+                .or(self.program_defaults.numprocs_start)
+                .unwrap_or(0);
+
             let priority = raw
                 .priority
                 .or(self.program_defaults.priority)
                 .unwrap_or(50);
-
             if priority > 99 {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 99]",
-                    name, priority
+                    base_name, priority
                 )));
             }
 
@@ -458,135 +554,263 @@ impl SupervisorConfig {
 
             let exit_codes = raw.exit_codes.clone().unwrap_or_else(|| vec![0]);
 
-            let logs = {
-                let raw_logs = raw.logs.as_ref();
-                let def_logs = self.program_defaults.logs.as_ref();
+            let pre_start_ignore_failure = raw
+                .pre_start_ignore_failure
+                .or(self.program_defaults.pre_start_ignore_failure)
+                .unwrap_or(false);
 
-                let enabled = raw_logs
-                    .and_then(|l| l.enabled)
-                    .or_else(|| def_logs.and_then(|l| l.enabled))
-                    .unwrap_or(true);
-
-                let resolver = crate::config::paths::PathResolver::from_current_exe()
-                    .with_config_dir(self.config_dir.as_deref());
-                let stdout = raw_logs
-                    .and_then(|l| l.stdout.clone())
-                    .or_else(|| def_logs.and_then(|l| l.stdout.clone()))
-                    .or_else(|| {
-                        if enabled {
-                            Some(resolver.default_program_log_path(name))
-                        } else {
-                            None
-                        }
-                    });
-
-                let stderr = raw_logs
-                    .and_then(|l| l.stderr.clone())
-                    .or_else(|| def_logs.and_then(|l| l.stderr.clone()));
-
-                let max_bytes = raw_logs
-                    .and_then(|l| l.max_bytes.clone())
-                    .or_else(|| def_logs.and_then(|l| l.max_bytes.clone()));
-
-                let backups = raw_logs
-                    .and_then(|l| l.backups)
-                    .or_else(|| def_logs.and_then(|l| l.backups));
-
-                let redirect_stderr = raw_logs
-                    .and_then(|l| l.redirect_stderr)
-                    .or_else(|| def_logs.and_then(|l| l.redirect_stderr))
-                    .unwrap_or(false);
-
-                ProgramLogsConfig {
-                    enabled,
-                    stdout,
-                    stderr,
-                    max_bytes,
-                    backups,
-                    redirect_stderr,
-                }
-            };
-
-            let (command, args) = if raw.args.is_empty() {
-                if std::path::Path::new(&raw.command).is_file() {
-                    (raw.command.clone(), Vec::new())
-                } else {
-                    match shell_words::split(&raw.command) {
-                        Ok(mut parts) if !parts.is_empty() => {
-                            let cmd = parts.remove(0);
-                            (cmd, parts)
-                        }
-                        _ => (raw.command.clone(), Vec::new()),
-                    }
-                }
-            } else {
-                (raw.command.clone(), raw.args.clone())
-            };
-
-            let health_check = raw
-                .health_check
-                .clone()
-                .or_else(|| self.program_defaults.health_check.clone());
+            let hook_timeout_secs = raw
+                .hook_timeout_secs
+                .or(self.program_defaults.hook_timeout_secs)
+                .unwrap_or(15);
 
             let group = if let Some(ref g) = raw.group {
                 g.clone()
             } else {
                 let mut found_group = None;
                 for (g_name, g_cfg) in &self.groups {
-                    if g_cfg.programs.iter().any(|p| p == name) {
+                    if g_cfg.programs.iter().any(|p| p == base_name) {
                         found_group = Some(g_name.clone());
                         break;
                     }
                 }
-                found_group.unwrap_or_else(|| name.clone())
+                found_group.unwrap_or_else(|| base_name.clone())
             };
 
-            let pre_start = raw
-                .pre_start
-                .clone()
-                .or_else(|| self.program_defaults.pre_start.clone());
-            let pre_stop = raw
-                .pre_stop
-                .clone()
-                .or_else(|| self.program_defaults.pre_stop.clone());
-            let pre_start_ignore_failure = raw
-                .pre_start_ignore_failure
-                .or(self.program_defaults.pre_start_ignore_failure)
-                .unwrap_or(false);
-            let hook_timeout_secs = raw
-                .hook_timeout_secs
-                .or(self.program_defaults.hook_timeout_secs)
-                .unwrap_or(15);
+            // Expand depends_on: map multi-instance program dependencies to all their instances
+            let mut resolved_depends_on = Vec::new();
+            for dep in &raw.depends_on {
+                if let Some(dep_instances) = program_instances.get(dep) {
+                    resolved_depends_on.extend(dep_instances.clone());
+                } else {
+                    resolved_depends_on.push(dep.clone());
+                }
+            }
 
-            let prog = ProgramConfig {
-                name: name.clone(),
-                command,
-                args,
-                directory: raw.directory.clone(),
-                user: raw.user.clone(),
-                environment: raw.environment.clone(),
-                priority,
-                depends_on: raw.depends_on.clone(),
-                autostart,
-                autorestart,
-                start_secs,
-                start_retries,
-                stop_signal,
-                stop_wait_secs,
-                exit_codes,
-                umask: raw.umask,
-                logs,
-                health_check,
-                group,
-                cron: raw.cron.clone(),
-                cron_stop: raw.cron_stop.clone(),
-                pre_start,
-                pre_stop,
-                pre_start_ignore_failure,
-                hook_timeout_secs,
-            };
+            let instances = program_instances.get(base_name).unwrap();
 
-            resolved.insert(name.clone(), prog);
+            for (idx, instance_name) in instances.iter().enumerate() {
+                let process_num = numprocs_start + idx;
+
+                let mut expr = crate::config::expand::StringExpression::with_config_dir(
+                    self.config_dir
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(".")),
+                )
+                .with_program_context(base_name, &group, process_num, numprocs);
+
+                for (k, v) in &raw.environment {
+                    expr.add(format!("ENV_{}", k), v);
+                }
+
+                // Evaluate command and args
+                let raw_cmd = expr
+                    .eval_named(&raw.command, "command")
+                    .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+
+                let (command, args) = if raw.args.is_empty() {
+                    if std::path::Path::new(&raw_cmd).is_file() {
+                        (raw_cmd, Vec::new())
+                    } else {
+                        match shell_words::split(&raw_cmd) {
+                            Ok(mut parts) if !parts.is_empty() => {
+                                let cmd = parts.remove(0);
+                                (cmd, parts)
+                            }
+                            _ => (raw_cmd, Vec::new()),
+                        }
+                    }
+                } else {
+                    let mut evaled_args = Vec::with_capacity(raw.args.len());
+                    for a in &raw.args {
+                        let evaled_a = expr
+                            .eval_named(a, "args")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                        evaled_args.push(evaled_a);
+                    }
+                    (raw_cmd, evaled_args)
+                };
+
+                // Evaluate directory
+                let directory = if let Some(ref dir) = raw.directory {
+                    let dir_str = dir.to_string_lossy();
+                    let evaled_dir = expr
+                        .eval_named(&dir_str, "directory")
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    Some(PathBuf::from(evaled_dir))
+                } else {
+                    None
+                };
+
+                // Evaluate environment
+                let mut environment = HashMap::with_capacity(raw.environment.len());
+                for (k, v) in &raw.environment {
+                    let evaled_v = expr
+                        .eval_named(v, "environment")
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    environment.insert(k.clone(), evaled_v);
+                }
+
+                // Evaluate logs
+                let logs = {
+                    let raw_logs = raw.logs.as_ref();
+                    let def_logs = self.program_defaults.logs.as_ref();
+
+                    let enabled = raw_logs
+                        .and_then(|l| l.enabled)
+                        .or_else(|| def_logs.and_then(|l| l.enabled))
+                        .unwrap_or(true);
+
+                    let resolver = crate::config::paths::PathResolver::from_current_exe()
+                        .with_config_dir(self.config_dir.as_deref());
+
+                    let stdout = if let Some(raw_stdout) = raw_logs
+                        .and_then(|l| l.stdout.as_ref())
+                        .or_else(|| def_logs.and_then(|l| l.stdout.as_ref()))
+                    {
+                        let stdout_str = raw_stdout.to_string_lossy();
+                        let evaled_stdout = expr
+                            .eval_named(&stdout_str, "stdout_logfile")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                        Some(PathBuf::from(evaled_stdout))
+                    } else if enabled {
+                        Some(resolver.default_program_log_path(instance_name))
+                    } else {
+                        None
+                    };
+
+                    let stderr = if let Some(raw_stderr) = raw_logs
+                        .and_then(|l| l.stderr.as_ref())
+                        .or_else(|| def_logs.and_then(|l| l.stderr.as_ref()))
+                    {
+                        let stderr_str = raw_stderr.to_string_lossy();
+                        let evaled_stderr = expr
+                            .eval_named(&stderr_str, "stderr_logfile")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                        Some(PathBuf::from(evaled_stderr))
+                    } else {
+                        None
+                    };
+
+                    let max_bytes = raw_logs
+                        .and_then(|l| l.max_bytes.clone())
+                        .or_else(|| def_logs.and_then(|l| l.max_bytes.clone()));
+
+                    let backups = raw_logs
+                        .and_then(|l| l.backups)
+                        .or_else(|| def_logs.and_then(|l| l.backups));
+
+                    let redirect_stderr = raw_logs
+                        .and_then(|l| l.redirect_stderr)
+                        .or_else(|| def_logs.and_then(|l| l.redirect_stderr))
+                        .unwrap_or(false);
+
+                    ProgramLogsConfig {
+                        enabled,
+                        stdout,
+                        stderr,
+                        max_bytes,
+                        backups,
+                        redirect_stderr,
+                    }
+                };
+
+                // Evaluate health_check
+                let health_check = {
+                    let raw_hc = raw
+                        .health_check
+                        .clone()
+                        .or_else(|| self.program_defaults.health_check.clone());
+                    if let Some(mut hc) = raw_hc {
+                        match hc.check_type {
+                            crate::program::config::HealthCheckType::Http {
+                                ref mut url, ..
+                            } => {
+                                *url = expr
+                                    .eval_named(url, "health_check.http.url")
+                                    .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                            }
+                            crate::program::config::HealthCheckType::Tcp { ref mut endpoint } => {
+                                *endpoint = expr
+                                    .eval_named(endpoint, "health_check.tcp.endpoint")
+                                    .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                            }
+                            crate::program::config::HealthCheckType::Exec { ref mut command } => {
+                                *command = expr
+                                    .eval_named(command, "health_check.exec.command")
+                                    .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                            }
+                        }
+                        Some(hc)
+                    } else {
+                        None
+                    }
+                };
+
+                // Evaluate hooks
+                let pre_start = if let Some(hook) = raw
+                    .pre_start
+                    .as_ref()
+                    .or(self.program_defaults.pre_start.as_ref())
+                {
+                    Some(
+                        expr.eval_named(hook, "pre_start")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                let pre_stop = if let Some(hook) = raw
+                    .pre_stop
+                    .as_ref()
+                    .or(self.program_defaults.pre_stop.as_ref())
+                {
+                    Some(
+                        expr.eval_named(hook, "pre_stop")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                let prog = ProgramConfig {
+                    name: instance_name.clone(),
+                    command,
+                    args,
+                    directory,
+                    user: raw.user.clone(),
+                    environment,
+                    priority,
+                    depends_on: resolved_depends_on.clone(),
+                    autostart,
+                    autorestart,
+                    start_secs,
+                    start_retries,
+                    stop_signal,
+                    stop_wait_secs,
+                    exit_codes: exit_codes.clone(),
+                    umask: raw.umask,
+                    logs,
+                    health_check,
+                    group: group.clone(),
+                    cron: raw.cron.clone(),
+                    cron_stop: raw.cron_stop.clone(),
+                    pre_start,
+                    pre_stop,
+                    pre_start_ignore_failure,
+                    hook_timeout_secs,
+                };
+
+                if resolved.contains_key(instance_name) {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Duplicate program instance name '{}' produced during expansion",
+                        instance_name
+                    )));
+                }
+
+                resolved.insert(instance_name.clone(), prog);
+            }
         }
 
         Ok(resolved)
@@ -599,20 +823,153 @@ mod tests {
 
     #[test]
     fn test_deny_unknown_fields() {
-        let yaml_with_numprocs = r#"
+        let yaml_with_unknown = r#"
 programs:
   app:
     command: "sleep 10"
-    numprocs: 4
+    unknown_custom_field: 4
 "#;
-        let res = SupervisorConfig::from_yaml_str(yaml_with_numprocs);
-        assert!(res.is_err(), "Expected error on unknown field 'numprocs'");
+        let res = SupervisorConfig::from_yaml_str(yaml_with_unknown);
+        assert!(
+            res.is_err(),
+            "Expected error on unknown field 'unknown_custom_field'"
+        );
         let err_msg = res.unwrap_err().to_string();
         assert!(
-            err_msg.contains("unknown field `numprocs`"),
+            err_msg.contains("unknown field `unknown_custom_field`"),
             "Expected unknown field error message, got: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_numprocs_expansion_default_naming() {
+        let yaml = r#"
+programs:
+  worker:
+    command: "worker --id=%(process_num)02d --port=80%(process_num)02d"
+    numprocs: 3
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        assert_eq!(resolved.len(), 3);
+        assert!(resolved.contains_key("worker:0"));
+        assert!(resolved.contains_key("worker:1"));
+        assert!(resolved.contains_key("worker:2"));
+
+        assert_eq!(resolved["worker:0"].command, "worker");
+        assert_eq!(resolved["worker:0"].args, vec!["--id=00", "--port=8000"]);
+        assert_eq!(resolved["worker:1"].args, vec!["--id=01", "--port=8001"]);
+        assert_eq!(resolved["worker:2"].args, vec!["--id=02", "--port=8002"]);
+
+        // Shared template group defaults to program base name
+        assert_eq!(resolved["worker:0"].group, "worker");
+        assert_eq!(resolved["worker:1"].group, "worker");
+        assert_eq!(resolved["worker:2"].group, "worker");
+    }
+
+    #[test]
+    fn test_numprocs_custom_process_name() {
+        let yaml = r#"
+programs:
+  worker:
+    command: "worker --id=%(process_num)d"
+    numprocs: 2
+    numprocs_start: 1
+    process_name: "%(program_name)s_proc%(process_num)02d"
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains_key("worker_proc01"));
+        assert!(resolved.contains_key("worker_proc02"));
+
+        assert_eq!(resolved["worker_proc01"].args, vec!["--id=1"]);
+        assert_eq!(resolved["worker_proc02"].args, vec!["--id=2"]);
+    }
+
+    #[test]
+    fn test_numprocs_validation_zero() {
+        let yaml = r#"
+programs:
+  worker:
+    command: "worker"
+    numprocs: 0
+"#;
+        let res = SupervisorConfig::from_yaml_str(yaml);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("numprocs must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn test_numprocs_dag_dependency_expansion() {
+        let yaml = r#"
+programs:
+  redis:
+    command: "redis-server"
+  worker:
+    command: "worker"
+    numprocs: 2
+    depends_on: ["redis"]
+  api:
+    command: "api-server"
+    depends_on: ["worker"]
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        // worker:0 and worker:1 depend on redis
+        assert_eq!(resolved["worker:0"].depends_on, vec!["redis"]);
+        assert_eq!(resolved["worker:1"].depends_on, vec!["redis"]);
+
+        // api depends on all instances of worker
+        let api_deps = &resolved["api"].depends_on;
+        assert!(api_deps.contains(&"worker:0".to_string()));
+        assert!(api_deps.contains(&"worker:1".to_string()));
+
+        // DAG builds successfully with all expanded instances
+        let dag = crate::manager::DependencyGraph::build(&resolved).unwrap();
+        assert_eq!(dag.start_layers[0], vec!["redis"]);
+        assert!(dag.start_layers[1].contains(&"worker:0".to_string()));
+        assert!(dag.start_layers[1].contains(&"worker:1".to_string()));
+        assert_eq!(dag.start_layers[2], vec!["api"]);
+    }
+
+    #[test]
+    fn test_numprocs_isolated_log_paths() {
+        let yaml = r#"
+programs:
+  worker:
+    command: "worker"
+    numprocs: 2
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        let stdout0 = resolved["worker:0"]
+            .logs
+            .stdout
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let stdout1 = resolved["worker:1"]
+            .logs
+            .stdout
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        assert_ne!(stdout0, stdout1);
+        assert!(stdout0.contains("worker_0") || stdout0.contains("worker:0"));
+        assert!(stdout1.contains("worker_1") || stdout1.contains("worker:1"));
     }
 
     #[test]

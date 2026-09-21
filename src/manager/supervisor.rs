@@ -826,30 +826,41 @@ impl ManagerActor {
     }
 
     /// Matches programs according to standard supervisord syntax:
+    /// - `name` matches program by direct name (including instance name like `worker:0`), or group by group name
     /// - `group:*` matches all programs in `group`
     /// - `group:program` matches specific program in `group`
-    /// - `program` matches program by direct name, or group by group name
     fn find_match(&self, pattern: &str) -> Vec<String> {
         let trimmed = pattern.trim();
+        // 1. Exact match on program name first (e.g. direct instance name "worker:0" or "single_prog")
+        if self.programs.contains_key(trimmed) {
+            return vec![trimmed.to_string()];
+        }
+
+        // 2. Colon-separated pattern e.g. "group:*" or "group:name"
         if let Some((group_part, prog_part)) = trimmed.split_once(':') {
             let mut matches = Vec::new();
             for (p_name, cfg) in &self.configs {
-                if cfg.group == group_part && (prog_part == "*" || prog_part == p_name) {
+                if cfg.group == group_part
+                    && (prog_part == "*"
+                        || prog_part == p_name
+                        || p_name.strip_prefix(&format!("{}:", group_part)) == Some(prog_part))
+                {
                     matches.push(p_name.clone());
                 }
             }
-            matches
-        } else if self.programs.contains_key(trimmed) {
-            vec![trimmed.to_string()]
-        } else {
-            let matches: Vec<String> = self
-                .configs
-                .iter()
-                .filter(|(_, cfg)| cfg.group == trimmed)
-                .map(|(p_name, _)| p_name.clone())
-                .collect();
-            matches
+            if !matches.is_empty() {
+                return matches;
+            }
         }
+
+        // 3. Group match e.g. "worker" matches all instances with group == "worker"
+        let matches: Vec<String> = self
+            .configs
+            .iter()
+            .filter(|(_, cfg)| cfg.group == trimmed)
+            .map(|(p_name, _)| p_name.clone())
+            .collect();
+        matches
     }
 
     async fn execute_start_group(&mut self, group: &str) -> Result<Vec<String>, ProgramError> {

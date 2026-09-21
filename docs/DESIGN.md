@@ -782,7 +782,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 ### 15.9 Configuration Strictness & Hot Reload Boundaries
 
 - **Strict Schema Validation (`deny_unknown_fields`)**:
-  All configuration models enforce `#[serde(deny_unknown_fields)]`. Misspellings or unsupported legacy supervisor keys (such as `numprocs`, `process_name`, `%(process_num)s`) trigger immediate parse errors rather than being silently ignored.
+  All configuration models enforce `#[serde(deny_unknown_fields)]`. Misspellings or invalid configuration keys trigger immediate parse errors rather than being silently ignored, while supported compatibility keys (`numprocs`, `numprocs_start`, `process_name`) expand dynamically.
 - **Comment-Safe Macro Expansion**:
   Environment variable expansion (`${VAR}` and `${VAR:-default}`) processes configuration text line-by-line while keeping comment lines starting with `#` untouched, preventing unset variables in comments from corrupting text.
 - **Dynamic Workload vs. Static Infrastructure Boundaries**:

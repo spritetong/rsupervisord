@@ -266,7 +266,8 @@ impl PlatformBackend for UnixPlatformBackend {
         program_name: &str,
         _config_dir: Option<&Path>,
     ) -> PathBuf {
-        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, program_name))
+        let sanitized = program_name.replace(':', "_");
+        PathBuf::from(format!("/var/log/{}/{}.log", cmd_name, sanitized))
     }
 
     fn default_system_config_dir(&self, cmd_name: &str) -> Option<PathBuf> {

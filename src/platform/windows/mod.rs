@@ -413,7 +413,8 @@ impl PlatformBackend for WindowsPlatformBackend {
         config_dir: Option<&Path>,
     ) -> PathBuf {
         let dir = config_dir.unwrap_or_else(|| Path::new("."));
-        dir.join("logs").join(format!("{}.log", program_name))
+        let sanitized = program_name.replace(':', "_");
+        dir.join("logs").join(format!("{}.log", sanitized))
     }
 
     fn default_system_config_dir(&self, _cmd_name: &str) -> Option<PathBuf> {
