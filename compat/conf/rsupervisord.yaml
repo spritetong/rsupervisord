@@ -1,0 +1,98 @@
+# ==============================================================================
+# rsupervisord compatibility-harness config.
+#
+# This is the native (YAML) counterpart of compat/conf/supervisord.conf, used
+# when SUPERVISOR_TARGET=rsupervisord (the default).  Placeholders are filled
+# in by compat/tests/conftest.py:
+#
+#   __CFGDIR__  short /tmp working dir (holds the generated helper scripts)
+#   __LOGDIR__  program log directory
+#   __UDS__     unix-domain socket the daemon listens on
+#   __HTTP__    TCP port for the REST API (used to poll process state)
+#
+# The program set mirrors the stock INI fixture: one-shot, long-running
+# stdout, stdin consumer, numprocs fan-out, start-failure and unspawnable.
+# ==============================================================================
+
+worker_threads: 2
+
+server:
+  uds_path: "__UDS__"
+  http_bind: "127.0.0.1:__HTTP__"
+
+logging:
+  enabled: false
+  level: "info"
+
+program_defaults:
+  autostart: true
+  autorestart: unexpected
+  start_secs: 1
+  start_retries: 3
+  stop_signal: TERM
+  stop_wait_secs: 5
+  logs:
+    max_bytes: "1MB"
+    backups: 1
+
+groups:
+  services:
+    programs:
+      - ticker
+      - catx
+
+programs:
+  echo:
+    command: "/bin/echo rsupervisord-echo"
+    autostart: false
+    autorestart: never
+    start_secs: 0
+    logs:
+      stdout: "__LOGDIR__/echo.log"
+
+  extra:
+    command: "/bin/sh -c \"echo extra-line; while true; do sleep 5; done\""
+    autostart: false
+    autorestart: unexpected
+    start_secs: 0
+    logs:
+      stdout: "/dev/null"
+      stderr: "/dev/null"
+
+  ticker:
+    command: "/bin/sh __CFGDIR__/ticker.sh"
+    autostart: true
+    autorestart: always
+    start_secs: 1
+    logs:
+      stdout: "__LOGDIR__/ticker.log"
+      stderr: "__LOGDIR__/ticker.err.log"
+
+  catx:
+    command: "/bin/cat"
+    autostart: true
+    autorestart: never
+    start_secs: 1
+    logs:
+      stdout: "__LOGDIR__/catx.log"
+      redirect_stderr: true
+
+  worker:
+    command: "/bin/sh __CFGDIR__/worker.sh"
+    numprocs: 2
+    process_name: "%(program_name)s_%(process_num)02d"
+    autostart: true
+    autorestart: always
+    start_secs: 1
+
+  flaky:
+    command: "/bin/sh __CFGDIR__/flaky.sh"
+    autostart: false
+    autorestart: never
+    start_secs: 2
+    start_retries: 1
+
+  nosuch:
+    command: "/nonexistent/does-not-exist-binary"
+    autostart: false
+    autorestart: never

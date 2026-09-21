@@ -1,0 +1,4 @@
+# Pinned reference toolchain: stock Python Supervisor used as the golden
+# behavior oracle for rsupervisord compatibility tests.
+supervisor==4.2.5
+pytest
