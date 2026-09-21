@@ -420,3 +420,228 @@ impl PlatformIpcListener for WindowsUdsListener {
         Ok(Box::new(async_stream))
     }
 }
+
+static GUI_SHUTDOWN_NOTIFIER: parking_lot::Mutex<
+    Option<tokio::sync::mpsc::UnboundedSender<&'static str>>,
+> = parking_lot::Mutex::new(None);
+
+unsafe extern "system" fn window_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, DestroyWindow, PostQuitMessage, WM_CLOSE, WM_DESTROY, WM_ENDSESSION,
+        WM_QUERYENDSESSION,
+    };
+
+    match msg {
+        WM_CLOSE => {
+            tracing::info!("Received WM_CLOSE window message, initiating graceful shutdown");
+            if let Some(ref sender) = *GUI_SHUTDOWN_NOTIFIER.lock() {
+                let _ = sender.send("WM_CLOSE");
+            }
+            unsafe {
+                DestroyWindow(hwnd);
+            }
+            0
+        }
+        WM_QUERYENDSESSION => {
+            // Return 1 (TRUE) indicating the application agrees to terminate
+            1
+        }
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                tracing::info!(
+                    "Received WM_ENDSESSION window message, initiating graceful shutdown"
+                );
+                if let Some(ref sender) = *GUI_SHUTDOWN_NOTIFIER.lock() {
+                    let _ = sender.send("WM_ENDSESSION");
+                }
+            }
+            0
+        }
+        WM_DESTROY => {
+            unsafe {
+                PostQuitMessage(0);
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Helper struct that ensures the hidden GUI listener window and message pump thread
+/// are cleanly terminated and destroyed when dropped.
+struct GuiWindowGuard {
+    hwnd: isize,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for GuiWindowGuard {
+    fn drop(&mut self) {
+        // Clear global sender
+        *GUI_SHUTDOWN_NOTIFIER.lock() = None;
+
+        if self.hwnd != 0 {
+            unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+                PostMessageW(
+                    self.hwnd as windows_sys::Win32::Foundation::HWND,
+                    WM_CLOSE,
+                    0,
+                    0,
+                );
+            }
+        }
+        if let Some(h) = self.thread_handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn spawn_gui_message_window(
+    tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
+) -> Option<GuiWindowGuard> {
+    use std::sync::mpsc::sync_channel;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, MSG, RegisterClassW, TranslateMessage,
+        WNDCLASSW,
+    };
+
+    *GUI_SHUTDOWN_NOTIFIER.lock() = Some(tx);
+
+    let (ready_tx, ready_rx) = sync_channel::<isize>(1);
+
+    let thread_handle = std::thread::Builder::new()
+        .name("gui-msg-listener".to_string())
+        .spawn(move || unsafe {
+            let class_name = format!("rsupervisord_hidden_class_{}\0", std::process::id())
+                .encode_utf16()
+                .collect::<Vec<u16>>();
+            let window_title = "rsupervisord_shutdown_listener\0"
+                .encode_utf16()
+                .collect::<Vec<u16>>();
+
+            let hinstance = GetModuleHandleW(std::ptr::null());
+
+            let wnd_class = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(window_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinstance,
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+            };
+
+            let _ = RegisterClassW(&wnd_class);
+
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                window_title.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                hinstance,
+                std::ptr::null_mut(),
+            );
+
+            let _ = ready_tx.send(hwnd as isize);
+
+            if !hwnd.is_null() {
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        })
+        .ok()?;
+
+    let hwnd = ready_rx.recv().unwrap_or(0);
+    if hwnd == 0 {
+        tracing::debug!("Failed to create hidden GUI window for shutdown notifications");
+        return None;
+    }
+
+    Some(GuiWindowGuard {
+        hwnd,
+        thread_handle: Some(thread_handle),
+    })
+}
+
+/// Asynchronously waits for any Windows shutdown signal:
+/// - Windows console signals: Ctrl+C, Ctrl+Break, Ctrl+Close (console window close "X"), Ctrl+Shutdown, Ctrl+Logoff
+/// - Windows GUI window messages: WM_CLOSE (e.g. from taskkill or GUI window close), WM_ENDSESSION
+pub async fn wait_for_windows_shutdown_signal() {
+    let (gui_tx, mut gui_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+    let _gui_guard = spawn_gui_message_window(gui_tx);
+
+    let mut ctrl_c = tokio::signal::windows::ctrl_c().ok();
+    let mut ctrl_break = tokio::signal::windows::ctrl_break().ok();
+    let mut ctrl_close = tokio::signal::windows::ctrl_close().ok();
+    let mut ctrl_shutdown = tokio::signal::windows::ctrl_shutdown().ok();
+    let mut ctrl_logoff = tokio::signal::windows::ctrl_logoff().ok();
+
+    tokio::select! {
+        Some(msg) = gui_rx.recv() => {
+            tracing::info!("Received GUI window message ({}), initiating graceful shutdown", msg);
+        }
+        _ = async {
+            if let Some(ref mut s) = ctrl_c {
+                s.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("Received Ctrl+C, initiating graceful shutdown");
+        }
+        _ = async {
+            if let Some(ref mut s) = ctrl_break {
+                s.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("Received Ctrl+Break, initiating graceful shutdown");
+        }
+        _ = async {
+            if let Some(ref mut s) = ctrl_close {
+                s.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("Received console/GUI window close event, initiating graceful shutdown");
+        }
+        _ = async {
+            if let Some(ref mut s) = ctrl_shutdown {
+                s.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("Received system shutdown event, initiating graceful shutdown");
+        }
+        _ = async {
+            if let Some(ref mut s) = ctrl_logoff {
+                s.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("Received user logoff event, initiating graceful shutdown");
+        }
+    }
+}

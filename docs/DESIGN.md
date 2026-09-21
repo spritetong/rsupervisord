@@ -743,6 +743,16 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   - Automatically invokes `systemctl daemon-reload` and `systemctl enable` upon installation.
   - Enforces root privilege validation (`is_elevated()`) with clear diagnostic error guidance.
 
+### 15.14 Comprehensive Shutdown Signal Multiplexing (Windows Console & GUI, Unix POSIX)
+
+- **Dual-Track Windows Signal Handling**:
+  - `wait_for_shutdown_signal()` multiplexes console signals with native GUI window messages to support clean termination regardless of execution mode (console binary, GUI application, or headless process).
+  - *Console Track*: Uses `tokio::signal::windows` to listen concurrently for `ctrl_c`, `ctrl_break`, `ctrl_close` (console window "X" close button), `ctrl_shutdown`, and `ctrl_logoff`.
+  - *GUI Track*: Spawns a dedicated thread hosting a hidden top-level Win32 window (`CreateWindowExW`) with a message pump (`GetMessageW`). Catches `WM_CLOSE` (from user window close, Alt+F4, or `taskkill` without `/F`), `WM_QUERYENDSESSION`, and `WM_ENDSESSION` (system shutdown/logoff), notifying the Tokio async runtime via channel.
+  - *Guaranteed Cleanup*: RAII `GuiWindowGuard` automatically posts `WM_CLOSE` and joins the background thread upon shutdown, eliminating thread leaks.
+- **POSIX Signal Multiplexing**:
+  - On Unix platforms, concurrently catches `SIGTERM` and `SIGINT` via Tokio signal streams, initiating identical graceful supervisor drain and child process group cleanup.
+
 ---
 
 ## 16. Verification Matrix
@@ -751,7 +761,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 73 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 74 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
 | **Windows Native UDS** | Bind `AF_UNIX` via `uds_windows`; proxy through Caddy | Transparent HTTP proxying with zero open ports | ✅ Windows 11 Native UDS verified |
@@ -759,4 +769,5 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
 | **System Service Lifecycles** | Install, uninstall, start, stop, restart, and SCM loop | Zero resource leaks, clean drain | ✅ Verified across Windows SCM & Linux systemd |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 73/73 passed; Linux: 72/72 passed |
+| **Windows GUI & Console Close** | Send `WM_CLOSE`, `Ctrl+Close`, and `Ctrl+C` to daemon | Immediate graceful shutdown triggered | ✅ Verified with `test_windows_gui_wm_close_shutdown_signal` |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 74/74 passed; Linux: 72/72 passed |

@@ -66,13 +66,6 @@ pub async fn wait_for_shutdown_signal() {
     }
     #[cfg(windows)]
     {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                tracing::info!("Received Ctrl+C, initiating graceful shutdown");
-            }
-            Err(err) => {
-                tracing::error!("Failed to listen for Ctrl+C signal: {}", err);
-            }
-        }
+        windows::wait_for_windows_shutdown_signal().await;
     }
 }

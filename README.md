@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]
-[![Tests](https://img.shields.io/badge/Tests-73%2F73%20Passing-brightgreen.svg)]
+[![Tests](https://img.shields.io/badge/Tests-74%2F74%20Passing-brightgreen.svg)]
 
 **rsupervisord** is a modern, high-performance, asynchronous process orchestration and monitoring daemon engine written in Rust.
 
@@ -41,6 +41,10 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
   - Local cross-platform Unix Domain Sockets (native `AF_UNIX` on both Linux and Windows 10/11) for zero-port Caddy/Nginx reverse proxy integration.
   - Single-binary embedded Web UI powered by production single-file Vue 3 (`rust-embed`, zero NPM dependencies) with real-time SSE live logs, batch controls, and diff modals.
   - Strict caller privilege checks: Unix UID/GID compatibility and Windows `TokenElevation` (`is_admin`) verification.
+
+- 🛑 **Comprehensive Dual-Platform Shutdown Multiplexing**:
+  - **Linux / Unix**: Concurrently traps `SIGTERM` and `SIGINT` (Ctrl+C).
+  - **Windows Console & GUI**: Multiplexes console events (`Ctrl+C`, `Ctrl+Break`, `Ctrl+Close` on window "X", `Ctrl+Shutdown`, `Ctrl+Logoff`) and native Win32 window messages (`WM_CLOSE`, `WM_ENDSESSION`, `WM_QUERYENDSESSION`) via a lightweight hidden event receiver. Gracefully terminates when closed from GUI task managers, `taskkill`, window close actions, or system shutdown.
 
 ---
 
@@ -272,7 +276,7 @@ http://127.0.0.1:9001/
 | :--- | :--- | :--- |
 | **Silent 0% CPU** | Zero polling wakeups without health check | ✅ Verified (< 0.01% CPU) |
 | **Windows Job Objects** | Multi-tier child/grandchild process reclamation | ✅ 100% Reclaimed |
-| **Unit & Integration Tests** | 73 comprehensive tests across all modules | ✅ 73/73 Passed |
+| **Unit & Integration Tests** | 74 comprehensive tests across all modules | ✅ 74/74 Passed |
 | **Clippy Strict Lints** | Strict `-D warnings` enforcement | ✅ 0 Warnings |
 | **Code Formatting** | Standard Rust formatting (`cargo fmt --check`) | ✅ 0 Diffs |
 | **Cross-Platform Matrix** | Windows 11 Native MSVC & Ubuntu 22.04 LTS (WSL2) | ✅ 100% Dual-Platform Pass |

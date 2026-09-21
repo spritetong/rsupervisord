@@ -152,3 +152,44 @@ fn test_build_tokio_runtime_single_and_multi_threaded() {
     let val_def = rt_default.block_on(async { 200 });
     assert_eq!(val_def, 200);
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_gui_wm_close_shutdown_signal() {
+    let task = tokio::spawn(async {
+        rsupervisord::platform::wait_for_shutdown_signal().await;
+    });
+
+    // Give the listener window a brief moment to spawn
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Find the hidden GUI listener window by its title
+    let window_title = "rsupervisord_shutdown_listener\0"
+        .encode_utf16()
+        .collect::<Vec<u16>>();
+    let hwnd = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+            std::ptr::null(),
+            window_title.as_ptr(),
+        )
+    };
+
+    assert!(!hwnd.is_null(), "Hidden GUI listener window must exist");
+
+    // Post WM_CLOSE to simulate user closing GUI app or taskkill
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+            hwnd,
+            windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+            0,
+            0,
+        );
+    }
+
+    // wait_for_shutdown_signal must finish promptly
+    let res = tokio::time::timeout(Duration::from_secs(3), task).await;
+    assert!(
+        res.is_ok(),
+        "wait_for_shutdown_signal timed out on WM_CLOSE"
+    );
+}
