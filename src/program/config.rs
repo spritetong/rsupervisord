@@ -227,6 +227,8 @@ pub struct ProgramConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub group: String,
+    #[serde(default = "default_group_priority")]
+    pub group_priority: u32,
     #[serde(default)]
     pub cron: Option<String>,
     #[serde(default)]
@@ -255,6 +257,10 @@ pub struct ProgramConfig {
     pub restart_cmd_when_file_changed: Option<String>,
     #[serde(default = "default_restart_debounce_secs")]
     pub restart_debounce_secs: u64,
+}
+
+fn default_group_priority() -> u32 {
+    999
 }
 
 fn default_restart_debounce_secs() -> u64 {
@@ -344,6 +350,7 @@ impl ProgramConfig {
         let n = name.into();
         Self {
             group: n.clone(),
+            group_priority: default_group_priority(),
             name: n,
             command: command.into(),
             args: Vec::new(),

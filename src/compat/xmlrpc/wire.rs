@@ -40,6 +40,15 @@ impl Value {
         }
     }
 
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i as i64),
+            Value::Double(d) => Some(*d as i64),
+            Value::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Boolean(b) => Some(*b),

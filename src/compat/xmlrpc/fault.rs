@@ -138,6 +138,14 @@ impl Fault {
         Self::new(FaultCode::Failed, msg)
     }
 
+    pub fn bad_arguments(detail: impl Into<String>) -> Self {
+        Self::new(FaultCode::BadArguments, detail)
+    }
+
+    pub fn no_file(detail: impl Into<String>) -> Self {
+        Self::new(FaultCode::NoFile, detail)
+    }
+
     pub fn cant_reread(detail: impl Into<String>) -> Self {
         Self::new(FaultCode::CantReread, detail)
     }

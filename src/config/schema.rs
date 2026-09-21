@@ -286,7 +286,7 @@ pub struct GroupConfigRaw {
     #[serde(default)]
     pub programs: Vec<String>,
     #[serde(default)]
-    pub priority: Option<u8>,
+    pub priority: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,10 +453,10 @@ impl SupervisorConfig {
 
         for (group_name, group_cfg) in &self.groups {
             if let Some(p) = group_cfg.priority
-                && p > 99
+                && p > 999
             {
                 return Err(ProgramError::ConfigError(format!(
-                    "Group '{}' priority {} must be in range [0, 99]",
+                    "Group '{}' priority {} must be in range [0, 999]",
                     group_name, p
                 )));
             }
@@ -608,6 +608,12 @@ impl SupervisorConfig {
                 }
                 found_group.unwrap_or_else(|| base_name.clone())
             };
+
+            let group_priority = self
+                .groups
+                .get(&group)
+                .and_then(|g| g.priority)
+                .unwrap_or(999);
 
             // Expand depends_on: map multi-instance program dependencies to all their instances
             let mut resolved_depends_on = Vec::new();
@@ -889,6 +895,7 @@ impl SupervisorConfig {
                     logs,
                     health_check,
                     group: group.clone(),
+                    group_priority,
                     cron: raw.cron.clone(),
                     cron_stop: raw.cron_stop.clone(),
                     pre_start,
@@ -1185,10 +1192,14 @@ programs:
         let resolved = config.resolve_programs().unwrap();
 
         assert_eq!(resolved["frontend"].group, "web");
+        assert_eq!(resolved["frontend"].group_priority, 80);
         assert_eq!(resolved["backend"].group, "web");
+        assert_eq!(resolved["backend"].group_priority, 80);
         assert_eq!(resolved["worker"].group, "jobs");
+        assert_eq!(resolved["worker"].group_priority, 999);
         // standalone has no explicit group, so default group is its own name
         assert_eq!(resolved["standalone"].group, "standalone");
+        assert_eq!(resolved["standalone"].group_priority, 999);
 
         assert_eq!(resolved["frontend"].full_name(), "web:frontend");
         assert_eq!(resolved["worker"].full_name(), "jobs:worker");

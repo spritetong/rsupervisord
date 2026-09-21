@@ -174,7 +174,10 @@ impl SupervisorDaemon {
             crate::platform::native_platform().is_elevated()
         );
 
-        let mut manager = SupervisorManager::new(&config)?;
+        let cancel_token = CancellationToken::new();
+        let mut manager = SupervisorManager::builder(config.clone())
+            .with_cancel_token(cancel_token.clone())
+            .build()?;
         let manager_handle = manager.handle();
         tracing::info!(
             "Supervisor manager initialized with {} program(s)",
@@ -187,7 +190,6 @@ impl SupervisorDaemon {
         }
 
         // Spawn server engine
-        let cancel_token = CancellationToken::new();
         let server = ServerEngine::new(manager_handle, Some(config_path), config.server);
         let server_token = cancel_token.clone();
         let server_handle = tokio::spawn(async move {

@@ -93,6 +93,13 @@ pub enum ManagerCommand {
         data: Vec<u8>,
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
+    GetConfig {
+        name: String,
+        reply: oneshot::Sender<Result<ProgramConfig, ProgramError>>,
+    },
+    GetAllConfigs {
+        reply: oneshot::Sender<HashMap<String, ProgramConfig>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
@@ -545,14 +552,57 @@ impl ManagerHandle {
             })?
     }
 
-    pub async fn shutdown(&self) -> Result<(), ProgramError> {
+    pub async fn get_config(&self, name: impl Into<String>) -> Result<ProgramConfig, ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ManagerCommand::Shutdown { reply: reply_tx })
+            .send(ManagerCommand::GetConfig {
+                name: name.into(),
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| ProgramError::ChannelClosed {
                 name: "manager".to_string(),
             })?;
+
+        let timeout_dur = Duration::from_secs(10);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn get_all_configs(&self) -> Result<HashMap<String, ProgramConfig>, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::GetAllConfigs { reply: reply_tx })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(10);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })
+    }
+
+    pub async fn shutdown(&self) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .command_tx
+            .send(ManagerCommand::Shutdown { reply: reply_tx })
+            .await;
 
         let timeout_dur = Duration::from_secs(120);
         let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
@@ -879,6 +929,20 @@ impl ManagerActor {
                                 Err(ProgramError::NotFound { name })
                             };
                             let _ = reply.send(res);
+                        }
+                        ManagerCommand::GetConfig { name, reply } => {
+                            let target = if self.configs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.configs.get(&n).cloned())
+                                .ok_or(ProgramError::NotFound { name });
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::GetAllConfigs { reply } => {
+                            let _ = reply.send(self.configs.clone());
                         }
                         ManagerCommand::Shutdown { reply } => {
                             self.is_shutting_down = true;
