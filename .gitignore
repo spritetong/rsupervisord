@@ -6,7 +6,10 @@ release
 generated_*
 logs
 env
+.env
+.venv
 __pycache__
+.pytest_cache
 
 -
 ~*
@@ -26,4 +29,6 @@ __pycache__
 
 /config.yaml
 /Makefile
-go-supervisord/
+/go-supervisord
+/compat
+/docs

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 pub mod cli;
+pub mod compat;
 pub mod config;
 pub mod control;
 pub mod daemon;

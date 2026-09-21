@@ -748,11 +748,26 @@ impl ManagerActor {
                         ManagerCommand::SignalProgram { name, signal, reply } => {
                             if self.is_shutting_down {
                                 let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
-                            } else if let Some(prog) = self.programs.get(&name) {
-                                let res = prog.signal(signal).await;
-                                let _ = reply.send(res);
                             } else {
-                                let _ = reply.send(Err(ProgramError::NotFound { name }));
+                                let targets = if self.programs.contains_key(&name) {
+                                    vec![name.clone()]
+                                } else {
+                                    self.find_match(&name)
+                                };
+                                if targets.is_empty() {
+                                    let _ = reply.send(Err(ProgramError::NotFound { name }));
+                                } else {
+                                    let mut last_res = Ok(());
+                                    for t in targets {
+                                        if let Some(prog) = self.programs.get(&t) {
+                                            last_res = prog.signal(signal).await;
+                                            if last_res.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let _ = reply.send(last_res);
+                                }
                             }
                         }
                         ManagerCommand::StartGroup { group, reply } => {

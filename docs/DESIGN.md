@@ -1015,3 +1015,38 @@ Compilers and package managers write large binaries in chunks over several secon
    - Shell command execution (`restart_cmd_when_*`).
    - `ManagerHandle::restart_program(name, None)` for standard full process restart.
 
+---
+
+## 19. Compatibility Translation Layer & Protocol Adapter (`src/compat/`)
+
+To preserve clean separation between `rsupervisord`'s modern actor runtime and external legacy protocols, all translation, fault mapping, and serialization logic are encapsulated inside a dedicated `compat` crate module (`src/compat/`). The core engine exposes minimal interface adapters.
+
+```mermaid
+flowchart LR
+    Client["supervisorctl / Python XML-RPC Client"]
+    Router["Axum HTTP Router (/RPC2)"]
+    Handler["xmlrpc_handler (Basic Auth & Request Validation)"]
+    Wire["Pure Rust XML-RPC Parser & CVE-2017-11610 Validator"]
+    Dispatcher["Method Dispatcher (system.* / supervisor.*)"]
+    Adapter["ManagerHandle Adapter & Fault Translator"]
+    Core["Core ManagerActor & ProcessActor Runtime"]
+
+    Client -->|HTTP POST /RPC2| Router --> Handler
+    Handler --> Wire --> Dispatcher --> Adapter --> Core
+    Adapter -->|Result / ProgramError| Dispatcher -->|MethodResponse / Fault| Handler -->|HTTP 200 XML| Client
+```
+
+### 19.1 Architectural Boundaries
+1. **Strict Isolation**: No legacy XML-RPC types or translation artifacts leak into `src/manager/` or `src/program/`.
+2. **Standard Supervisor Fault Codes (1..92)**:
+   - `1 UNKNOWN_METHOD`, `2 INCORRECT_PARAMETERS`, `10 BAD_NAME`, `11 BAD_SIGNAL`, `20 NO_FILE`, `21 NOT_EXECUTABLE`, `30 FAILED`, `40 ABNORMAL_TERMINATION`, `50 SPAWN_ERROR`, `60 ALREADY_STARTED`, `70 NOT_RUNNING`, `80 SUCCESS`, `92 CANT_REREAD`.
+   - Automatic translation from domain `ProgramError` into standard XML-RPC Fault responses.
+3. **Pure Rust Wire Model**:
+   - High-performance, streaming XML-RPC value serialization and deserialization using `quick-xml` (zero Python interpreter dependencies).
+   - Tolerant parsing supporting untagged string elements and saturated 32-bit integer timestamp conversions.
+4. **Hardened Security Protections**:
+   - **CVE-2017-11610 Enforcement**: Validates that all incoming method names contain exactly two dot-separated segments (`namespace.method`) with no leading underscores (`_`), preventing remote code execution and traversal attacks.
+   - **Non-Recursive Multicall**: Rejects nested `system.multicall` invocations with Fault 2 (`INCORRECT_PARAMETERS`).
+   - **Integrated Basic Authentication**: Enforces HTTP Basic Auth credentials from `[inet_http_server]`, returning `401 Unauthorized` with `WWW-Authenticate` challenge headers.
+
+

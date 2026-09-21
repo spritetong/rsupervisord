@@ -79,6 +79,7 @@ ahash = "0.8.12"
 smallvec = "1.16.1"
 compact_str = { version = "0.10.0", features = ["serde"] }
 notify = "8"
+quick-xml = "0.42.0"
 
 # Platform abstractions
 [target.'cfg(unix)'.dependencies]
@@ -88,6 +89,7 @@ nix = { version = "0.31", features = [
     "user",
     "fs",
     "socket",
+    "hostname",
 ] }
 libc = "0.2"
 

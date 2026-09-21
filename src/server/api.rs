@@ -103,6 +103,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
         .route("/api/v1/programs/{name}/stdin", post(send_stdin))
+        .route("/RPC2", post(crate::compat::xmlrpc::xmlrpc_handler))
         .fallback(crate::server::web::static_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

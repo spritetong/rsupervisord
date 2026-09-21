@@ -68,9 +68,19 @@ programs:
         "#!/bin/sh\nwhile true; do echo updated; sleep 1; done\n"
     };
 
-    fs::write(&bin_path, updated_content).unwrap();
+    let write_with_retry = |content: &str| {
+        for _ in 0..20 {
+            if fs::write(&bin_path, content).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        fs::write(&bin_path, content)
+    };
+
+    write_with_retry(updated_content).unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    fs::write(&bin_path, updated_content).unwrap();
+    write_with_retry(updated_content).unwrap();
 
     // Wait for debounce window (1s) + execution margin
     let mut restarted = false;
