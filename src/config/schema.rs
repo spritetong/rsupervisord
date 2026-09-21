@@ -150,7 +150,7 @@ pub struct ProgramDefaults {
     #[serde(default)]
     pub stop_wait_secs: Option<u64>,
     #[serde(default)]
-    pub priority: Option<u8>,
+    pub priority: Option<u32>,
     #[serde(default)]
     pub logs: Option<ProgramLogsConfigRaw>,
     #[serde(default)]
@@ -218,7 +218,7 @@ pub struct ProgramConfigRaw {
     #[serde(default)]
     pub environment: HashMap<String, String>,
     #[serde(default)]
-    pub priority: Option<u8>,
+    pub priority: Option<u32>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
@@ -328,23 +328,45 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Loads and parses a SupervisorConfig from a YAML file, storing its directory for default path resolution.
+    /// Loads and parses a SupervisorConfig from a file, automatically determining format:
+    /// - `.yaml` or `.yml` files are parsed via the YAML pipeline
+    /// - all other files (e.g. `.conf`, `.ini`, or extensionless) are parsed via the compatibility INI pipeline
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ProgramError> {
         let path_ref = path.as_ref();
-        let content = std::fs::read_to_string(path_ref).map_err(|e| {
-            ProgramError::ConfigError(format!(
-                "Failed to read config file '{:?}': {}",
-                path_ref, e
-            ))
-        })?;
-        let config_dir = path_ref.parent().map(|p| {
-            if p.as_os_str().is_empty() {
-                PathBuf::from(".")
-            } else {
-                p.to_path_buf()
-            }
-        });
-        Self::from_yaml_str_with_config_dir(&content, config_dir.as_deref())
+        let is_yaml = match path_ref.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) => ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"),
+            None => false,
+        };
+
+        if is_yaml {
+            let content = std::fs::read_to_string(path_ref).map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "Failed to read config file '{:?}': {}",
+                    path_ref, e
+                ))
+            })?;
+            let config_dir = path_ref.parent().map(|p| {
+                if p.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    p.to_path_buf()
+                }
+            });
+            Self::from_yaml_str_with_config_dir(&content, config_dir.as_deref())
+        } else {
+            crate::compat::ini::load_ini_config(path_ref)
+        }
+    }
+
+    pub fn from_ini_str(ini_content: &str) -> Result<Self, ProgramError> {
+        Self::from_ini_str_with_config_dir(ini_content, None)
+    }
+
+    pub fn from_ini_str_with_config_dir(
+        ini_content: &str,
+        config_dir: Option<&std::path::Path>,
+    ) -> Result<Self, ProgramError> {
+        crate::compat::ini::parse_ini_str(ini_content, config_dir)
     }
 
     pub fn from_yaml_str(yaml_content: &str) -> Result<Self, ProgramError> {
@@ -395,9 +417,9 @@ impl SupervisorConfig {
                 .priority
                 .or(self.program_defaults.priority)
                 .unwrap_or(50);
-            if priority > 99 {
+            if priority > 999 {
                 return Err(ProgramError::ConfigError(format!(
-                    "Program '{}' priority {} must be in range [0, 99]",
+                    "Program '{}' priority {} must be in range [0, 999]",
                     name, priority
                 )));
             }
@@ -547,9 +569,9 @@ impl SupervisorConfig {
                 .priority
                 .or(self.program_defaults.priority)
                 .unwrap_or(50);
-            if priority > 99 {
+            if priority > 999 {
                 return Err(ProgramError::ConfigError(format!(
-                    "Program '{}' priority {} must be in range [0, 99]",
+                    "Program '{}' priority {} must be in range [0, 999]",
                     base_name, priority
                 )));
             }

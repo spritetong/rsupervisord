@@ -3,4 +3,5 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
+pub mod ini;
 pub mod xmlrpc;

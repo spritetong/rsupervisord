@@ -180,7 +180,7 @@ impl Program for ProcessProgram {
         &self.config.name
     }
 
-    fn priority(&self) -> u8 {
+    fn priority(&self) -> u32 {
         self.config.priority
     }
 

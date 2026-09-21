@@ -15,8 +15,8 @@ pub trait Program: Send + Sync {
     /// Unique program name.
     fn name(&self) -> &str;
 
-    /// Priority within range [0, 99]; lower numbers indicate higher startup priority.
-    fn priority(&self) -> u8;
+    /// Priority within range [0, 999]; lower numbers indicate higher startup priority.
+    fn priority(&self) -> u32;
 
     /// List of program names this program strongly depends on.
     fn dependencies(&self) -> &[String];

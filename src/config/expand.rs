@@ -171,6 +171,16 @@ impl StringExpression {
                     let var_val = match self.env.get(var_name) {
                         Some(v) => v.as_str(),
                         None => {
+                            if trigger == '$' {
+                                // For $(...), preserve literal syntax if not defined in context
+                                // to allow shell command substitutions like $(whoami) or $((i+1))
+                                result.push('$');
+                                result.push('(');
+                                result.push_str(&var_name_str);
+                                result.push(')');
+                                i = end + 1;
+                                continue;
+                            }
                             let mut available: Vec<&str> =
                                 self.env.keys().map(|k| k.as_str()).collect();
                             available.sort_unstable();

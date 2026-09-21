@@ -50,11 +50,10 @@ impl<'a> PathResolver<'a> {
 
     /// Searches for the default configuration file location in strict priority order:
     /// 1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG`
-    /// 2. `<executable path>/<cmd_name>.yaml`
-    /// 3. `<executable path>/<cmd_name>/config.yaml`
+    /// 2. Executable path `<cmd_name>.conf`, `supervisord.conf`, `<cmd_name>.ini`, `<cmd_name>.yaml`
+    /// 3. `<executable path>/<cmd_name>/config.conf`, etc.
     /// 4. OS-specific path:
-    ///    - Windows: None
-    ///    - Unix: `/etc/<cmd_name>/config.yaml`
+    ///    - Unix: `/etc/<cmd_name>/config.conf`, `/etc/supervisor/supervisord.conf`, `/etc/supervisord.conf`, etc.
     pub fn find_default_config_path(&self) -> Option<PathBuf> {
         let env_name = format!("{}_CONFIG", self.cmd_name.to_uppercase());
         if let Ok(val) = std::env::var(&env_name) {
@@ -65,12 +64,20 @@ impl<'a> PathResolver<'a> {
         }
 
         let exe_dir = get_executable_dir();
+        let extensions = [".conf", ".ini", ".yaml", ".yml"];
 
-        // 2. `<executable path>/<cmd_name>.yaml`
-        let p2 = exe_dir.join(format!("{}.yaml", self.cmd_name));
-        if p2.is_file() {
-            return Some(p2);
+        // 2. Executable directory candidates
+        for ext in &extensions {
+            let p = exe_dir.join(format!("{}{}", self.cmd_name, ext));
+            if p.is_file() {
+                return Some(p);
+            }
         }
+        let super_conf = exe_dir.join("supervisord.conf");
+        if super_conf.is_file() {
+            return Some(super_conf);
+        }
+
         // Also check symlink parent if argv[0] directory differs from exe_dir
         if let Some(argv0) = std::env::args_os().next() {
             let p = Path::new(&argv0);
@@ -78,38 +85,47 @@ impl<'a> PathResolver<'a> {
                 && !parent.as_os_str().is_empty()
                 && parent != exe_dir
             {
-                let p2_sym = parent.join(format!("{}.yaml", self.cmd_name));
-                if p2_sym.is_file() {
-                    return Some(p2_sym);
+                for ext in &extensions {
+                    let p_sym = parent.join(format!("{}{}", self.cmd_name, ext));
+                    if p_sym.is_file() {
+                        return Some(p_sym);
+                    }
+                }
+                let s_sym = parent.join("supervisord.conf");
+                if s_sym.is_file() {
+                    return Some(s_sym);
                 }
             }
         }
 
-        // 3. `<executable path>/<cmd_name>/config.yaml`
-        let p3 = exe_dir.join(self.cmd_name.as_ref()).join("config.yaml");
-        if p3.is_file() {
-            return Some(p3);
-        }
-        if let Some(argv0) = std::env::args_os().next() {
-            let p = Path::new(&argv0);
-            if let Some(parent) = p.parent()
-                && !parent.as_os_str().is_empty()
-                && parent != exe_dir
-            {
-                let p3_sym = parent.join(self.cmd_name.as_ref()).join("config.yaml");
-                if p3_sym.is_file() {
-                    return Some(p3_sym);
-                }
+        // 3. `<executable path>/<cmd_name>/config.*`
+        let sub_dir = exe_dir.join(self.cmd_name.as_ref());
+        for ext in &extensions {
+            let p = sub_dir.join(format!("config{}", ext));
+            if p.is_file() {
+                return Some(p);
             }
         }
 
-        // 4. OS-specific system configuration path (e.g. Unix /etc/<cmd_name>/config.yaml)
+        // 4. OS-specific system configuration paths
         if let Some(sys_dir) =
             crate::platform::native_platform().default_system_config_dir(&self.cmd_name)
         {
-            let p4 = sys_dir.join("config.yaml");
-            if p4.is_file() {
-                return Some(p4);
+            for ext in &extensions {
+                let p = sys_dir.join(format!("config{}", ext));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+
+        let sys_candidates = [
+            PathBuf::from("/etc/supervisor/supervisord.conf"),
+            PathBuf::from("/etc/supervisord.conf"),
+        ];
+        for p in &sys_candidates {
+            if p.is_file() {
+                return Some(p.clone());
             }
         }
 
@@ -125,7 +141,7 @@ impl<'a> PathResolver<'a> {
                 return PathBuf::from(trimmed);
             }
         }
-        get_executable_dir().join(format!("{}.yaml", self.cmd_name))
+        get_executable_dir().join(format!("{}.conf", self.cmd_name))
     }
 
     /// Returns the default local IPC path (named pipe on Windows, Unix domain socket on Unix).

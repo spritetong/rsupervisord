@@ -202,7 +202,7 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub environment: HashMap<String, String>,
     #[serde(default = "default_priority")]
-    pub priority: u8,
+    pub priority: u32,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default = "default_true")]
@@ -317,7 +317,7 @@ fn default_health_initial_delay_secs() -> u64 {
     0
 }
 
-fn default_priority() -> u8 {
+fn default_priority() -> u32 {
     50
 }
 
@@ -439,9 +439,9 @@ impl ProgramConfig {
     }
 
     pub fn validate(&self) -> Result<(), crate::error::ProgramError> {
-        if self.priority > 99 {
+        if self.priority > 999 {
             return Err(crate::error::ProgramError::ConfigError(format!(
-                "Program '{}' priority {} must be in range [0, 99]",
+                "Program '{}' priority {} must be in range [0, 999]",
                 self.name, self.priority
             )));
         }
