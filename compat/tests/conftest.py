@@ -17,6 +17,7 @@ Two run targets are supported, selected by ``SUPERVISOR_TARGET``:
 Environment knobs::
 
     SUPERVISOR_TARGET      rsupervisord | python        (default: rsupervisord)
+    SUPERVISOR_RSD_FORMAT  yaml | ini                   (default: yaml)
     SUPERVISOR_STRICT      turn unsupported xfails into hard failures
     RSUPERVISORD_PROFILE   cargo profile dir              (default: debug)
     RSUPERVISORD_BIN       override daemon binary path
@@ -56,6 +57,7 @@ STRICT = os.environ.get("SUPERVISOR_STRICT", "").strip().lower() not in (
     "false",
     "no",
 )
+RSD_FORMAT = os.environ.get("SUPERVISOR_RSD_FORMAT", "yaml").strip().lower() or "yaml"
 PROFILE = os.environ.get("RSUPERVISORD_PROFILE", "debug").strip() or "debug"
 RSD_BIN = Path(
     os.environ.get("RSUPERVISORD_BIN") or REPO_ROOT / "target" / PROFILE / "rsupervisord"
@@ -103,6 +105,9 @@ class Instance:
         uds: Path,
         http_port: int,
         ctl_conf: Path,
+        rpc_serverurl: str | None = None,
+        rpc_user: str = "",
+        rpc_pass: str = "",
     ) -> None:
         self.target = target
         self.root = root
@@ -110,11 +115,16 @@ class Instance:
         self.uds = uds
         self.http_port = http_port
         self.ctl_conf = ctl_conf
+        self.rpc_serverurl = rpc_serverurl
+        self.rpc_user = rpc_user
+        self.rpc_pass = rpc_pass
         self._rpc_available: bool | None = None
 
     # -- XML-RPC -----------------------------------------------------------
     @property
     def supervisor(self) -> ServerProxy:
+        if self.rpc_serverurl:
+            return _build_proxy(self.rpc_serverurl, self.rpc_user, self.rpc_pass)
         if self.target == "python":
             return _build_proxy(f"unix://{self.uds}", CTL_USER, CTL_PASS)
         return _build_proxy(f"http://127.0.0.1:{self.http_port}", "", "")
@@ -313,6 +323,69 @@ def _launch_rsupervisord() -> Instance:
     )
 
 
+def _launch_rsupervisord_ini(root: Path) -> Instance:
+    """Launch the Rust binary against the stock INI fixture (translation test)."""
+    if not RSD_BIN.exists():
+        pytest.fail(
+            f"{RSD_BIN} missing; run `cargo build` (or compat/run.sh) first"
+        )
+
+    (root / "run").mkdir(parents=True, exist_ok=True)
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["COMPAT_TAG"] = "alpha"
+    env["COMPAT_MODE"] = "oracle"
+
+    log = open(root / "logs" / "harness.out", "w")
+    proc = subprocess.Popen(
+        [str(RSD_BIN), "-n", "-c", str(root / "supervisord.conf")],
+        cwd=root,
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+    # rsupervisord collapses [unix_http_server]/[inet_http_server] credentials
+    # into one pair, and the inet pair wins; the stock [supervisorctl] url uses
+    # the unix socket and would 401.  Drive the oracle client over inet instead.
+    ctl_conf = root / "supervisorctl-inet.conf"
+    ctl_conf.write_text(
+        f"[supervisorctl]\nserverurl=http://127.0.0.1:{INET_PORT}\n"
+        f"username={RPC_USER}\npassword={RPC_PASS}\n"
+    )
+
+    inst = Instance(
+        "rsupervisord",
+        root,
+        proc,
+        uds=root / "run" / "supervisor.sock",
+        http_port=INET_PORT,
+        ctl_conf=ctl_conf,
+        rpc_serverurl=f"http://127.0.0.1:{INET_PORT}",
+        rpc_user=RPC_USER,
+        rpc_pass=RPC_PASS,
+    )
+
+    deadline = time.time() + START_TIMEOUT
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            inst.supervisor.supervisor.getState()
+            return inst
+        except Exception as exc:  # not ready yet
+            last_err = exc
+        time.sleep(0.1)
+
+    _teardown(inst)
+    raise RuntimeError(
+        f"rsupervisord (INI) failed to start (exit={proc.poll()}, last_err={last_err})\n"
+        + inst.log_dump()
+    )
+
+
 def _teardown(inst: Instance) -> None:
     if inst.proc.poll() is None:
         if inst.target == "python":
@@ -345,7 +418,12 @@ def instance() -> Instance:
         shutil.copytree(CONF_SRC, root, dirs_exist_ok=True)
         inst = _launch_python(root)
     elif TARGET == "rsupervisord":
-        inst = _launch_rsupervisord()
+        if RSD_FORMAT == "ini":
+            root = Path(tempfile.mkdtemp(prefix="rsdini-", dir="/tmp"))
+            shutil.copytree(CONF_SRC, root, dirs_exist_ok=True)
+            inst = _launch_rsupervisord_ini(root)
+        else:
+            inst = _launch_rsupervisord()
     else:
         pytest.fail(f"unknown SUPERVISOR_TARGET={TARGET!r} (use python|rsupervisord)")
 
