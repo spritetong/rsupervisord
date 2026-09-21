@@ -17,12 +17,20 @@ pub enum SystemEvent {
     /// Fired whenever a managed program transitions across states.
     StateChanged {
         name: String,
+        #[serde(default)]
+        group: String,
         old_state: ProgramState,
         new_state: ProgramState,
         pid: Option<u32>,
         exit_code: Option<i32>,
         description: String,
+        #[serde(default)]
+        tries: u32,
     },
+    /// Fired when a periodic tick interval fires (5, 60, 3600 seconds).
+    Tick { interval: u32, when: u64 },
+    /// Fired when an XML-RPC sendRemoteCommEvent is called.
+    RemoteCommunication { type_str: String, data: String },
     /// Fired whenever a managed program's active health probe changes state.
     HealthChanged {
         name: String,
@@ -89,7 +97,10 @@ impl SystemEvent {
             | Self::ProcessPreStartFailed { name, .. }
             | Self::ProcessPreStop { name, .. }
             | Self::ProcessPreStopFailed { name, .. } => Some(name),
-            Self::ConfigReloaded { .. } | Self::DaemonLifecycle { .. } => None,
+            Self::ConfigReloaded { .. }
+            | Self::DaemonLifecycle { .. }
+            | Self::Tick { .. }
+            | Self::RemoteCommunication { .. } => None,
         }
     }
 
@@ -113,13 +124,22 @@ pub struct LogEntry {
     pub stream: String,
     pub line: String,
     pub timestamp_millis: u64,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub events_enabled: bool,
 }
 
 impl LogEntry {
-    pub fn new(
+    pub fn with_details(
         program: impl Into<String>,
+        group: Option<String>,
+        pid: Option<u32>,
         stream: impl Into<String>,
         line: impl Into<String>,
+        events_enabled: bool,
     ) -> Self {
         let timestamp_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -131,7 +151,18 @@ impl LogEntry {
             stream: stream.into(),
             line: line.into(),
             timestamp_millis,
+            group,
+            pid,
+            events_enabled,
         }
+    }
+
+    pub fn new(
+        program: impl Into<String>,
+        stream: impl Into<String>,
+        line: impl Into<String>,
+    ) -> Self {
+        Self::with_details(program, None, None, stream, line, false)
     }
 
     /// Returns true if this log line was captured from stderr.
@@ -240,11 +271,13 @@ mod tests {
 
         hub.publish_system(SystemEvent::StateChanged {
             name: "api".to_string(),
+            group: "api".to_string(),
             old_state: ProgramState::Stopped,
             new_state: ProgramState::Running,
             pid: Some(1234),
             exit_code: None,
             description: "Started".to_string(),
+            tries: 0,
         });
 
         hub.publish_log(LogEntry::new("api", "stdout", "ready on 8080"));
@@ -269,11 +302,13 @@ mod tests {
     fn test_system_event_metadata() {
         let evt = SystemEvent::StateChanged {
             name: "worker".to_string(),
+            group: "default".to_string(),
             old_state: ProgramState::Starting,
             new_state: ProgramState::Running,
             pid: Some(42),
             exit_code: None,
             description: "Ready".to_string(),
+            tries: 0,
         };
 
         assert_eq!(evt.event_type(), "StateChanged");

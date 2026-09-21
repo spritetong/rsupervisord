@@ -19,6 +19,9 @@ pub struct LogPumpBuilder<R> {
     ring_prefix: Option<String>,
     event_hub: Option<EventHub>,
     program_name: Option<String>,
+    group_name: Option<String>,
+    pid: Option<u32>,
+    events_enabled: bool,
 }
 
 impl<R> LogPumpBuilder<R>
@@ -35,6 +38,9 @@ where
             ring_prefix: None,
             event_hub: None,
             program_name: None,
+            group_name: None,
+            pid: None,
+            events_enabled: false,
         }
     }
 
@@ -62,6 +68,24 @@ where
         self
     }
 
+    /// Configures the originating group identifier.
+    pub fn with_group_name(mut self, group: Option<String>) -> Self {
+        self.group_name = group;
+        self
+    }
+
+    /// Configures the child process PID.
+    pub fn with_pid(mut self, pid: Option<u32>) -> Self {
+        self.pid = pid;
+        self
+    }
+
+    /// Configures whether process log events are enabled for event listeners.
+    pub fn with_events_enabled(mut self, enabled: bool) -> Self {
+        self.events_enabled = enabled;
+        self
+    }
+
     /// Spawns the background pumping task onto the Tokio runtime.
     pub fn spawn(self) -> JoinHandle<()> {
         let LogPumpBuilder {
@@ -72,6 +96,9 @@ where
             ring_prefix,
             event_hub,
             program_name,
+            group_name,
+            pid,
+            events_enabled,
         } = self;
 
         tokio::spawn(async move {
@@ -105,7 +132,14 @@ where
                 if let Some(ref hub) = event_hub
                     && let Some(ref prog) = program_name
                 {
-                    hub.publish_log(LogEntry::new(prog, stream_name, &line));
+                    hub.publish_log(LogEntry::with_details(
+                        prog,
+                        group_name.clone(),
+                        pid,
+                        stream_name,
+                        &line,
+                        events_enabled,
+                    ));
                 }
 
                 // Write raw line to file rotator if configured

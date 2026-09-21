@@ -144,6 +144,10 @@ pub struct ProgramLogsConfig {
     pub backups: Option<usize>,
     #[serde(default)]
     pub redirect_stderr: bool,
+    #[serde(default)]
+    pub stdout_events_enabled: bool,
+    #[serde(default)]
+    pub stderr_events_enabled: bool,
 }
 
 impl Default for ProgramLogsConfig {
@@ -155,6 +159,8 @@ impl Default for ProgramLogsConfig {
             max_bytes: None,
             backups: None,
             redirect_stderr: false,
+            stdout_events_enabled: false,
+            stderr_events_enabled: false,
         }
     }
 }
@@ -257,6 +263,8 @@ pub struct ProgramConfig {
     pub restart_cmd_when_file_changed: Option<String>,
     #[serde(default = "default_restart_debounce_secs")]
     pub restart_debounce_secs: u64,
+    #[serde(default)]
+    pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
 }
 
 fn default_group_priority() -> u32 {
@@ -383,6 +391,7 @@ impl ProgramConfig {
             restart_signal_when_file_changed: None,
             restart_cmd_when_file_changed: None,
             restart_debounce_secs: default_restart_debounce_secs(),
+            event_listener: None,
         }
     }
 

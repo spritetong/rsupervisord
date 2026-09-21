@@ -28,6 +28,8 @@ pub struct ServerConfig {
     pub password: Option<String>,
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub identifier: Option<String>,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -45,6 +47,7 @@ impl Default for ServerConfig {
             auth_token: None,
             username: None,
             password: None,
+            identifier: None,
         }
     }
 }
@@ -209,6 +212,10 @@ pub struct ProgramLogsConfigRaw {
     pub backups: Option<usize>,
     #[serde(default)]
     pub redirect_stderr: Option<bool>,
+    #[serde(default)]
+    pub stdout_events_enabled: Option<bool>,
+    #[serde(default)]
+    pub stderr_events_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +290,10 @@ pub struct ProgramConfigRaw {
     pub restart_cmd_when_file_changed: Option<String>,
     #[serde(default)]
     pub restart_debounce_secs: Option<u64>,
+    #[serde(default)]
+    pub stdout_events_enabled: Option<bool>,
+    #[serde(default)]
+    pub stderr_events_enabled: Option<bool>,
 }
 
 /// Process group configuration definition.
@@ -312,6 +323,8 @@ pub struct SupervisorConfig {
     pub groups: HashMap<String, GroupConfigRaw>,
     #[serde(default)]
     pub programs: HashMap<String, ProgramConfigRaw>,
+    #[serde(default)]
+    pub event_listeners: HashMap<String, crate::eventlistener::EventListenerConfigRaw>,
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
 }
@@ -326,6 +339,7 @@ impl Default for SupervisorConfig {
             program_defaults: ProgramDefaults::default(),
             groups: HashMap::new(),
             programs: HashMap::new(),
+            event_listeners: HashMap::new(),
             config_dir: None,
         };
         config.apply_default_paths();
@@ -502,6 +516,28 @@ impl SupervisorConfig {
                         group_name, prog
                     )));
                 }
+            }
+        }
+
+        for (listener_name, listener_cfg) in &self.event_listeners {
+            if listener_cfg.command.trim().is_empty() {
+                return Err(ProgramError::ConfigError(format!(
+                    "EventListener '{}' command cannot be empty",
+                    listener_name
+                )));
+            }
+            crate::eventlistener::validate_event_list(&listener_cfg.events)?;
+            if listener_cfg.buffer_size < 1 {
+                return Err(ProgramError::ConfigError(format!(
+                    "EventListener '{}' buffer_size must be >= 1",
+                    listener_name
+                )));
+            }
+            if listener_cfg.redirect_stderr == Some(true) {
+                return Err(ProgramError::ConfigError(format!(
+                    "EventListener '{}' redirect_stderr cannot be true (violates wire protocol)",
+                    listener_name
+                )));
             }
         }
 
@@ -778,6 +814,16 @@ impl SupervisorConfig {
                         .or_else(|| def_logs.and_then(|l| l.redirect_stderr))
                         .unwrap_or(false);
 
+                    let stdout_events_enabled = raw_logs
+                        .and_then(|l| l.stdout_events_enabled)
+                        .or(raw.stdout_events_enabled)
+                        .unwrap_or(false);
+
+                    let stderr_events_enabled = raw_logs
+                        .and_then(|l| l.stderr_events_enabled)
+                        .or(raw.stderr_events_enabled)
+                        .unwrap_or(false);
+
                     ProgramLogsConfig {
                         enabled,
                         stdout,
@@ -785,6 +831,8 @@ impl SupervisorConfig {
                         max_bytes,
                         backups,
                         redirect_stderr,
+                        stdout_events_enabled,
+                        stderr_events_enabled,
                     }
                 };
 
@@ -945,11 +993,194 @@ impl SupervisorConfig {
                     restart_signal_when_file_changed,
                     restart_cmd_when_file_changed,
                     restart_debounce_secs,
+                    event_listener: None,
                 };
 
                 if resolved.contains_key(instance_name) {
                     return Err(ProgramError::ConfigError(format!(
                         "Duplicate program instance name '{}' produced during expansion",
+                        instance_name
+                    )));
+                }
+
+                resolved.insert(instance_name.clone(), prog);
+            }
+        }
+
+        // Phase 3: Resolve event listener pools into ProgramConfig instances
+        for (listener_name, raw) in &self.event_listeners {
+            let numprocs = raw.numprocs.unwrap_or(1);
+            let numprocs_start = raw.numprocs_start.unwrap_or(0);
+            let process_name_template = raw.process_name.as_ref();
+            let group = listener_name.clone();
+
+            let priority = if raw.priority < 0 {
+                0
+            } else {
+                raw.priority as u32
+            };
+            let autostart = raw.autostart.unwrap_or(true);
+            let autorestart = raw.autorestart.unwrap_or_default();
+            let start_secs = raw.start_secs.unwrap_or(1);
+            let start_retries = raw.start_retries.unwrap_or(3);
+            let stop_signal = raw.stop_signal.unwrap_or_default();
+            let stop_wait_secs = raw.stop_wait_secs.unwrap_or(10);
+            let group_priority = 0;
+
+            let mut instances = Vec::with_capacity(numprocs);
+            if numprocs == 1 && process_name_template.is_none() {
+                instances.push(listener_name.clone());
+            } else {
+                for idx in 0..numprocs {
+                    let process_num = numprocs_start + idx;
+                    let instance_name = if let Some(template) = process_name_template {
+                        let expr = crate::config::expand::StringExpression::with_config_dir(
+                            self.config_dir
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new(".")),
+                        )
+                        .with_program_context(
+                            listener_name,
+                            &group,
+                            process_num,
+                            numprocs,
+                        );
+                        expr.eval_named(template, "process_name")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?
+                    } else {
+                        format!("{}:{}", listener_name, process_num)
+                    };
+                    instances.push(instance_name);
+                }
+            }
+
+            for (idx, instance_name) in instances.iter().enumerate() {
+                let process_num = numprocs_start + idx;
+                let mut expr = crate::config::expand::StringExpression::with_config_dir(
+                    self.config_dir
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(".")),
+                )
+                .with_program_context(listener_name, &group, process_num, numprocs);
+
+                for (k, v) in &raw.environment {
+                    expr.add(format!("ENV_{}", k), v);
+                }
+
+                let raw_cmd = expr
+                    .eval_named(&raw.command, "command")
+                    .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+
+                let (command, args) = if raw.args.is_empty() {
+                    if std::path::Path::new(&raw_cmd).is_file() {
+                        (raw_cmd, Vec::new())
+                    } else {
+                        match shell_words::split(&raw_cmd) {
+                            Ok(mut parts) if !parts.is_empty() => {
+                                let cmd = parts.remove(0);
+                                (cmd, parts)
+                            }
+                            _ => (raw_cmd, Vec::new()),
+                        }
+                    }
+                } else {
+                    let mut evaled_args = Vec::with_capacity(raw.args.len());
+                    for a in &raw.args {
+                        let evaled_a = expr
+                            .eval_named(a, "args")
+                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                        evaled_args.push(evaled_a);
+                    }
+                    (raw_cmd, evaled_args)
+                };
+
+                let directory = if let Some(ref dir) = raw.directory {
+                    let dir_str = dir.to_string_lossy();
+                    let evaled_dir = expr
+                        .eval_named(&dir_str, "directory")
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    Some(PathBuf::from(evaled_dir))
+                } else {
+                    None
+                };
+
+                let mut environment = HashMap::new();
+                for (k, v) in &raw.environment {
+                    let evaled_val = expr
+                        .eval_named(v, &format!("environment.{}", k))
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    environment.insert(k.clone(), evaled_val);
+                }
+
+                let stderr = if let Some(ref raw_stderr) = raw.stderr_logfile {
+                    let stderr_str = raw_stderr.to_string_lossy();
+                    let evaled = expr
+                        .eval_named(&stderr_str, "stderr_logfile")
+                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+                    Some(PathBuf::from(evaled))
+                } else {
+                    None
+                };
+
+                let logs = ProgramLogsConfig {
+                    enabled: true,
+                    stdout: None, // stdout is reserved for the wire protocol
+                    stderr,
+                    max_bytes: None,
+                    backups: None,
+                    redirect_stderr: false,
+                    stdout_events_enabled: false,
+                    stderr_events_enabled: false,
+                };
+
+                let event_listener = Some(crate::eventlistener::EventListenerConfig::new(
+                    listener_name.clone(),
+                    raw.events.clone(),
+                    raw.buffer_size,
+                    raw.result_handler.clone(),
+                ));
+
+                let prog = ProgramConfig {
+                    name: instance_name.clone(),
+                    command,
+                    args,
+                    directory,
+                    user: raw.user.clone(),
+                    environment,
+                    priority,
+                    depends_on: Vec::new(),
+                    autostart,
+                    autorestart,
+                    start_secs,
+                    start_retries,
+                    stop_signal,
+                    stop_wait_secs,
+                    exit_codes: vec![0],
+                    umask: raw.umask,
+                    logs,
+                    health_check: None,
+                    group: group.clone(),
+                    group_priority,
+                    cron: None,
+                    cron_stop: None,
+                    pre_start: None,
+                    pre_stop: None,
+                    pre_start_ignore_failure: false,
+                    hook_timeout_secs: 15,
+                    restart_when_binary_changed: false,
+                    restart_signal_when_binary_changed: None,
+                    restart_cmd_when_binary_changed: None,
+                    restart_directory_monitor: None,
+                    restart_file_pattern: None,
+                    restart_signal_when_file_changed: None,
+                    restart_cmd_when_file_changed: None,
+                    restart_debounce_secs: 5,
+                    event_listener,
+                };
+
+                if resolved.contains_key(instance_name) {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Duplicate program/eventlistener instance name '{}'",
                         instance_name
                     )));
                 }

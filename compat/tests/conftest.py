@@ -276,6 +276,10 @@ def _launch_rsupervisord() -> Instance:
         script = root / name
         script.write_text(body)
         script.chmod(0o755)
+    for script_name in ("listener.py", "badlistener.py"):
+        src = CONF_SRC / script_name
+        if src.exists():
+            shutil.copy2(src, root / script_name)
 
     uds = root / "rsupervisord.sock"
     port = _free_port()

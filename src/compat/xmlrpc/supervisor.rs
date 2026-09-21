@@ -31,7 +31,9 @@ pub async fn handle_supervisor_method(
             Ok(Value::String("3.0".to_string()))
         }
         "supervisor.getSupervisorVersion" => Ok(Value::String("4.2.5".to_string())),
-        "supervisor.getIdentification" => Ok(Value::String("rsupervisord-compat".to_string())),
+        "supervisor.getIdentification" => {
+            Ok(Value::String(ctx.manager.server_identifier().to_string()))
+        }
         "supervisor.getPID" => Ok(Value::Int(std::process::id() as i32)),
         "supervisor.getState" => {
             let mut map = BTreeMap::new();
@@ -272,7 +274,10 @@ pub async fn handle_supervisor_method(
             "FAILED: removeProcessGroup at runtime is not supported",
         )),
         "supervisor.sendRemoteCommEvent" => {
-            Err(Fault::failed("FAILED: event listener is disabled"))
+            let type_str = get_str_param(params, 0, "type string required")?;
+            let data = get_str_param(params, 1, "data string required")?;
+            ctx.manager.send_remote_comm_event(type_str, data);
+            Ok(Value::Boolean(true))
         }
 
         _ => Err(Fault::unknown_method(method)),
@@ -778,8 +783,14 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
 
         map.insert("stdout_capture_maxbytes".to_string(), Value::Int(0));
         map.insert("stderr_capture_maxbytes".to_string(), Value::Int(0));
-        map.insert("stdout_events_enabled".to_string(), Value::Boolean(false));
-        map.insert("stderr_events_enabled".to_string(), Value::Boolean(false));
+        map.insert(
+            "stdout_events_enabled".to_string(),
+            Value::Boolean(cfg.logs.stdout_events_enabled),
+        );
+        map.insert(
+            "stderr_events_enabled".to_string(),
+            Value::Boolean(cfg.logs.stderr_events_enabled),
+        );
         map.insert("stdout_syslog".to_string(), Value::Boolean(false));
         map.insert("stderr_syslog".to_string(), Value::Boolean(false));
         map.insert("serverurl".to_string(), Value::String("none".to_string()));

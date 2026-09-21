@@ -970,15 +970,14 @@ impl ProgramActor {
 
         let stdout_pump = if !stdout_disabled {
             stdout.map(|pipe| {
-                crate::logging::spawn_log_pump(
-                    pipe,
-                    self.ring_buffer.clone(),
-                    self.stdout_rotator.clone(),
-                    None,
-                    Some(self.event_hub.clone()),
-                    Some(self.config.name.clone()),
-                    "stdout",
-                )
+                crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stdout")
+                    .with_rotator(self.stdout_rotator.clone())
+                    .with_event_hub(Some(self.event_hub.clone()))
+                    .with_program_name(Some(self.config.name.clone()))
+                    .with_group_name(Some(self.config.group.clone()))
+                    .with_pid(Some(pid))
+                    .with_events_enabled(self.config.logs.stdout_events_enabled)
+                    .spawn()
             })
         } else {
             None
@@ -992,15 +991,15 @@ impl ProgramActor {
 
         let stderr_pump = if !stderr_disabled {
             stderr.map(|pipe| {
-                crate::logging::spawn_log_pump(
-                    pipe,
-                    self.ring_buffer.clone(),
-                    self.stderr_rotator.clone(),
-                    stderr_prefix,
-                    Some(self.event_hub.clone()),
-                    Some(self.config.name.clone()),
-                    "stderr",
-                )
+                crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stderr")
+                    .with_rotator(self.stderr_rotator.clone())
+                    .with_ring_prefix(stderr_prefix)
+                    .with_event_hub(Some(self.event_hub.clone()))
+                    .with_program_name(Some(self.config.name.clone()))
+                    .with_group_name(Some(self.config.group.clone()))
+                    .with_pid(Some(pid))
+                    .with_events_enabled(self.config.logs.stderr_events_enabled)
+                    .spawn()
             })
         } else {
             None
@@ -1343,10 +1342,12 @@ impl ProgramActor {
             self.event_hub
                 .publish_system(crate::manager::SystemEvent::StateChanged {
                     name: self.config.name.clone(),
+                    group: self.config.group.clone(),
                     old_state,
                     new_state: state,
                     pid,
                     exit_code,
+                    tries: self.retry_count,
                     description,
                 });
         }

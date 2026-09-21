@@ -74,6 +74,9 @@ pub fn adapt_ini_to_config(
         if let Some(level) = sec.get("loglevel") {
             config.logging.level = level.to_ascii_lowercase();
         }
+        if let Some(ident) = sec.get("identifier") {
+            config.server.identifier = Some(ident.clone());
+        }
         if let Some(env_str) = sec.get("environment")
             && let Ok(env_map) = parse_environment(env_str)
         {
@@ -112,11 +115,11 @@ pub fn adapt_ini_to_config(
             || section_name == "program-default"
         {
             // Already handled or standard ignored section
-        } else if section_name.starts_with("eventlistener:") {
-            tracing::warn!(
-                "Section '[{}]' encountered: eventlistener is not yet implemented, ignoring",
-                section_name
-            );
+        } else if let Some(pool_name) = section_name.strip_prefix("eventlistener:") {
+            if let Some(sec) = ini.sections.get(section_name) {
+                let el_cfg = parse_event_listener_config(pool_name, sec)?;
+                config.event_listeners.insert(pool_name.to_string(), el_cfg);
+            }
         } else if section_name.starts_with("fcgi-program:") {
             tracing::warn!(
                 "Section '[{}]' encountered: fcgi-program is not supported, ignoring",
@@ -263,11 +266,22 @@ fn parse_program_config(
             ))
         })?;
 
+    let stdout_events_enabled = sec
+        .get("stdout_events_enabled")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
+    let stderr_events_enabled = sec
+        .get("stderr_events_enabled")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
+
     let logs = if stdout_path.is_some()
         || stderr_path.is_some()
         || max_bytes.is_some()
         || backups.is_some()
         || redirect_stderr.is_some()
+        || stdout_events_enabled.is_some()
+        || stderr_events_enabled.is_some()
     {
         Some(ProgramLogsConfigRaw {
             enabled: Some(true),
@@ -276,6 +290,8 @@ fn parse_program_config(
             max_bytes,
             backups,
             redirect_stderr,
+            stdout_events_enabled,
+            stderr_events_enabled,
         })
     } else {
         None
@@ -377,6 +393,186 @@ fn parse_program_config(
         restart_signal_when_file_changed,
         restart_cmd_when_file_changed,
         restart_debounce_secs,
+        stdout_events_enabled,
+        stderr_events_enabled,
+    })
+}
+
+fn parse_event_listener_config(
+    pool_name: &str,
+    sec: &HashMap<String, String>,
+) -> Result<crate::eventlistener::EventListenerConfigRaw, ProgramError> {
+    let command = sec.get("command").cloned().ok_or_else(|| {
+        ProgramError::ConfigError(format!(
+            "EventListener '{}' missing required 'command' field",
+            pool_name
+        ))
+    })?;
+
+    let events_str = sec.get("events").ok_or_else(|| {
+        ProgramError::ConfigError(format!(
+            "EventListener '{}' missing required 'events' field",
+            pool_name
+        ))
+    })?;
+
+    let events: Vec<String> = events_str
+        .split(&[',', ' ', '\t'][..])
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    crate::eventlistener::validate_event_list(&events)?;
+
+    let buffer_size = sec
+        .get("buffer_size")
+        .or_else(|| sec.get("buffersize"))
+        .map(|s| s.parse::<usize>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid buffer_size: {}",
+                pool_name, e
+            ))
+        })?
+        .unwrap_or(10);
+    if buffer_size < 1 {
+        return Err(ProgramError::ConfigError(format!(
+            "EventListener '{}' buffer_size must be >= 1",
+            pool_name
+        )));
+    }
+
+    let redirect_stderr = sec
+        .get("redirect_stderr")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
+    if redirect_stderr == Some(true) {
+        return Err(ProgramError::ConfigError(format!(
+            "EventListener '{}' redirect_stderr cannot be true (violates wire protocol)",
+            pool_name
+        )));
+    }
+
+    let result_handler = sec
+        .get("result_handler")
+        .cloned()
+        .unwrap_or_else(|| "supervisor.dispatchers:default_handler".to_string());
+
+    let priority = sec
+        .get("priority")
+        .map(|s| s.parse::<i32>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid priority: {}",
+                pool_name, e
+            ))
+        })?
+        .unwrap_or(-1);
+
+    let autostart = sec
+        .get("autostart")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
+    let autorestart = sec
+        .get("autorestart")
+        .map(|s| parse_autorestart(s))
+        .transpose()?;
+    let start_secs = sec
+        .get("startsecs")
+        .or_else(|| sec.get("start_secs"))
+        .map(|s| s.parse::<u64>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid startsecs: {}",
+                pool_name, e
+            ))
+        })?;
+    let start_retries = sec
+        .get("startretries")
+        .or_else(|| sec.get("start_retries"))
+        .map(|s| s.parse::<u32>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid startretries: {}",
+                pool_name, e
+            ))
+        })?;
+    let stop_signal = sec
+        .get("stopsignal")
+        .or_else(|| sec.get("stop_signal"))
+        .map(|s| parse_stop_signal(s))
+        .transpose()?;
+    let stop_wait_secs = sec
+        .get("stopwaitsecs")
+        .or_else(|| sec.get("stop_wait_secs"))
+        .map(|s| s.parse::<u64>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid stopwaitsecs: {}",
+                pool_name, e
+            ))
+        })?;
+
+    let numprocs = sec
+        .get("numprocs")
+        .map(|s| s.parse::<usize>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid numprocs: {}",
+                pool_name, e
+            ))
+        })?;
+    let numprocs_start = sec
+        .get("numprocs_start")
+        .map(|s| s.parse::<usize>())
+        .transpose()
+        .map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "EventListener '{}' invalid numprocs_start: {}",
+                pool_name, e
+            ))
+        })?;
+    let process_name = sec.get("process_name").cloned();
+
+    let directory = sec.get("directory").map(PathBuf::from);
+    let user = sec.get("user").cloned();
+    let umask = sec.get("umask").map(|s| parse_umask(s)).transpose()?;
+    let environment = if let Some(env_str) = sec.get("environment") {
+        parse_environment(env_str)?
+    } else {
+        HashMap::new()
+    };
+    let stdout_logfile = sec.get("stdout_logfile").and_then(|s| parse_log_path(s));
+    let stderr_logfile = sec.get("stderr_logfile").and_then(|s| parse_log_path(s));
+
+    Ok(crate::eventlistener::EventListenerConfigRaw {
+        command,
+        args: Vec::new(),
+        events,
+        buffer_size,
+        result_handler,
+        priority,
+        numprocs,
+        numprocs_start,
+        process_name,
+        autostart,
+        autorestart,
+        start_secs,
+        start_retries,
+        stop_signal,
+        stop_wait_secs,
+        directory,
+        user,
+        environment,
+        umask,
+        stdout_logfile,
+        stderr_logfile,
+        redirect_stderr,
     })
 }
 
@@ -448,12 +644,22 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         .get("redirect_stderr")
         .map(|s| parse_loose_bool(s))
         .transpose()?;
+    let stdout_events_enabled = sec
+        .get("stdout_events_enabled")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
+    let stderr_events_enabled = sec
+        .get("stderr_events_enabled")
+        .map(|s| parse_loose_bool(s))
+        .transpose()?;
 
     let logs = if stdout_path.is_some()
         || stderr_path.is_some()
         || max_bytes.is_some()
         || backups.is_some()
         || redirect_stderr.is_some()
+        || stdout_events_enabled.is_some()
+        || stderr_events_enabled.is_some()
     {
         Some(ProgramLogsConfigRaw {
             enabled: Some(true),
@@ -462,6 +668,8 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
             max_bytes,
             backups,
             redirect_stderr,
+            stdout_events_enabled,
+            stderr_events_enabled,
         })
     } else {
         None

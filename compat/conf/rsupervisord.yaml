@@ -19,9 +19,11 @@ worker_threads: 2
 server:
   uds_path: "__UDS__"
   http_bind: "127.0.0.1:__HTTP__"
+  identifier: "rsupervisord-compat"
 
 logging:
-  enabled: false
+  enabled: true
+  file: "__LOGDIR__/supervisord.log"
   level: "info"
 
 program_defaults:
@@ -67,6 +69,8 @@ programs:
     logs:
       stdout: "__LOGDIR__/ticker.log"
       stderr: "__LOGDIR__/ticker.err.log"
+      stdout_events_enabled: true
+      stderr_events_enabled: true
 
   catx:
     command: "/bin/cat"
@@ -96,3 +100,21 @@ programs:
     command: "/nonexistent/does-not-exist-binary"
     autostart: false
     autorestart: never
+
+event_listeners:
+  listener:
+    command: "python3 __CFGDIR__/listener.py __CFGDIR__/logs/events.log"
+    events:
+      - PROCESS_STATE
+      - PROCESS_LOG
+      - TICK_5
+      - REMOTE_COMMUNICATION
+    autostart: true
+
+  badlistener:
+    command: "python3 __CFGDIR__/badlistener.py"
+    events:
+      - PROCESS_LOG
+      - TICK_5
+    buffer_size: 10
+    autostart: true

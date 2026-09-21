@@ -6,6 +6,8 @@
 use crate::config::diff::ConfigDiff;
 use crate::config::schema::SupervisorConfig;
 use crate::error::ProgramError;
+use crate::eventlistener::pool::EventListenerPool;
+use crate::eventlistener::program::EventListenerProgram;
 use crate::manager::dag::DependencyGraph;
 use crate::program::config::{ProgramConfig, StopSignal};
 use crate::program::process::ProcessProgram;
@@ -111,6 +113,7 @@ pub struct ManagerHandle {
     cancel_token: CancellationToken,
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
+    server_identifier: String,
 }
 
 impl ManagerHandle {
@@ -124,7 +127,12 @@ impl ManagerHandle {
             cancel_token,
             activity_tracker: crate::manager::ActivityTracker::default(),
             event_hub: crate::manager::EventHub::default(),
+            server_identifier: "rsupervisord-compat".to_string(),
         }
+    }
+
+    pub fn server_identifier(&self) -> &str {
+        &self.server_identifier
     }
 
     pub fn activity_tracker(&self) -> &crate::manager::ActivityTracker {
@@ -147,6 +155,15 @@ impl ManagerHandle {
 
     pub fn subscribe_all_logs(&self) -> tokio::sync::broadcast::Receiver<crate::manager::LogEntry> {
         self.event_hub.subscribe_logs()
+    }
+
+    pub fn send_remote_comm_event(&self, type_str: &str, data: &str) -> bool {
+        self.event_hub
+            .publish_system(crate::manager::SystemEvent::RemoteCommunication {
+                type_str: type_str.to_string(),
+                data: data.to_string(),
+            });
+        true
     }
 
     pub async fn start_program(&self, name: impl Into<String>) -> Result<(), ProgramError> {
@@ -657,26 +674,89 @@ impl SupervisorManagerBuilder {
         });
         let event_hub = self.event_hub.unwrap_or_default();
 
-        let mut programs = HashMap::new();
-        for (name, cfg) in &programs_map {
-            let prog = ProcessProgram::with_options(
-                cfg.clone(),
-                activity_tracker.clone(),
-                event_hub.clone(),
-            )?;
-            programs.insert(name.clone(), Box::new(prog) as Box<dyn Program>);
-        }
-
         let cancel_token = self.cancel_token.unwrap_or_default();
         let (command_tx, command_rx) = mpsc::channel(64);
         let cron_table = crate::manager::cron::CronTable::from_configs(&programs_map);
+
+        let server_identifier = self
+            .config
+            .server
+            .identifier
+            .as_deref()
+            .unwrap_or("rsupervisord-compat")
+            .to_string();
 
         let handle = ManagerHandle {
             command_tx,
             cancel_token: cancel_token.clone(),
             activity_tracker: activity_tracker.clone(),
             event_hub: event_hub.clone(),
+            server_identifier: server_identifier.clone(),
         };
+
+        let mut event_pools = HashMap::new();
+        let mut programs = HashMap::new();
+        for (name, cfg) in &programs_map {
+            let prog = instantiate_program(
+                cfg,
+                &server_identifier,
+                &activity_tracker,
+                &event_hub,
+                &cancel_token,
+                &mut event_pools,
+            )?;
+            programs.insert(name.clone(), prog);
+        }
+
+        // Spawn periodic ticker task for TICK_5, TICK_60, TICK_3600
+        let ticker_cancel = cancel_token.clone();
+        let ticker_hub = event_hub.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_5 = 0u64;
+            let mut last_60 = 0u64;
+            let mut last_3600 = 0u64;
+
+            loop {
+                tokio::select! {
+                    _ = ticker_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(d) => d.as_secs(),
+                            Err(_) => 0,
+                        };
+
+                        let sec_5 = now / 5;
+                        if sec_5 != last_5 {
+                            last_5 = sec_5;
+                            ticker_hub.publish_system(crate::manager::SystemEvent::Tick {
+                                interval: 5,
+                                when: now,
+                            });
+                        }
+
+                        let sec_60 = now / 60;
+                        if sec_60 != last_60 {
+                            last_60 = sec_60;
+                            ticker_hub.publish_system(crate::manager::SystemEvent::Tick {
+                                interval: 60,
+                                when: now,
+                            });
+                        }
+
+                        let sec_3600 = now / 3600;
+                        if sec_3600 != last_3600 {
+                            last_3600 = sec_3600;
+                            ticker_hub.publish_system(crate::manager::SystemEvent::Tick {
+                                interval: 3600,
+                                when: now,
+                            });
+                        }
+                    }
+                }
+            }
+        });
 
         let watch_handle = crate::manager::WatchService::spawn(
             handle.clone(),
@@ -695,6 +775,8 @@ impl SupervisorManagerBuilder {
             event_hub,
             cancel_token: cancel_token.clone(),
             is_shutting_down: false,
+            event_pools,
+            server_identifier,
         };
 
         let actor_handle = tokio::spawn(actor.run());
@@ -748,6 +830,8 @@ struct ManagerActor {
     event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
     is_shutting_down: bool,
+    event_pools: HashMap<String, EventListenerPool>,
+    server_identifier: String,
 }
 
 impl ManagerActor {
@@ -1217,34 +1301,38 @@ impl ManagerActor {
                 let _ = prog.shutdown().await;
             }
 
-            let new_prog = ProcessProgram::with_options(
-                new_cfg.clone(),
-                self.activity_tracker.clone(),
-                self.event_hub.clone(),
+            let new_prog = instantiate_program(
+                &new_cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut self.event_pools,
             )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }
 
-            self.programs
-                .insert(name.clone(), Box::new(new_prog) as Box<dyn Program>);
+            self.programs.insert(name.clone(), new_prog);
             self.configs.insert(name.clone(), new_cfg);
         }
 
         // 3. Added programs: instantiate, register, and start if autostart
         for new_cfg in diff.added {
             let name = &new_cfg.name;
-            let new_prog = ProcessProgram::with_options(
-                new_cfg.clone(),
-                self.activity_tracker.clone(),
-                self.event_hub.clone(),
+            let new_prog = instantiate_program(
+                &new_cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut self.event_pools,
             )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }
 
-            self.programs
-                .insert(name.clone(), Box::new(new_prog) as Box<dyn Program>);
+            self.programs.insert(name.clone(), new_prog);
             self.configs.insert(name.clone(), new_cfg);
         }
 
@@ -1334,5 +1422,36 @@ impl ManagerActor {
                 }
             }
         }
+    }
+}
+
+fn instantiate_program(
+    cfg: &ProgramConfig,
+    server_identifier: &str,
+    activity_tracker: &crate::manager::ActivityTracker,
+    event_hub: &crate::manager::EventHub,
+    cancel_token: &CancellationToken,
+    event_pools: &mut HashMap<String, EventListenerPool>,
+) -> Result<Box<dyn Program>, ProgramError> {
+    if let Some(ref el_cfg) = cfg.event_listener {
+        let pool = event_pools
+            .entry(el_cfg.pool_name.clone())
+            .or_insert_with(|| {
+                let pool = EventListenerPool::new(
+                    &el_cfg.pool_name,
+                    server_identifier,
+                    el_cfg.events.clone(),
+                    el_cfg.buffer_size,
+                    cancel_token.clone(),
+                );
+                pool.spawn_event_hub_listener(event_hub.clone());
+                pool
+            });
+        let prog = EventListenerProgram::new(cfg.clone(), pool.clone(), cancel_token.clone())?;
+        Ok(Box::new(prog) as Box<dyn Program>)
+    } else {
+        let prog =
+            ProcessProgram::with_options(cfg.clone(), activity_tracker.clone(), event_hub.clone())?;
+        Ok(Box::new(prog) as Box<dyn Program>)
     }
 }

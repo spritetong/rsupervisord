@@ -9,6 +9,7 @@ pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod error;
+pub mod eventlistener;
 pub mod logging;
 pub mod manager;
 pub mod platform;

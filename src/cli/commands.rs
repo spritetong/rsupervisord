@@ -315,6 +315,7 @@ pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
                         pid,
                         exit_code,
                         description,
+                        ..
                     } => {
                         let pid_str = pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
                         let exit_str = exit_code
@@ -435,6 +436,12 @@ pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
                             "ProcessPreStopFailed".red().bold(),
                             error
                         );
+                    }
+                    crate::manager::SystemEvent::Tick { interval, when } => {
+                        println!("Tick: interval={}s at {}", interval, when);
+                    }
+                    crate::manager::SystemEvent::RemoteCommunication { type_str, data } => {
+                        println!("RemoteCommunication: type={} len={}", type_str, data.len());
                     }
                 }
             } else {

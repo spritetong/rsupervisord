@@ -145,6 +145,8 @@ async fn test_process_stdout_file_logging_and_rotation() {
         max_bytes: Some("25B".to_string()), // Low threshold to force rotation
         backups: Some(3),
         redirect_stderr: true,
+        stdout_events_enabled: false,
+        stderr_events_enabled: false,
     };
 
     let program = ProcessProgram::new(config).unwrap();
