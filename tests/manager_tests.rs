@@ -21,6 +21,17 @@ fn get_sleep_cmd(secs: u64) -> String {
     }
 }
 
+fn get_exit_cmd(code: i32) -> String {
+    #[cfg(unix)]
+    {
+        format!("sh -c 'exit {}'", code)
+    }
+    #[cfg(windows)]
+    {
+        format!("cmd.exe /C exit {}", code)
+    }
+}
+
 #[tokio::test]
 async fn test_manager_start_and_stop_all() {
     let yaml = format!(
@@ -260,4 +271,47 @@ programs:
 
     handle.stop_all(None).await.expect("stop all");
     manager.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_manager_shutdown_cancels_backoff_programs() {
+    let yaml = format!(
+        r#"
+programs:
+  failing_prog:
+    command: "{cmd}"
+    autostart: true
+    start_secs: 3
+    start_retries: 5
+"#,
+        cmd = get_exit_cmd(1),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    handle.start_all().await.expect("start all");
+
+    // Wait until program enters Backoff
+    let mut in_backoff = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if let Ok(st) = handle.get_status("failing_prog").await
+            && st.state == ProgramState::Backoff
+        {
+            in_backoff = true;
+            break;
+        }
+    }
+    assert!(in_backoff, "Program should enter Backoff");
+
+    // Manager shutdown must cleanly stop programs in Backoff and not hang
+    let start = std::time::Instant::now();
+    manager.shutdown().await.expect("manager shutdown");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "Shutdown took too long: {:?}",
+        start.elapsed()
+    );
 }

@@ -9,7 +9,7 @@ use crate::error::ProgramError;
 use crate::manager::dag::DependencyGraph;
 use crate::program::config::ProgramConfig;
 use crate::program::process::ProcessProgram;
-use crate::program::state::ProgramStatus;
+use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -419,6 +419,7 @@ impl SupervisorManager {
             activity_tracker: activity_tracker.clone(),
             event_hub: event_hub.clone(),
             cancel_token: cancel_token.clone(),
+            is_shutting_down: false,
         };
 
         let actor_handle = tokio::spawn(actor.run());
@@ -460,6 +461,7 @@ struct ManagerActor {
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
+    is_shutting_down: bool,
 }
 
 impl ManagerActor {
@@ -469,6 +471,7 @@ impl ManagerActor {
                 biased;
 
                 _ = self.cancel_token.cancelled() => {
+                    self.is_shutting_down = true;
                     self.execute_stop_all(None).await;
                     break;
                 }
@@ -476,28 +479,44 @@ impl ManagerActor {
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
                         ManagerCommand::StartProgram { name, reply } => {
-                            let res = self.execute_start_program(&name).await;
-                            let _ = reply.send(res);
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
+                            } else {
+                                let res = self.execute_start_program(&name).await;
+                                let _ = reply.send(res);
+                            }
                         }
                         ManagerCommand::StopProgram { name, grace_period, reply } => {
                             let res = self.execute_stop_program(&name, grace_period).await;
                             let _ = reply.send(res);
                         }
                         ManagerCommand::RestartProgram { name, grace_period, reply } => {
-                            let res = self.execute_restart_program(&name, grace_period).await;
-                            let _ = reply.send(res);
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
+                            } else {
+                                let res = self.execute_restart_program(&name, grace_period).await;
+                                let _ = reply.send(res);
+                            }
                         }
                         ManagerCommand::StartAll { reply } => {
-                            let res = self.execute_start_all().await;
-                            let _ = reply.send(res);
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
+                            } else {
+                                let res = self.execute_start_all().await;
+                                let _ = reply.send(res);
+                            }
                         }
                         ManagerCommand::StopAll { grace_period, reply } => {
                             self.execute_stop_all(grace_period).await;
                             let _ = reply.send(Ok(()));
                         }
                         ManagerCommand::ReloadConfig { new_config, reply } => {
-                            let res = self.execute_reload_config(*new_config).await;
-                            let _ = reply.send(res);
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
+                            } else {
+                                let res = self.execute_reload_config(*new_config).await;
+                                let _ = reply.send(res);
+                            }
                         }
                         ManagerCommand::GetStatus { name, reply } => {
                             let res = self.programs.get(&name).map(|p| p.status()).ok_or_else(|| {
@@ -522,6 +541,7 @@ impl ManagerActor {
                             let _ = reply.send(res);
                         }
                         ManagerCommand::Shutdown { reply } => {
+                            self.is_shutting_down = true;
                             self.event_hub.publish_system(crate::manager::SystemEvent::DaemonLifecycle {
                                 action: "shutting_down".to_string(),
                                 timestamp_secs: std::time::SystemTime::now()
@@ -635,15 +655,16 @@ impl ManagerActor {
                     .map(|c| c.stop_wait_secs)
                     .unwrap_or(5);
                 let dur = grace_period.unwrap_or_else(|| Duration::from_secs(wait_secs));
-                if let Some(prog) = self.programs.get(name)
-                    && prog.status().state.is_active()
-                {
-                    let prog_name = name.clone();
-                    stop_futs.push(async move {
-                        if let Err(e) = prog.stop(dur).await {
-                            tracing::warn!("Failed to stop program '{}': {}", prog_name, e);
-                        }
-                    });
+                if let Some(prog) = self.programs.get(name) {
+                    let state = prog.status().state;
+                    if state != ProgramState::Stopped {
+                        let prog_name = name.clone();
+                        stop_futs.push(async move {
+                            if let Err(e) = prog.stop(dur).await {
+                                tracing::warn!("Failed to stop program '{}': {}", prog_name, e);
+                            }
+                        });
+                    }
                 }
             }
             if !stop_futs.is_empty() {

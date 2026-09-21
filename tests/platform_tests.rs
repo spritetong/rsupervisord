@@ -193,3 +193,42 @@ async fn test_windows_gui_wm_close_shutdown_signal() {
         "wait_for_shutdown_signal timed out on WM_CLOSE"
     );
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_gui_notepad_graceful_stop() {
+    let platform = native_platform();
+    let mut cmd = tokio::process::Command::new("notepad.exe");
+    platform
+        .configure_command(&mut cmd, None, None)
+        .expect("configure_command failed");
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Skipping test_windows_gui_notepad_graceful_stop: {}", e);
+            return;
+        }
+    };
+    let pid = child.id().expect("PID missing");
+
+    let mut guard = platform
+        .attach_child(&child, pid)
+        .expect("attach_child failed");
+
+    // Wait a brief moment for Notepad to initialize its GUI window
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Send stop signal which posts WM_CLOSE to notepad top-level window
+    guard
+        .send_stop_signal(StopSignal::default())
+        .expect("send_stop_signal failed");
+
+    // Notepad should process WM_CLOSE and exit cleanly within 5 seconds
+    let exit_status = tokio::time::timeout(Duration::from_secs(5), guard.wait_exit(&mut child))
+        .await
+        .expect("Notepad failed to exit after WM_CLOSE within 5s")
+        .expect("child wait_exit failed");
+
+    assert!(exit_status.success() || exit_status.code().is_some());
+}

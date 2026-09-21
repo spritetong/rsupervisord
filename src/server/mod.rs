@@ -86,7 +86,15 @@ impl ServerEngine {
             _ = set.join_next() => {}
         }
 
-        while (set.join_next().await).is_some() {}
+        // Immediately abort remaining listener tasks so blocking accepts don't stall daemon teardown
+        set.abort_all();
+
+        // Bounded drain window for gracefully completing in-flight handlers
+        let drain_timeout = std::time::Duration::from_secs(2);
+        let _ = tokio::time::timeout(drain_timeout, async {
+            while (set.join_next().await).is_some() {}
+        })
+        .await;
 
         Ok(())
     }

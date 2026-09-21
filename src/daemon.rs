@@ -196,7 +196,7 @@ pub async fn run_daemon(
 
     // Graceful teardown
     cancel_token.cancel();
-    let _ = server_handle.await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle).await;
 
     tracing::info!("Stopping all supervised processes...");
     if let Err(e) = manager.shutdown().await {

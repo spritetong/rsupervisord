@@ -47,4 +47,7 @@ pub enum ProgramError {
 
     #[error("Configuration error: {0}")]
     ConfigError(String),
+
+    #[error("Entity '{name}' is currently shutting down")]
+    ShuttingDown { name: String },
 }

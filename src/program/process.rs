@@ -261,6 +261,16 @@ impl Program for ProcessProgram {
     }
 
     async fn shutdown(&mut self) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(ProgramCommand::Shutdown { reply: reply_tx })
+            .await
+            .is_ok()
+        {
+            let timeout_dur = Duration::from_secs(self.config.stop_wait_secs + 2);
+            let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
+        }
         self.cancel_token.cancel();
         if let Some(handle) = self.actor_handle.take() {
             let _ = handle.await;
@@ -343,6 +353,7 @@ struct ProgramActor {
     current_child: Option<RunningChild>,
     retry_count: u32,
     manual_stop: bool,
+    is_shutting_down: bool,
     backoff_deadline: Option<tokio::time::Instant>,
     stdout_rotator: Option<crate::logging::LogRotator>,
     stderr_rotator: Option<crate::logging::LogRotator>,
@@ -428,6 +439,7 @@ impl ProgramActor {
             current_child: None,
             retry_count: 0,
             manual_stop: false,
+            is_shutting_down: false,
             backoff_deadline: None,
             stdout_rotator,
             stderr_rotator,
@@ -450,6 +462,9 @@ impl ProgramActor {
                 biased;
 
                 _ = self.cancel_token.cancelled() => {
+                    self.is_shutting_down = true;
+                    self.manual_stop = true;
+                    self.backoff_deadline = None;
                     self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
                     break;
                 }
@@ -542,9 +557,11 @@ impl ProgramActor {
                         Some(dl) => tokio::time::sleep_until(dl).await,
                         None => std::future::pending().await,
                     }
-                }, if self.backoff_deadline.is_some() => {
+                }, if self.backoff_deadline.is_some() && !self.is_shutting_down && !self.manual_stop => {
                     self.backoff_deadline = None;
-                    if let Err(e) = self.spawn_child().await {
+                    if self.is_shutting_down || self.manual_stop {
+                        // Suppress restart during shutdown or manual stop
+                    } else if let Err(e) = self.spawn_child().await {
                         tracing::error!(program = %self.config.name, error = %e, "Failed to spawn child after backoff");
                         self.update_status(
                             ProgramState::Fatal,
@@ -606,6 +623,13 @@ impl ProgramActor {
     async fn handle_command(&mut self, cmd: ProgramCommand) {
         match cmd {
             ProgramCommand::Start { reply } => {
+                if self.is_shutting_down {
+                    let _ = reply.send(Err(ProgramError::ShuttingDown {
+                        name: self.config.name.clone(),
+                    }));
+                    return;
+                }
+                self.manual_stop = false;
                 self.retry_count = 0;
                 self.backoff_deadline = None;
                 let res = self.spawn_child().await;
@@ -624,6 +648,12 @@ impl ProgramActor {
                 grace_period,
                 reply,
             } => {
+                if self.is_shutting_down {
+                    let _ = reply.send(Err(ProgramError::ShuttingDown {
+                        name: self.config.name.clone(),
+                    }));
+                    return;
+                }
                 self.manual_stop = true;
                 self.retry_count = 0;
                 self.backoff_deadline = None;
@@ -633,6 +663,7 @@ impl ProgramActor {
                 let _ = reply.send(res);
             }
             ProgramCommand::Shutdown { reply } => {
+                self.is_shutting_down = true;
                 self.manual_stop = true;
                 self.backoff_deadline = None;
                 self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs))
@@ -644,6 +675,12 @@ impl ProgramActor {
     }
 
     async fn spawn_child(&mut self) -> Result<(), ProgramError> {
+        if self.is_shutting_down {
+            return Err(ProgramError::ShuttingDown {
+                name: self.config.name.clone(),
+            });
+        }
+
         if let Some(ref mut child) = self.current_child {
             match child.child.try_wait() {
                 Ok(Some(_status)) => {
@@ -904,7 +941,8 @@ impl ProgramActor {
             c.drain_pumps().await;
         }
 
-        if self.manual_stop {
+        if self.is_shutting_down || self.manual_stop {
+            self.backoff_deadline = None;
             self.update_status(
                 ProgramState::Stopped,
                 None,

@@ -131,12 +131,21 @@ impl PlatformProcessGuard for WindowsProcessGuard {
 
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         match signal {
-            StopSignal::CtrlBreak | StopSignal::CtrlC => {
-                // For console-attached programs, Ctrl events can be dispatched.
-                // Otherwise fallback to terminating with clean code 0.
-                self.job.terminate(0)
+            StopSignal::Kill => self.job.terminate(1),
+            _ => {
+                let posted = post_wm_close_to_process(self.pid);
+                if posted > 0 {
+                    tracing::debug!(
+                        pid = self.pid,
+                        posted,
+                        "Posted WM_CLOSE to GUI application window(s)"
+                    );
+                    Ok(())
+                } else {
+                    // Headless / console application: terminate cleanly via Job Object with code 0
+                    self.job.terminate(0)
+                }
             }
-            _ => self.job.terminate(0),
         }
     }
 
@@ -215,6 +224,44 @@ impl PlatformProcessGuard for WindowsProcessGuard {
             })
         }
     }
+}
+
+/// Posts WM_CLOSE to all top-level windows belonging to the given process ID.
+/// Returns the number of windows to which WM_CLOSE was posted.
+pub fn post_wm_close_to_process(pid: u32) -> usize {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+    };
+
+    struct EnumContext {
+        target_pid: u32,
+        posted_count: usize,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam as *mut EnumContext) };
+        let mut proc_id: u32 = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut proc_id);
+            if proc_id == ctx.target_pid {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                ctx.posted_count += 1;
+            }
+        }
+        1
+    }
+
+    let mut ctx = EnumContext {
+        target_pid: pid,
+        posted_count: 0,
+    };
+
+    unsafe {
+        EnumWindows(Some(enum_proc), &mut ctx as *mut _ as LPARAM);
+    }
+
+    ctx.posted_count
 }
 
 /// Native Windows platform backend implementation.

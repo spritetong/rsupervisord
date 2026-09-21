@@ -340,3 +340,60 @@ async fn test_autorestart_never_startup_retries() {
     assert_eq!(program.status().state, ProgramState::Fatal);
     program.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn test_program_no_restart_during_shutdown_or_stop() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("test_always_no_restart", cmd);
+    config.args = args;
+    config.start_secs = 0;
+    config.autorestart = AutoRestartPolicy::Always; // Even with Always policy!
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    // Stop program
+    program.stop(Duration::from_secs(2)).await.expect("stop");
+    assert_eq!(program.status().state, ProgramState::Stopped);
+
+    // Wait a brief window; process must NOT restart
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        program.status().state,
+        ProgramState::Stopped,
+        "Program with AutoRestartPolicy::Always must stay Stopped after stop()"
+    );
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_program_backoff_cancelled_on_shutdown() {
+    let (cmd, args) = get_exit_command(1);
+    let mut config = ProgramConfig::new("backoff_shutdown", cmd);
+    config.args = args;
+    config.start_secs = 3;
+    config.start_retries = 3;
+    config.autorestart = AutoRestartPolicy::Always;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+
+    // Wait for crash and transition to Backoff
+    program
+        .wait_for_state(ProgramState::Backoff, Duration::from_secs(3))
+        .await
+        .expect("Program should enter Backoff");
+    assert_eq!(program.status().state, ProgramState::Backoff);
+
+    // Shutdown while in Backoff
+    let start_shutdown = std::time::Instant::now();
+    program.shutdown().await.expect("shutdown");
+    assert!(
+        start_shutdown.elapsed() < Duration::from_secs(2),
+        "Shutdown during backoff took too long: {:?}",
+        start_shutdown.elapsed()
+    );
+    assert_eq!(program.status().state, ProgramState::Stopped);
+}
