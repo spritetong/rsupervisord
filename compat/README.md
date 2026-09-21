@@ -3,8 +3,8 @@
 Executable compatibility contract for rsupervisord. The suite drives **stock
 Python Supervisor 4.2.5** (the golden oracle) and the **compiled rsupervisord
 binary** with the same test corpus, so compatibility is measured, not asserted
-by prose. See `docs/XMLRPC_COMPAT.md`, `docs/CLI_COMPAT.md` and
-`docs/SUPERVISORD_COMPAT.md` (§8).
+by prose. See `docs/XMLRPC_COMPAT.md`, `docs/CLI_COMPAT.md`,
+`docs/SUPERVISORD_COMPAT.md` (§8) and `docs/EVENTLISTENER_COMPAT.md`.
 
 > Stock Python Supervisor has **no native Windows support**. Everything here
 > runs on the Linux side, i.e. inside WSL on this project (`ubuntu22`).
@@ -47,15 +47,17 @@ The suite selects its target from the same corpus:
 
 - **native** tests (`-m native`) run only against the compiled bin.
 - **oracle** tests (`-m oracle`) need a server that speaks XML-RPC. Against the
-  compiled bin they are **capability-probed** at `/RPC2`; while XML-RPC is
-  unimplemented they are reported as **`xfail`** with a reason pointing at
-  `docs/XMLRPC_COMPAT.md`. `SUPERVISOR_STRICT=1` turns them into hard failures.
+  compiled bin they are **capability-probed** at `/RPC2`; XML-RPC is implemented,
+  so they run. The **event-listener** module is separately gated on the target
+  running `[eventlistener:*]` pools (feature #6): it is reported as **`xfail`**
+  with a reason pointing at `docs/EVENTLISTENER_COMPAT.md`.
+  `SUPERVISOR_STRICT=1` turns gated tests into hard failures.
 
 | Run | Result |
 | :--- | :--- |
-| `SUPERVISOR_TARGET=python` | 59 passed, 5 skipped |
-| default (compiled bin) | 5 passed (native), 59 xfailed (feature #5) |
-| `SUPERVISOR_STRICT=1` (compiled bin) | 5 passed, 59 errors (= the #5 backlog) |
+| `SUPERVISOR_TARGET=python` | 68 passed, 5 skipped |
+| default (compiled bin) | 64 passed, 9 xfailed (event listener, feature #6) |
+| `SUPERVISOR_STRICT=1` (compiled bin) | 64 passed, 9 errors (= the #6 backlog) |
 
 ## Layout
 
@@ -68,11 +70,13 @@ compat/
     supervisord.conf      # python target: comprehensive INI (all section classes)
     conf.d/extra.ini      # python target: [include] files = conf.d/*.ini demo
     rsupervisord.yaml     # rsupervisord target: YAML fixture (placeholders filled by conftest)
-    listener.py           # python target: protocol-correct [eventlistener] program
+    listener.py           # python target: protocol-correct [eventlistener] program (logs envelopes)
+    badlistener.py        # python target: protocol-violating [eventlistener] (UNKNOWN state)
   tests/
     conftest.py           # target dispatch: launch/teardown, XML-RPC + REST probes, CLI runners
     test_cli.py           # oracle: stock supervisorctl grammar + exit codes
     test_xmlrpc.py        # oracle: supervisor.* / system.* methods + faults
+    test_eventlistener.py # oracle: READY/RESULT protocol, event taxonomy, buffering (gated #6)
     test_zz_daemon.py     # oracle: shutdown (runs last)
     test_native_cli.py    # native: rsupervisorctl against the compiled bin
 ```
@@ -103,6 +107,10 @@ one-shot exit, long-running stdout+stderr, stdin (`sendProcessStdin`), a
   `update`.
 - **Native** (`test_native_cli.py`): `rsupervisorctl status/start/stop/restart/
   tail/stdin/reload` over the UDS.
+- **Event listener oracle** (`test_eventlistener.py`, gated #6): pool as a
+  process group, `READY`/`RESULT` envelope fields, `PROCESS_STATE_*` /
+  `PROCESS_LOG_*` / `TICK_5` / `REMOTE_COMMUNICATION` payloads, protocol
+  violation → `UNKNOWN`, and buffer overflow (`buffer_size`).
 
 ## Notes
 
