@@ -1,7 +1,7 @@
 """Functional supervisorctl (CLI) tests against stock Python Supervisor 4.2.5.
 
 Exercises the client-side command grammar, output shapes and exit codes that
-``docs/CLI_COMPAT.md`` describes.  Program ``ticker`` is in group ``services``
+``compat/docs/CLI_COMPAT.md`` describes.  Program ``ticker`` is in group ``services``
 so its namespec is ``services:ticker``.
 """
 

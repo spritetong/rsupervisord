@@ -1,6 +1,6 @@
 """Functional XML-RPC tests against stock Python Supervisor 4.2.5.
 
-These mirror the method surface documented in ``docs/XMLRPC_COMPAT.md`` and
+These mirror the method surface documented in ``compat/docs/XMLRPC_COMPAT.md`` and
 act as the golden oracle that rsupervisord must later match.
 """
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.oracle
 
 @pytest.fixture(autouse=True)
 def _require_stock_xmlrpc(require_rpc):
-    """Oracle tests need a target that serves XML-RPC (docs/XMLRPC_COMPAT.md)."""
+    """Oracle tests need a target that serves XML-RPC (compat/docs/XMLRPC_COMPAT.md)."""
 
 
 EXPECTED_PROGRAMS = {
@@ -34,7 +34,7 @@ EXPECTED_PROGRAMS = {
 
 if TARGET == "python":
     # Stock supervisor runs the event listener; rsupervisord does not model
-    # event listeners (docs/SUPERVISORD_COMPAT.md #6).
+    # event listeners (compat/docs/SUPERVISORD_COMPAT.md #6).
     EXPECTED_PROGRAMS.add("listener")
 
 REQUIRED_PROCESS_INFO_KEYS = {

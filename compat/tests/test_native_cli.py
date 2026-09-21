@@ -1,6 +1,6 @@
 """rsupervisorctl-native smoke tests against the compiled rsupervisord binary.
 
-These exercise the control surface that exists today (see ``docs/CLI_COMPAT.md``
+These exercise the control surface that exists today (see ``compat/docs/CLI_COMPAT.md``
 for how it differs from stock supervisorctl).  They run only when
 ``SUPERVISOR_TARGET=rsupervisord`` (the default).
 """

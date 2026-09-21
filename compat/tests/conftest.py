@@ -7,7 +7,7 @@ Two run targets are supported, selected by ``SUPERVISOR_TARGET``:
     with the YAML fixture ``compat/conf/rsupervisord.yaml``.  The
     ``rsupervisorctl`` binary is used for the native tests; the stock
     supervisorctl/XML-RPC oracle tests are *capability gated* and reported as
-    xfail until the corresponding features exist (see ``docs/XMLRPC_COMPAT.md``).
+    xfail until the corresponding features exist (see ``compat/docs/XMLRPC_COMPAT.md``).
 
 ``python``
     Launches stock Python Supervisor 4.2.5 from ``compat/.venv`` with the INI
@@ -74,7 +74,7 @@ START_TIMEOUT = 25.0
 
 RPC_UNSUPPORTED = (
     "rsupervisord does not serve XML-RPC yet; stock supervisorctl/XML-RPC "
-    "oracle tests are gated on it (docs/XMLRPC_COMPAT.md, feature #5)"
+    "oracle tests are gated on it (compat/docs/XMLRPC_COMPAT.md, feature #5)"
 )
 
 
