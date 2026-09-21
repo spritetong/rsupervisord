@@ -44,6 +44,7 @@ impl HealthProbeRunner {
         // 1. Initial delay grace period before probing starts
         if self.config.initial_delay_secs > 0 {
             tokio::select! {
+                biased;
                 _ = self.cancel_token.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_secs(self.config.initial_delay_secs)) => {}
             }
@@ -56,6 +57,7 @@ impl HealthProbeRunner {
 
         loop {
             tokio::select! {
+                biased;
                 _ = self.cancel_token.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {
                     let is_ok = match &self.config.check_type {

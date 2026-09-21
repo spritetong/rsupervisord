@@ -514,23 +514,51 @@ impl ManagerHandle {
     }
 }
 
-pub struct SupervisorManager {
-    handle: ManagerHandle,
-    actor_handle: Option<JoinHandle<()>>,
-    _cancel_guard: tokio_util::sync::DropGuard,
+/// Fluent builder for constructing and starting a SupervisorManager.
+pub struct SupervisorManagerBuilder {
+    config: SupervisorConfig,
+    activity_tracker: Option<crate::manager::ActivityTracker>,
+    event_hub: Option<crate::manager::EventHub>,
+    cancel_token: Option<CancellationToken>,
 }
 
-impl SupervisorManager {
-    pub fn new(initial_config: &SupervisorConfig) -> Result<Self, ProgramError> {
-        let programs_map = initial_config.resolve_programs()?;
+impl SupervisorManagerBuilder {
+    pub fn new(config: SupervisorConfig) -> Self {
+        Self {
+            config,
+            activity_tracker: None,
+            event_hub: None,
+            cancel_token: None,
+        }
+    }
+
+    pub fn with_activity_tracker(mut self, tracker: crate::manager::ActivityTracker) -> Self {
+        self.activity_tracker = Some(tracker);
+        self
+    }
+
+    pub fn with_event_hub(mut self, hub: crate::manager::EventHub) -> Self {
+        self.event_hub = Some(hub);
+        self
+    }
+
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
+    }
+
+    pub fn build(self) -> Result<SupervisorManager, ProgramError> {
+        let programs_map = self.config.resolve_programs()?;
         let dag = DependencyGraph::build(&programs_map)?;
 
-        let activity_tracker = crate::manager::ActivityTracker::with_interval(
-            initial_config.metrics.idle_timeout_secs,
-            initial_config.metrics.interval_secs,
-            initial_config.metrics.enabled,
-        );
-        let event_hub = crate::manager::EventHub::default();
+        let activity_tracker = self.activity_tracker.unwrap_or_else(|| {
+            crate::manager::ActivityTracker::with_interval(
+                self.config.metrics.idle_timeout_secs,
+                self.config.metrics.interval_secs,
+                self.config.metrics.enabled,
+            )
+        });
+        let event_hub = self.event_hub.unwrap_or_default();
 
         let mut programs = HashMap::new();
         for (name, cfg) in &programs_map {
@@ -542,7 +570,7 @@ impl SupervisorManager {
             programs.insert(name.clone(), Box::new(prog) as Box<dyn Program>);
         }
 
-        let cancel_token = CancellationToken::new();
+        let cancel_token = self.cancel_token.unwrap_or_default();
         let (command_tx, command_rx) = mpsc::channel(64);
         let cron_table = crate::manager::cron::CronTable::from_configs(&programs_map);
 
@@ -569,11 +597,28 @@ impl SupervisorManager {
 
         let cancel_guard = cancel_token.clone().drop_guard();
 
-        Ok(Self {
+        Ok(SupervisorManager {
             handle,
             actor_handle: Some(actor_handle),
             _cancel_guard: cancel_guard,
         })
+    }
+}
+
+pub struct SupervisorManager {
+    handle: ManagerHandle,
+    actor_handle: Option<JoinHandle<()>>,
+    _cancel_guard: tokio_util::sync::DropGuard,
+}
+
+impl SupervisorManager {
+    /// Returns a fluent builder for configuring and spawning a SupervisorManager.
+    pub fn builder(config: SupervisorConfig) -> SupervisorManagerBuilder {
+        SupervisorManagerBuilder::new(config)
+    }
+
+    pub fn new(initial_config: &SupervisorConfig) -> Result<Self, ProgramError> {
+        Self::builder(initial_config.clone()).build()
     }
 
     pub fn handle(&self) -> ManagerHandle {

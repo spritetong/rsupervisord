@@ -82,6 +82,42 @@ pub struct ServerAuthState {
     pub auth_token: Option<String>,
 }
 
+impl ServerAuthState {
+    /// Returns true if either Basic Auth or Bearer Token authentication is enabled.
+    #[inline]
+    pub fn is_auth_configured(&self) -> bool {
+        self.basic_auth.is_some() || self.auth_token.is_some()
+    }
+
+    /// Evaluates candidate request against configured Basic Auth and Bearer Token credentials.
+    pub fn authenticate_request(&self, req: &Request) -> bool {
+        if !self.is_auth_configured() {
+            return true;
+        }
+
+        // Check HTTP Basic Authentication if configured
+        if let Some(ref basic) = self.basic_auth
+            && let Some(auth_val) = req
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+            && let Some((u, p)) = extract_basic_auth(auth_val)
+            && basic.verify(&u, &p)
+        {
+            return true;
+        }
+
+        // Check Bearer Token if configured
+        if let Some(ref token) = self.auth_token
+            && verify_bearer_token(req, token)
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
 /// Checks whether an incoming request satisfies token authentication.
 pub fn verify_bearer_token(req: &Request, expected_token: &str) -> bool {
     if expected_token.is_empty() {
@@ -126,31 +162,17 @@ pub async fn inet_http_auth_middleware(
     next: Next,
 ) -> Response {
     // If no authentication is configured, allow all requests immediately
-    if auth_state.basic_auth.is_none() && auth_state.auth_token.is_none() {
+    if !auth_state.is_auth_configured() {
         return next.run(req).await;
     }
 
-    // 1. Check HTTP Basic Authentication if configured
-    if let Some(ref basic) = auth_state.basic_auth {
-        if let Some(auth_val) = req
-            .headers()
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            && let Some((u, p)) = extract_basic_auth(auth_val)
-            && basic.verify(&u, &p)
-        {
-            return next.run(req).await;
-        }
+    if auth_state.authenticate_request(&req) {
+        return next.run(req).await;
+    }
 
-        // If auth_token is also configured, allow requests presenting a valid Bearer token
-        if let Some(ref token) = auth_state.auth_token
-            && verify_bearer_token(&req, token)
-        {
-            return next.run(req).await;
-        }
-
-        // Unauthorized: Return 401 with standard WWW-Authenticate challenge header
-        return Response::builder()
+    // Unauthorized challenge response
+    if auth_state.basic_auth.is_some() {
+        Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
                 WWW_AUTHENTICATE,
@@ -160,23 +182,16 @@ pub async fn inet_http_auth_middleware(
             .body(axum::body::Body::from(
                 r#"{"success":false,"error":"Unauthorized: Invalid basic authentication credentials"}"#,
             ))
-            .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response());
-    }
-
-    // 2. Fallback: Only auth_token is configured
-    if let Some(ref token) = auth_state.auth_token
-        && !verify_bearer_token(&req, token)
-    {
-        return Response::builder()
+            .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response())
+    } else {
+        Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(
                 r#"{"success":false,"error":"Unauthorized: Invalid token"}"#,
             ))
-            .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response());
+            .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response())
     }
-
-    next.run(req).await
 }
 
 #[cfg(test)]

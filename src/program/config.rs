@@ -7,7 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    strum::EnumString,
+    strum::Display,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum AutoRestartPolicy {
     Always,
@@ -16,17 +31,73 @@ pub enum AutoRestartPolicy {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl AutoRestartPolicy {
+    /// Determines whether a process should restart given its exit code and list of expected exit codes.
+    #[inline]
+    pub fn should_restart(&self, exit_code: i32, expected_codes: &[i32]) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Unexpected => !expected_codes.contains(&exit_code),
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::Display,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]
 pub enum StopSignal {
+    #[strum(
+        serialize = "TERM",
+        serialize = "SIGTERM",
+        serialize = "sigterm",
+        serialize = "term"
+    )]
     #[serde(alias = "SIGTERM", alias = "TERM", alias = "sigterm", alias = "term")]
     Term,
+    #[strum(
+        serialize = "INT",
+        serialize = "SIGINT",
+        serialize = "sigint",
+        serialize = "int"
+    )]
     #[serde(alias = "SIGINT", alias = "INT", alias = "sigint", alias = "int")]
     Int,
+    #[strum(
+        serialize = "QUIT",
+        serialize = "SIGQUIT",
+        serialize = "sigquit",
+        serialize = "quit"
+    )]
     #[serde(alias = "SIGQUIT", alias = "QUIT", alias = "sigquit", alias = "quit")]
     Quit,
+    #[strum(
+        serialize = "KILL",
+        serialize = "SIGKILL",
+        serialize = "sigkill",
+        serialize = "kill"
+    )]
     #[serde(alias = "SIGKILL", alias = "KILL", alias = "sigkill", alias = "kill")]
     Kill,
+    #[strum(
+        serialize = "CTRL_BREAK",
+        serialize = "ctrl_break",
+        serialize = "ctrlbreak",
+        serialize = "CTRLBREAK"
+    )]
     #[serde(
         rename = "CTRL_BREAK",
         alias = "ctrl_break",
@@ -34,6 +105,12 @@ pub enum StopSignal {
         alias = "CTRLBREAK"
     )]
     CtrlBreak,
+    #[strum(
+        serialize = "CTRL_C",
+        serialize = "ctrl_c",
+        serialize = "ctrlc",
+        serialize = "CTRLC"
+    )]
     #[serde(rename = "CTRL_C", alias = "ctrl_c", alias = "ctrlc", alias = "CTRLC")]
     CtrlC,
 }
@@ -156,18 +233,6 @@ pub struct ProgramConfig {
     pub hook_timeout_secs: u64,
 }
 
-impl ProgramConfig {
-    /// Returns the full name including group (e.g. "group:program") if a distinct group is assigned,
-    /// or just the program name otherwise.
-    pub fn full_name(&self) -> String {
-        if !self.group.is_empty() && self.group != self.name {
-            format!("{}:{}", self.group, self.name)
-        } else {
-            self.name.clone()
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HealthCheckType {
@@ -242,6 +307,10 @@ fn default_exit_codes() -> Vec<i32> {
     vec![0]
 }
 
+pub fn default_hook_timeout_secs() -> u64 {
+    15
+}
+
 impl ProgramConfig {
     pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
         let n = name.into();
@@ -271,6 +340,58 @@ impl ProgramConfig {
             pre_stop: None,
             pre_start_ignore_failure: false,
             hook_timeout_secs: default_hook_timeout_secs(),
+        }
+    }
+
+    /// Returns the full name including group (e.g. "group:program") if a distinct group is assigned,
+    /// or just the program name otherwise.
+    pub fn full_name(&self) -> String {
+        if !self.group.is_empty() && self.group != self.name {
+            format!("{}:{}", self.group, self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// Returns true if a pre-start lifecycle hook is configured.
+    #[inline]
+    pub fn has_pre_start(&self) -> bool {
+        self.pre_start
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Returns true if a pre-stop lifecycle hook is configured.
+    #[inline]
+    pub fn has_pre_stop(&self) -> bool {
+        self.pre_stop
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Returns true if cron schedule execution is configured.
+    #[inline]
+    pub fn has_cron(&self) -> bool {
+        self.cron
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Returns true if active health checking is configured.
+    #[inline]
+    pub fn has_health_check(&self) -> bool {
+        self.health_check.is_some()
+    }
+
+    /// Returns a diagnostic formatted command string including arguments.
+    pub fn full_command(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
         }
     }
 
@@ -310,8 +431,4 @@ impl ProgramConfig {
         }
         Ok(())
     }
-}
-
-pub fn default_hook_timeout_secs() -> u64 {
-    15
 }

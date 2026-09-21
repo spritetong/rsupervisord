@@ -61,6 +61,26 @@ impl ActivityTracker {
         SseStreamGuard(self.active_observers.clone())
     }
 
+    /// Returns the duration elapsed since last recorded activity.
+    pub fn idle_duration(&self) -> Duration {
+        self.last_activity.read().elapsed()
+    }
+
+    /// Returns true if the tracker has exceeded its configured idle timeout.
+    pub fn is_idle(&self) -> bool {
+        if self.idle_timeout_secs == 0 {
+            false
+        } else {
+            self.idle_duration() >= Duration::from_secs(self.idle_timeout_secs)
+        }
+    }
+
+    /// Returns the current number of active observer streams.
+    #[inline]
+    pub fn observer_count(&self) -> usize {
+        self.active_observers.load(Ordering::Relaxed)
+    }
+
     /// Checks whether metrics collection should be active right now.
     pub fn is_metrics_active(&self) -> bool {
         if !self.enabled {
@@ -76,16 +96,19 @@ impl ActivityTracker {
     }
 
     /// Returns the configured metrics sampling interval in seconds.
+    #[inline]
     pub fn interval_secs(&self) -> u64 {
         self.interval_secs
     }
 
     /// Returns the configured idle timeout in seconds.
+    #[inline]
     pub fn idle_timeout_secs(&self) -> u64 {
         self.idle_timeout_secs
     }
 
     /// Returns whether metrics are globally enabled.
+    #[inline]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }

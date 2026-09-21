@@ -49,7 +49,7 @@ impl ServerEngine {
 
     /// Spawns and manages all configured listeners until cancel_token is triggered.
     pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
-        let router = build_router(self.state.clone());
+        let router = self.state.clone().into_router();
         let mut set = tokio::task::JoinSet::new();
 
         // 1. Local IPC listener (UDS on Unix, Named Pipe on Windows)

@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::program::config::ProgramConfig;
+use ahash::AHashSet;
 use std::collections::HashMap;
 
+/// Difference between two configuration states for hot-reloading orchestration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigDiff {
     pub added: Vec<ProgramConfig>,
@@ -15,6 +17,7 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// Computes the diff between old and new program configuration maps.
     pub fn compute(
         old_programs: &HashMap<String, ProgramConfig>,
         new_programs: &HashMap<String, ProgramConfig>,
@@ -39,8 +42,9 @@ impl ConfigDiff {
             }
         }
 
+        let new_keys: AHashSet<&str> = new_programs.keys().map(String::as_str).collect();
         for name in old_programs.keys() {
-            if !new_programs.contains_key(name) {
+            if !new_keys.contains(name.as_str()) {
                 removed.push(name.clone());
             }
         }
@@ -59,8 +63,37 @@ impl ConfigDiff {
         }
     }
 
+    /// Returns true if no configurations were added, removed, or modified.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
+    }
+
+    /// Returns true if any configurations were added, removed, or modified.
+    #[inline]
+    pub fn has_changes(&self) -> bool {
+        !self.is_empty()
+    }
+
+    /// Returns total count of added, removed, and modified programs.
+    #[inline]
+    pub fn changed_count(&self) -> usize {
+        self.added.len() + self.removed.len() + self.modified.len()
+    }
+
+    /// Returns a set of all program names affected by this diff (added, removed, or modified).
+    pub fn affected_programs(&self) -> AHashSet<&str> {
+        let mut set = AHashSet::with_capacity(self.changed_count());
+        for p in &self.added {
+            set.insert(p.name.as_str());
+        }
+        for p in &self.removed {
+            set.insert(p.as_str());
+        }
+        for p in &self.modified {
+            set.insert(p.name.as_str());
+        }
+        set
     }
 }
 
@@ -92,5 +125,13 @@ mod tests {
         assert_eq!(diff.added[0].name, "add_me");
         assert_eq!(diff.modified.len(), 1);
         assert_eq!(diff.modified[0].name, "mod_me");
+
+        assert!(diff.has_changes());
+        assert_eq!(diff.changed_count(), 3);
+        let affected = diff.affected_programs();
+        assert!(affected.contains("add_me"));
+        assert!(affected.contains("del_me"));
+        assert!(affected.contains("mod_me"));
+        assert!(!affected.contains("keep_me"));
     }
 }

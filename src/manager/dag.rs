@@ -5,6 +5,7 @@
 
 use crate::error::ProgramError;
 use crate::program::config::ProgramConfig;
+use ahash::AHashMap;
 use petgraph::graph::DiGraph;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -22,7 +23,7 @@ impl DependencyGraph {
     /// Builds the DAG, checks for circular dependencies, and computes startup & shutdown execution layers.
     pub fn build(programs: &HashMap<String, ProgramConfig>) -> Result<Self, ProgramError> {
         let mut graph = DiGraph::<String, ()>::new();
-        let mut node_indices = HashMap::new();
+        let mut node_indices = AHashMap::with_capacity(programs.len());
 
         // 1. Register all program nodes
         for name in programs.keys() {
@@ -56,8 +57,8 @@ impl DependencyGraph {
         }
 
         // 4. Compute startup layers using Kahn's algorithm (layered in-degree calculation)
-        let mut in_degrees: HashMap<String, usize> = HashMap::new();
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        let mut in_degrees: AHashMap<String, usize> = AHashMap::with_capacity(programs.len());
+        let mut adj: AHashMap<String, Vec<String>> = AHashMap::with_capacity(programs.len());
 
         for name in programs.keys() {
             in_degrees.insert(name.clone(), 0);
@@ -78,7 +79,7 @@ impl DependencyGraph {
             }
         }
 
-        let mut layers_map: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut layers_map: AHashMap<usize, Vec<String>> = AHashMap::new();
         let mut visited_count = 0;
 
         while let Some((node, layer)) = queue.pop_front() {
@@ -162,6 +163,30 @@ impl DependencyGraph {
 
         dependents
     }
+
+    /// Returns a slice of start layer program batches.
+    #[inline]
+    pub fn start_layers(&self) -> &[Vec<String>] {
+        &self.start_layers
+    }
+
+    /// Returns a slice of stop layer program batches.
+    #[inline]
+    pub fn stop_layers(&self) -> &[Vec<String>] {
+        &self.stop_layers
+    }
+
+    /// Returns the total number of dependency layers.
+    #[inline]
+    pub fn layer_count(&self) -> usize {
+        self.start_layers.len()
+    }
+
+    /// Returns true if the graph contains no programs.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.start_layers.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +218,8 @@ mod tests {
         let dag = DependencyGraph::build(&map).expect("DAG build failed");
 
         // Startup layers: Layer 0: [db, redis], Layer 1: [api], Layer 2: [web]
+        assert_eq!(dag.layer_count(), 3);
+        assert!(!dag.is_empty());
         assert_eq!(dag.start_layers.len(), 3);
         assert_eq!(
             dag.start_layers[0],

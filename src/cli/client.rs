@@ -20,7 +20,52 @@ pub struct SupervisorClient {
     basic_auth: Option<(String, String)>,
 }
 
+/// Fluent builder for constructing a SupervisorClient.
+#[derive(Debug, Clone)]
+pub struct SupervisorClientBuilder {
+    endpoint: Endpoint,
+    auth_token: Option<String>,
+    basic_auth: Option<(String, String)>,
+}
+
+impl SupervisorClientBuilder {
+    pub fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            auth_token: None,
+            basic_auth: None,
+        }
+    }
+
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_basic_auth(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.basic_auth = Some((username.into(), password.into()));
+        self
+    }
+
+    pub fn build(self) -> SupervisorClient {
+        SupervisorClient {
+            endpoint: self.endpoint,
+            auth_token: self.auth_token,
+            basic_auth: self.basic_auth,
+        }
+    }
+}
+
 impl SupervisorClient {
+    /// Returns a fluent builder for configuring and creating a SupervisorClient.
+    pub fn builder(endpoint: Endpoint) -> SupervisorClientBuilder {
+        SupervisorClientBuilder::new(endpoint)
+    }
+
     /// Creates a new client targeting the specified endpoint with an optional token.
     pub fn new(endpoint: Endpoint, auth_token: Option<String>) -> Self {
         Self {

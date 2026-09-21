@@ -3,14 +3,13 @@
 // Licensed under the MIT License.
 // SPDX-License-Identifier: MIT
 
+use crate::config::SupervisorConfig;
+use crate::manager::SupervisorManager;
+use crate::server::ServerEngine;
 use clap::Parser;
 use std::io::Write;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
-
-use crate::config::SupervisorConfig;
-use crate::manager::SupervisorManager;
-use crate::server::ServerEngine;
 
 /// Command-line arguments for the rsupervisord daemon.
 #[derive(Parser, Debug, Clone)]
@@ -61,154 +60,195 @@ pub struct DaemonArgs {
     pub service: bool,
 }
 
+/// Orchestrator for the rsupervisord daemon process lifecycle.
+pub struct SupervisorDaemon {
+    args: DaemonArgs,
+    config_path: PathBuf,
+    external_cancel: Option<CancellationToken>,
+}
+
+impl SupervisorDaemon {
+    /// Creates a new SupervisorDaemon instance for the given arguments and configuration path.
+    pub fn new(args: DaemonArgs, config_path: PathBuf) -> Self {
+        Self {
+            args,
+            config_path,
+            external_cancel: None,
+        }
+    }
+
+    /// Attaches an external cancellation token (e.g. from Windows SCM or signal handler).
+    pub fn with_external_cancel(mut self, cancel: Option<CancellationToken>) -> Self {
+        self.external_cancel = cancel;
+        self
+    }
+
+    /// Runs the supervisor daemon lifecycle to completion.
+    pub async fn run(self) -> anyhow::Result<()> {
+        let SupervisorDaemon {
+            args,
+            config_path,
+            external_cancel,
+        } = self;
+
+        if !config_path.exists() {
+            anyhow::bail!(
+                "Configuration file not found: {:?}. Please specify a valid file using -c/--config.",
+                config_path
+            );
+        }
+
+        let config = match SupervisorConfig::from_file(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to load configuration from {:?}: {}", config_path, e);
+                return Err(e.into());
+            }
+        };
+
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        // Check if logging is completely disabled
+        let is_logging_disabled = !config.logging.enabled
+            || args.loglevel.to_lowercase() == "off"
+            || config.logging.level.to_lowercase() == "off";
+
+        if is_logging_disabled {
+            let filter = tracing_subscriber::EnvFilter::new("off");
+            let _ = tracing_subscriber::registry().with(filter).try_init();
+        } else {
+            // Initialize logging subscriber with console and optional rotating file output
+            let log_level = if args.loglevel != "info" {
+                &args.loglevel
+            } else {
+                &config.logging.level
+            };
+
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+            let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+
+            if let Some(ref log_file) = config.logging.file {
+                if let Some(parent) = log_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let max_bytes = match &config.logging.max_bytes {
+                    Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
+                    None => 20 * 1024 * 1024,
+                };
+                let file_rotator = file_rotate::FileRotate::new(
+                    log_file,
+                    file_rotate::suffix::AppendCount::new(config.logging.backups),
+                    file_rotate::ContentLimit::Bytes(max_bytes),
+                    file_rotate::compression::Compression::None,
+                    None,
+                );
+                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
+                let make_writer = move || MutexWriter(file_writer_arc.clone());
+
+                let file_layer = tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_writer(make_writer);
+
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(console_layer)
+                    .with(file_layer)
+                    .try_init();
+            } else {
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(console_layer)
+                    .try_init();
+            }
+        }
+
+        let cmd_name = crate::config::paths::get_cmd_name();
+        tracing::info!(
+            "Starting {} v{} (elevated: {})",
+            cmd_name,
+            env!("CARGO_PKG_VERSION"),
+            crate::platform::native_platform().is_elevated()
+        );
+
+        let mut manager = SupervisorManager::new(&config)?;
+        let manager_handle = manager.handle();
+        tracing::info!(
+            "Supervisor manager initialized with {} program(s)",
+            config.programs.len()
+        );
+
+        // Initial autostart sequence according to dependency graph
+        if let Err(e) = manager_handle.start_all().await {
+            tracing::warn!("Failed during initial autostart sequence: {}", e);
+        }
+
+        // Spawn server engine
+        let cancel_token = CancellationToken::new();
+        let server = ServerEngine::new(manager_handle, Some(config_path), config.server);
+        let server_token = cancel_token.clone();
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = server.run(server_token).await {
+                tracing::error!("ServerEngine terminated with error: {}", e);
+            }
+        });
+
+        if let Some(ext) = external_cancel {
+            let ct = cancel_token.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = ext.cancelled() => {
+                        ct.cancel();
+                    }
+                    _ = ct.cancelled() => {}
+                }
+            });
+        }
+
+        // Wait cooperatively for OS shutdown signal or cancellation
+        tokio::select! {
+            biased;
+
+            _ = cancel_token.cancelled() => {
+                tracing::info!("Daemon cancellation triggered");
+            }
+            _ = crate::platform::wait_for_shutdown_signal() => {
+                tracing::info!("Shutdown signal received, initiating graceful shutdown...");
+            }
+        }
+
+        // Graceful teardown
+        cancel_token.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle).await;
+
+        tracing::info!("Stopping all supervised processes...");
+        if let Err(e) = manager.shutdown().await {
+            tracing::error!("Error shutting down manager: {}", e);
+        }
+
+        tracing::info!("{} shutdown cleanly", cmd_name);
+        Ok(())
+    }
+}
+
 /// Runs the supervisor daemon lifecycle to completion.
 ///
 /// If `external_cancel` is supplied (e.g. from a Windows Service Control Manager handler),
 /// cancellation will trigger graceful daemon teardown alongside native OS signals.
+#[inline]
 pub async fn run_daemon(
     args: DaemonArgs,
     config_path: PathBuf,
     external_cancel: Option<CancellationToken>,
 ) -> anyhow::Result<()> {
-    if !config_path.exists() {
-        anyhow::bail!(
-            "Configuration file not found: {:?}. Please specify a valid file using -c/--config.",
-            config_path
-        );
-    }
-
-    let config = match SupervisorConfig::from_file(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to load configuration from {:?}: {}", config_path, e);
-            return Err(e.into());
-        }
-    };
-
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    // Check if logging is completely disabled
-    let is_logging_disabled = !config.logging.enabled
-        || args.loglevel.to_lowercase() == "off"
-        || config.logging.level.to_lowercase() == "off";
-
-    if is_logging_disabled {
-        let filter = tracing_subscriber::EnvFilter::new("off");
-        let _ = tracing_subscriber::registry().with(filter).try_init();
-    } else {
-        // Initialize logging subscriber with console and optional rotating file output
-        let log_level = if args.loglevel != "info" {
-            &args.loglevel
-        } else {
-            &config.logging.level
-        };
-
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-
-        let console_layer = tracing_subscriber::fmt::layer().with_target(false);
-
-        if let Some(ref log_file) = config.logging.file {
-            if let Some(parent) = log_file.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let max_bytes = match &config.logging.max_bytes {
-                Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
-                None => 20 * 1024 * 1024,
-            };
-            let file_rotator = file_rotate::FileRotate::new(
-                log_file,
-                file_rotate::suffix::AppendCount::new(config.logging.backups),
-                file_rotate::ContentLimit::Bytes(max_bytes),
-                file_rotate::compression::Compression::None,
-                None,
-            );
-            let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
-            let make_writer = move || MutexWriter(file_writer_arc.clone());
-
-            let file_layer = tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_target(false)
-                .with_writer(make_writer);
-
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(console_layer)
-                .with(file_layer)
-                .try_init();
-        } else {
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(console_layer)
-                .try_init();
-        }
-    }
-
-    let cmd_name = crate::config::paths::get_cmd_name();
-    tracing::info!(
-        "Starting {} v{} (elevated: {})",
-        cmd_name,
-        env!("CARGO_PKG_VERSION"),
-        crate::platform::native_platform().is_elevated()
-    );
-
-    let mut manager = SupervisorManager::new(&config)?;
-    let manager_handle = manager.handle();
-    tracing::info!(
-        "Supervisor manager initialized with {} program(s)",
-        config.programs.len()
-    );
-
-    // Initial autostart sequence according to dependency graph
-    if let Err(e) = manager_handle.start_all().await {
-        tracing::warn!("Failed during initial autostart sequence: {}", e);
-    }
-
-    // Spawn server engine
-    let cancel_token = CancellationToken::new();
-    let server = ServerEngine::new(manager_handle, Some(config_path), config.server);
-    let server_token = cancel_token.clone();
-    let server_handle = tokio::spawn(async move {
-        if let Err(e) = server.run(server_token).await {
-            tracing::error!("ServerEngine terminated with error: {}", e);
-        }
-    });
-
-    if let Some(ext) = external_cancel {
-        let ct = cancel_token.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = ext.cancelled() => {
-                    ct.cancel();
-                }
-                _ = ct.cancelled() => {}
-            }
-        });
-    }
-
-    // Wait cooperatively for OS shutdown signal (Ctrl+C on Windows, SIGTERM/SIGINT on Unix)
-    tokio::select! {
-        _ = crate::platform::wait_for_shutdown_signal() => {
-            tracing::info!("Shutdown signal received, initiating graceful shutdown...");
-        }
-        _ = cancel_token.cancelled() => {
-            tracing::info!("Daemon cancellation triggered");
-        }
-    }
-
-    // Graceful teardown
-    cancel_token.cancel();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle).await;
-
-    tracing::info!("Stopping all supervised processes...");
-    if let Err(e) = manager.shutdown().await {
-        tracing::error!("Error shutting down manager: {}", e);
-    }
-
-    tracing::info!("{} shutdown cleanly", cmd_name);
-    Ok(())
+    SupervisorDaemon::new(args, config_path)
+        .with_external_cancel(external_cancel)
+        .run()
+        .await
 }
 
 struct MutexWriter(

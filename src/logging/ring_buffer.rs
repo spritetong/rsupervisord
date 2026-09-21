@@ -27,18 +27,26 @@ impl RingBuffer {
     }
 
     /// Appends a new line to the ring buffer and broadcasts it to live subscribers.
+    /// Incurs zero cloning overhead when no live broadcast receivers are active.
     pub fn push(&self, line: impl Into<String>) {
         let line_str = line.into();
+        let should_broadcast = self.broadcast_tx.receiver_count() > 0;
+        let to_broadcast = if should_broadcast {
+            Some(line_str.clone())
+        } else {
+            None
+        };
+
         {
             let mut guard = self.lines.lock();
             if guard.len() >= self.capacity {
                 guard.pop_front();
             }
-            guard.push_back(line_str.clone());
+            guard.push_back(line_str);
         }
-        // Broadcast to live streaming subscribers only when active receivers exist
-        if self.broadcast_tx.receiver_count() > 0 {
-            let _ = self.broadcast_tx.send(line_str);
+
+        if let Some(msg) = to_broadcast {
+            let _ = self.broadcast_tx.send(msg);
         }
     }
 
@@ -52,9 +60,27 @@ impl RingBuffer {
         }
     }
 
+    /// Retrieves a complete snapshot of all lines currently residing in the buffer.
+    #[inline]
+    pub fn snapshot(&self) -> Vec<String> {
+        self.get_lines(None)
+    }
+
+    /// Clears all lines currently stored in the ring buffer.
+    pub fn clear(&self) {
+        let mut guard = self.lines.lock();
+        guard.clear();
+    }
+
     /// Subscribes to real-time incoming log lines.
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.broadcast_tx.subscribe()
+    }
+
+    /// Returns the current number of active streaming subscribers.
+    #[inline]
+    pub fn subscriber_count(&self) -> usize {
+        self.broadcast_tx.receiver_count()
     }
 
     /// Returns the current number of lines stored in the buffer.
@@ -68,6 +94,7 @@ impl RingBuffer {
     }
 
     /// Returns the maximum capacity of the buffer.
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -94,6 +121,7 @@ mod tests {
         buffer.push("line 3");
         assert_eq!(buffer.len(), 3);
         assert_eq!(buffer.get_lines(None), vec!["line 1", "line 2", "line 3"]);
+        assert_eq!(buffer.snapshot(), vec!["line 1", "line 2", "line 3"]);
 
         // Push 4th line, line 1 should be evicted
         buffer.push("line 4");
@@ -106,6 +134,10 @@ mod tests {
             buffer.get_lines(Some(5)),
             vec!["line 2", "line 3", "line 4"]
         );
+
+        buffer.clear();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
     }
 
     #[tokio::test]
@@ -113,6 +145,8 @@ mod tests {
         let buffer = RingBuffer::new(10);
         let mut rx1 = buffer.subscribe();
         let mut rx2 = buffer.subscribe();
+
+        assert_eq!(buffer.subscriber_count(), 2);
 
         buffer.push("hello world");
 

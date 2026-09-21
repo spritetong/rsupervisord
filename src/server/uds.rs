@@ -6,54 +6,75 @@
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
-/// Spawns and manages the local IPC listener (Unix Domain Socket on Unix, Named Pipe or UDS on Windows).
-pub async fn run_ipc_listener(
-    path: &Path,
-    app: axum::Router,
-    cancel_token: CancellationToken,
-) -> anyhow::Result<()> {
-    let mut listener = crate::platform::native_platform()
-        .bind_ipc_listener(path)
-        .map_err(|e| anyhow::anyhow!("Failed to bind IPC listener at {:?}: {}", path, e))?;
+/// Local IPC server driver (Unix Domain Socket on Unix, Named Pipe or UDS on Windows).
+pub struct IpcServer<'a> {
+    path: &'a Path,
+    router: axum::Router,
+}
 
-    tracing::info!("Listening on local IPC: {:?}", path);
+impl<'a> IpcServer<'a> {
+    /// Creates a new IpcServer bound to the target IPC path and router.
+    pub fn new(path: &'a Path, router: axum::Router) -> Self {
+        Self { path, router }
+    }
 
-    loop {
-        tokio::select! {
-            biased;
+    /// Serves incoming IPC connections until the cancellation token is triggered.
+    pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
+        let mut listener = crate::platform::native_platform()
+            .bind_ipc_listener(self.path)
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to bind IPC listener at {:?}: {}", self.path, e)
+            })?;
 
-            _ = cancel_token.cancelled() => {
-                break;
-            }
+        tracing::info!("Listening on local IPC: {:?}", self.path);
 
-            accept_res = listener.accept() => {
-                match accept_res {
-                    Ok(stream) => {
-                        let tower_service = app.clone();
-                        let conn_token = cancel_token.clone();
-                        tokio::spawn(async move {
-                            let socket = hyper_util::rt::TokioIo::new(stream);
-                            let hyper_service =
-                                hyper_util::service::TowerToHyperService::new(tower_service);
-                            let builder = hyper_util::server::conn::auto::Builder::new(
-                                hyper_util::rt::TokioExecutor::new(),
-                            );
-                            tokio::select! {
-                                biased;
-                                _ = conn_token.cancelled() => {},
-                                _ = builder.serve_connection_with_upgrades(socket, hyper_service) => {},
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+
+                accept_res = listener.accept() => {
+                    match accept_res {
+                        Ok(stream) => {
+                            let tower_service = self.router.clone();
+                            let conn_token = cancel_token.clone();
+                            tokio::spawn(async move {
+                                let socket = hyper_util::rt::TokioIo::new(stream);
+                                let hyper_service =
+                                    hyper_util::service::TowerToHyperService::new(tower_service);
+                                let builder = hyper_util::server::conn::auto::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                );
+                                tokio::select! {
+                                    biased;
+                                    _ = conn_token.cancelled() => {},
+                                    _ = builder.serve_connection_with_upgrades(socket, hyper_service) => {},
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            if !cancel_token.is_cancelled() {
+                                tracing::error!("Error accepting IPC connection: {}", e);
                             }
-                        });
-                    }
-                    Err(e) => {
-                        if !cancel_token.is_cancelled() {
-                            tracing::error!("Error accepting IPC connection: {}", e);
                         }
                     }
                 }
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
+}
+
+/// Spawns and manages the local IPC listener (Unix Domain Socket on Unix, Named Pipe or UDS on Windows).
+#[inline]
+pub async fn run_ipc_listener(
+    path: &Path,
+    app: axum::Router,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    IpcServer::new(path, app).run(cancel_token).await
 }

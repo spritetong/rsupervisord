@@ -112,6 +112,12 @@ impl LogRotator {
         writeln!(guard, "{}", line)
     }
 
+    /// Writes a raw byte buffer to the rotating log file.
+    pub fn write_all(&self, data: &[u8]) -> std::io::Result<()> {
+        let mut guard = self.inner.lock();
+        guard.write_all(data)
+    }
+
     /// Flushes any buffered content to disk.
     pub fn flush(&self) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
@@ -119,8 +125,14 @@ impl LogRotator {
     }
 
     /// Returns the primary log file path.
+    #[inline]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the current size of the active log file on disk.
+    pub fn file_size(&self) -> std::io::Result<u64> {
+        std::fs::metadata(&self.path).map(|m| m.len())
     }
 }
 
@@ -160,5 +172,6 @@ mod tests {
         assert!(log_file.exists());
         let backup1 = dir.path().join("test.log.1");
         assert!(backup1.exists(), "Backup test.log.1 should exist");
+        assert!(rotator.file_size().is_ok());
     }
 }

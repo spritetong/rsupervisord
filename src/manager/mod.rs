@@ -15,4 +15,6 @@ pub use cron::{CronAction, CronTable};
 pub use dag::DependencyGraph;
 pub use event::{EventHub, LogEntry, SystemEvent};
 pub use health::{HealthEvent, HealthProbeRunner};
-pub use supervisor::{ManagerCommand, ManagerHandle, ReloadSummary, SupervisorManager};
+pub use supervisor::{
+    ManagerCommand, ManagerHandle, ReloadSummary, SupervisorManager, SupervisorManagerBuilder,
+};

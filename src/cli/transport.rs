@@ -4,9 +4,12 @@
 // SPDX-License-Identifier: MIT
 
 use crate::platform::AsyncStream;
+use std::convert::Infallible;
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -39,6 +42,24 @@ impl Endpoint {
         }
     }
 
+    /// Returns true if this endpoint connects via Unix Domain Socket / IPC.
+    #[inline]
+    pub fn is_ipc(&self) -> bool {
+        matches!(self, Self::Ipc(_))
+    }
+
+    /// Returns true if this endpoint connects via Windows Named Pipe.
+    #[inline]
+    pub fn is_named_pipe(&self) -> bool {
+        matches!(self, Self::NamedPipe(_))
+    }
+
+    /// Returns true if this endpoint connects via TCP.
+    #[inline]
+    pub fn is_tcp(&self) -> bool {
+        matches!(self, Self::Tcp(_))
+    }
+
     /// Returns the system default local IPC endpoint.
     pub fn default_local() -> Self {
         let default_path = crate::platform::native_platform().default_uds_path();
@@ -65,6 +86,30 @@ impl Endpoint {
                 let stream = tokio::net::TcpStream::connect(addr).await?;
                 Ok(StreamTransport::new(Box::new(stream)))
             }
+        }
+    }
+}
+
+impl FromStr for Endpoint {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse(s))
+    }
+}
+
+impl<'a> From<&'a str> for Endpoint {
+    fn from(s: &'a str) -> Self {
+        Self::parse(s)
+    }
+}
+
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ipc(p) => write!(f, "{}", p.display()),
+            Self::NamedPipe(p) => write!(f, "{}", p.display()),
+            Self::Tcp(addr) => write!(f, "tcp://{}", addr),
         }
     }
 }
@@ -132,6 +177,13 @@ mod tests {
             Endpoint::parse("/tmp/supervisor.sock"),
             Endpoint::Ipc(PathBuf::from("/tmp/supervisor.sock"))
         );
+    }
+
+    #[test]
+    fn test_endpoint_traits() {
+        let ep: Endpoint = "http://127.0.0.1:9001".parse().unwrap();
+        assert!(ep.is_tcp());
+        assert_eq!(ep.to_string(), "tcp://127.0.0.1:9001");
     }
 
     #[test]

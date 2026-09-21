@@ -24,6 +24,38 @@ pub enum CronAction {
     },
 }
 
+impl CronAction {
+    /// Returns the target program name.
+    #[inline]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Start { name, .. } | Self::Stop { name, .. } => name,
+        }
+    }
+
+    /// Returns the target group name.
+    #[inline]
+    pub fn group(&self) -> &str {
+        match self {
+            Self::Start { group, .. } | Self::Stop { group, .. } => group,
+        }
+    }
+
+    /// Returns true if this action stops the program.
+    #[inline]
+    pub fn is_stop(&self) -> bool {
+        matches!(self, Self::Stop { .. })
+    }
+
+    /// Returns the firing cron expression.
+    #[inline]
+    pub fn expression(&self) -> &str {
+        match self {
+            Self::Start { expression, .. } | Self::Stop { expression, .. } => expression,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CronEntry {
     pub name: String,
@@ -146,6 +178,18 @@ impl CronTable {
 
         actions
     }
+
+    /// Returns the number of registered cron schedule entries.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true if no cron schedules are registered.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -160,7 +204,8 @@ mod tests {
         configs.insert("cron_worker".to_string(), cfg);
 
         let mut table = CronTable::from_configs(&configs);
-        assert_eq!(table.entries.len(), 1);
+        assert_eq!(table.len(), 1);
+        assert!(!table.is_empty());
         assert!(table.get_next_run("cron_worker").is_some());
         assert_eq!(table.get_cron_expr("cron_worker").unwrap(), "*/5 * * * *");
 
@@ -169,7 +214,11 @@ mod tests {
         let due = table.pop_due_actions(future_time);
         assert_eq!(due.len(), 1);
         match &due[0] {
-            CronAction::Start { name, .. } => assert_eq!(name, "cron_worker"),
+            CronAction::Start { name, .. } => {
+                assert_eq!(name, "cron_worker");
+                assert_eq!(due[0].name(), "cron_worker");
+                assert!(!due[0].is_stop());
+            }
             _ => panic!("Expected start action"),
         }
 

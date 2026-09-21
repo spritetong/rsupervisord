@@ -1239,74 +1239,41 @@ impl ProgramActor {
             }
         } else {
             // Process exited after being marked running
-            match self.config.autorestart {
-                AutoRestartPolicy::Always => {
-                    self.update_status(
-                        ProgramState::Starting,
-                        None,
-                        exit_code,
-                        "Autorestarting (policy: always)".to_string(),
+            let should_restart = self
+                .config
+                .autorestart
+                .should_restart(exit_code.unwrap_or(0), &self.config.exit_codes);
+
+            if should_restart {
+                let desc = match self.config.autorestart {
+                    AutoRestartPolicy::Always => "Autorestarting (policy: always)".to_string(),
+                    _ => format!("Unexpected exit with code {:?}, autorestarting", exit_code),
+                };
+                self.update_status(ProgramState::Starting, None, exit_code, desc);
+                if let Err(e) = self.spawn_child().await {
+                    tracing::error!(
+                        program = %self.config.name,
+                        error = %e,
+                        "Failed to autorestart child process"
                     );
-                    if let Err(e) = self.spawn_child().await {
-                        tracing::error!(
-                            program = %self.config.name,
-                            error = %e,
-                            "Failed to autorestart child process"
-                        );
-                        self.update_status(
-                            ProgramState::Fatal,
-                            None,
-                            exit_code,
-                            format!("Autorestart spawn failed: {}", e),
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-                AutoRestartPolicy::Unexpected => {
-                    if !is_expected {
-                        self.update_status(
-                            ProgramState::Starting,
-                            None,
-                            exit_code,
-                            format!("Unexpected exit with code {:?}, autorestarting", exit_code),
-                        );
-                        if let Err(e) = self.spawn_child().await {
-                            tracing::error!(
-                                program = %self.config.name,
-                                error = %e,
-                                "Failed to autorestart child process"
-                            );
-                            self.update_status(
-                                ProgramState::Fatal,
-                                None,
-                                exit_code,
-                                format!("Autorestart spawn failed: {}", e),
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    } else {
-                        self.update_status(
-                            ProgramState::Exited,
-                            None,
-                            exit_code,
-                            format!("Exited normally with code {:?}", exit_code),
-                        );
-                        false
-                    }
-                }
-                AutoRestartPolicy::Never => {
                     self.update_status(
-                        ProgramState::Exited,
+                        ProgramState::Fatal,
                         None,
                         exit_code,
-                        format!("Exited with code {:?}", exit_code),
+                        format!("Autorestart spawn failed: {}", e),
                     );
                     false
+                } else {
+                    true
                 }
+            } else {
+                let desc = if is_expected {
+                    format!("Exited normally with code {:?}", exit_code)
+                } else {
+                    format!("Exited with code {:?}", exit_code)
+                };
+                self.update_status(ProgramState::Exited, None, exit_code, desc);
+                false
             }
         }
     }

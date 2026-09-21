@@ -323,17 +323,15 @@ impl SupervisorConfig {
     }
 
     pub fn apply_default_paths(&mut self) {
-        let cmd_name = crate::config::paths::get_cmd_name();
-        let default_no_dir = crate::config::paths::default_uds_path(&cmd_name, None);
+        let resolver = crate::config::paths::PathResolver::from_current_exe()
+            .with_config_dir(self.config_dir.as_deref());
+        let default_no_dir =
+            crate::config::paths::PathResolver::from_current_exe().default_uds_path();
         if self.server.uds_path == default_no_dir {
-            self.server.uds_path =
-                crate::config::paths::default_uds_path(&cmd_name, self.config_dir.as_deref());
+            self.server.uds_path = resolver.default_uds_path();
         }
         if self.logging.enabled && self.logging.file.is_none() {
-            self.logging.file = Some(crate::config::paths::default_daemon_log_path(
-                &cmd_name,
-                self.config_dir.as_deref(),
-            ));
+            self.logging.file = Some(resolver.default_daemon_log_path());
         }
         if let Some(ref bind) = self.server.http_bind {
             self.server.http_bind = Some(normalize_http_bind(bind));
@@ -468,17 +466,14 @@ impl SupervisorConfig {
                     .or_else(|| def_logs.and_then(|l| l.enabled))
                     .unwrap_or(true);
 
-                let cmd_name = crate::config::paths::get_cmd_name();
+                let resolver = crate::config::paths::PathResolver::from_current_exe()
+                    .with_config_dir(self.config_dir.as_deref());
                 let stdout = raw_logs
                     .and_then(|l| l.stdout.clone())
                     .or_else(|| def_logs.and_then(|l| l.stdout.clone()))
                     .or_else(|| {
                         if enabled {
-                            Some(crate::config::paths::default_program_log_path(
-                                &cmd_name,
-                                name,
-                                self.config_dir.as_deref(),
-                            ))
+                            Some(resolver.default_program_log_path(name))
                         } else {
                             None
                         }

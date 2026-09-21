@@ -6,28 +6,67 @@
 use crate::platform::traits::ProcessMetrics;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    strum::EnumString,
+    strum::Display,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HealthStatus {
     #[default]
+    #[strum(to_string = "-")]
     None,
     Starting,
     Healthy,
     Unhealthy,
 }
 
-impl std::fmt::Display for HealthStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HealthStatus::None => write!(f, "-"),
-            HealthStatus::Starting => write!(f, "STARTING"),
-            HealthStatus::Healthy => write!(f, "HEALTHY"),
-            HealthStatus::Unhealthy => write!(f, "UNHEALTHY"),
-        }
+impl HealthStatus {
+    /// Returns true if the probe confirmed the process is healthy.
+    #[inline]
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    /// Returns true if the probe reported an unhealthy condition.
+    #[inline]
+    pub fn is_unhealthy(&self) -> bool {
+        matches!(self, Self::Unhealthy)
+    }
+
+    /// Returns true if the probe is in the initial starting/grace phase.
+    #[inline]
+    pub fn is_starting(&self) -> bool {
+        matches!(self, Self::Starting)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::Display,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProgramState {
     Stopped,
@@ -40,18 +79,46 @@ pub enum ProgramState {
 }
 
 impl ProgramState {
+    /// Returns true if the process is in an active lifecycle state (Starting, Running, Stopping).
+    #[inline]
     pub fn is_active(&self) -> bool {
-        matches!(
-            self,
-            ProgramState::Starting | ProgramState::Running | ProgramState::Stopping
-        )
+        matches!(self, Self::Starting | Self::Running | Self::Stopping)
     }
 
+    /// Returns true if the process is actively in the Running state.
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Returns true if the process is completely stopped.
+    #[inline]
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, Self::Stopped)
+    }
+
+    /// Returns true if the process is in a non-running terminal or stopped state.
+    #[inline]
     pub fn is_stopped_or_fatal(&self) -> bool {
-        matches!(
-            self,
-            ProgramState::Stopped | ProgramState::Exited | ProgramState::Fatal
-        )
+        matches!(self, Self::Stopped | Self::Exited | Self::Fatal)
+    }
+
+    /// Returns true if the process has permanently stopped without recovery (Exited or Fatal).
+    #[inline]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Exited | Self::Fatal)
+    }
+
+    /// Returns true if the program can be transitioned to Starting from this state.
+    #[inline]
+    pub fn can_start(&self) -> bool {
+        matches!(self, Self::Stopped | Self::Exited | Self::Fatal)
+    }
+
+    /// Returns true if the program can accept a graceful stop request.
+    #[inline]
+    pub fn can_stop(&self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Backoff)
     }
 }
 
@@ -75,6 +142,7 @@ pub struct ProgramStatus {
 }
 
 impl ProgramStatus {
+    /// Creates an initial stopped status record for a standalone program.
     pub fn new_stopped(name: impl Into<String>) -> Self {
         let n = name.into();
         Self {
@@ -93,6 +161,7 @@ impl ProgramStatus {
         }
     }
 
+    /// Creates an initial stopped status record for a grouped program.
     pub fn new_stopped_with_group(name: impl Into<String>, group: impl Into<String>) -> Self {
         let n = name.into();
         let g = group.into();
@@ -119,5 +188,11 @@ impl ProgramStatus {
         } else {
             self.name.clone()
         }
+    }
+
+    /// Returns true if the process is currently running.
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.state.is_running()
     }
 }

@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 /// Strongly-typed system lifecycle and status mutation events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(tag = "type", content = "data")]
 pub enum SystemEvent {
     /// Fired whenever a managed program transitions across states.
@@ -70,6 +72,40 @@ pub enum SystemEvent {
     },
 }
 
+impl SystemEvent {
+    /// Returns the static event variant name as a string slice without allocation.
+    #[inline]
+    pub fn event_type(&self) -> &'static str {
+        self.into()
+    }
+
+    /// Returns the program name associated with this event, if applicable.
+    pub fn program_name(&self) -> Option<&str> {
+        match self {
+            Self::StateChanged { name, .. }
+            | Self::HealthChanged { name, .. }
+            | Self::CronTriggered { name, .. }
+            | Self::ProcessPreStart { name, .. }
+            | Self::ProcessPreStartFailed { name, .. }
+            | Self::ProcessPreStop { name, .. }
+            | Self::ProcessPreStopFailed { name, .. } => Some(name),
+            Self::ConfigReloaded { .. } | Self::DaemonLifecycle { .. } => None,
+        }
+    }
+
+    /// Returns true if this event indicates an operational failure or error.
+    pub fn is_failure(&self) -> bool {
+        match self {
+            Self::ProcessPreStartFailed { .. } | Self::ProcessPreStopFailed { .. } => true,
+            Self::HealthChanged { healthy, .. } => !healthy,
+            Self::StateChanged { new_state, .. } => {
+                matches!(new_state, ProgramState::Fatal | ProgramState::Backoff)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// A structured log record emitted by a managed program's stdout or stderr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -96,6 +132,12 @@ impl LogEntry {
             line: line.into(),
             timestamp_millis,
         }
+    }
+
+    /// Returns true if this log line was captured from stderr.
+    #[inline]
+    pub fn is_stderr(&self) -> bool {
+        self.stream == "stderr"
     }
 }
 
@@ -128,6 +170,12 @@ impl EventHub {
         }
     }
 
+    /// Alias for publish_system.
+    #[inline]
+    pub fn publish(&self, event: SystemEvent) {
+        self.publish_system(event);
+    }
+
     /// Publishes an aggregated log entry to all active subscribers.
     /// Incurs zero cloning overhead if no subscribers are active.
     pub fn publish_log(&self, entry: LogEntry) {
@@ -139,6 +187,12 @@ impl EventHub {
     /// Subscribes to the global system events broadcast stream.
     pub fn subscribe_system(&self) -> broadcast::Receiver<SystemEvent> {
         self.system_tx.subscribe()
+    }
+
+    /// Alias for subscribe_system.
+    #[inline]
+    pub fn subscribe(&self) -> broadcast::Receiver<SystemEvent> {
+        self.subscribe_system()
     }
 
     /// Subscribes to the global aggregated logs broadcast stream.
@@ -209,5 +263,28 @@ mod tests {
         assert_eq!(log_evt.stream, "stdout");
         assert_eq!(log_evt.line, "ready on 8080");
         assert!(log_evt.timestamp_millis > 0);
+    }
+
+    #[test]
+    fn test_system_event_metadata() {
+        let evt = SystemEvent::StateChanged {
+            name: "worker".to_string(),
+            old_state: ProgramState::Starting,
+            new_state: ProgramState::Running,
+            pid: Some(42),
+            exit_code: None,
+            description: "Ready".to_string(),
+        };
+
+        assert_eq!(evt.event_type(), "StateChanged");
+        assert_eq!(evt.program_name(), Some("worker"));
+        assert!(!evt.is_failure());
+
+        let failed_evt = SystemEvent::ProcessPreStartFailed {
+            name: "worker".to_string(),
+            group: "default".to_string(),
+            error: "hook timeout".to_string(),
+        };
+        assert!(failed_evt.is_failure());
     }
 }

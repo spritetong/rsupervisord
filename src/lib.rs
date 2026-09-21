@@ -16,9 +16,11 @@ pub mod server;
 pub mod service;
 
 pub use config::{ConfigDiff, SupervisorConfig};
-pub use daemon::{DaemonArgs, run_daemon};
-pub use error::ProgramError;
-pub use manager::{DependencyGraph, ManagerHandle, ReloadSummary, SupervisorManager};
+pub use daemon::{DaemonArgs, SupervisorDaemon, run_daemon};
+pub use error::{CliError, ConfigError, ProgramError, ServiceError, SupervisorError};
+pub use manager::{
+    DependencyGraph, ManagerHandle, ReloadSummary, SupervisorManager, SupervisorManagerBuilder,
+};
 pub use platform::{PlatformBackend, PlatformProcessGuard, native_platform};
 pub use program::{
     AutoRestartPolicy, ProcessProgram, Program, ProgramConfig, ProgramState, ProgramStatus,

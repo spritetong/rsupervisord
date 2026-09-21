@@ -32,6 +32,27 @@ pub struct AppState {
     pub basic_auth: Option<crate::server::auth::BasicAuthConfig>,
 }
 
+impl AppState {
+    pub fn new(
+        manager: ManagerHandle,
+        config_path: Option<PathBuf>,
+        auth_token: Option<String>,
+        basic_auth: Option<crate::server::auth::BasicAuthConfig>,
+    ) -> Self {
+        Self {
+            manager,
+            config_path,
+            auth_token,
+            basic_auth,
+        }
+    }
+
+    /// Converts this AppState into a fully configured Axum router.
+    pub fn into_router(self) -> Router {
+        build_router(self)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ActionQuery {
     #[serde(default = "default_true")]

@@ -5,70 +5,88 @@
 
 use std::borrow::Cow;
 
-/// Expands environment variables in the format `${VAR}` or `${VAR:-default}` within a raw string.
-/// Comment lines starting with `#` are preserved verbatim without expansion.
-pub fn expand_env_vars(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
+/// Environment macro expander supporting `${VAR}` and `${VAR:-default}` syntax.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MacroExpander;
 
-    for line in raw.split_inclusive('\n') {
-        if line.trim_start().starts_with('#') {
-            result.push_str(line);
-            continue;
-        }
-        result.push_str(&expand_line(line));
+impl MacroExpander {
+    /// Creates a new MacroExpander instance.
+    pub const fn new() -> Self {
+        Self
     }
 
-    result
-}
+    /// Expands environment variables in the format `${VAR}` or `${VAR:-default}` within a raw string.
+    /// Comment lines starting with `#` are preserved verbatim without expansion.
+    pub fn expand(&self, raw: &str) -> String {
+        let mut result = String::with_capacity(raw.len());
 
-fn expand_line(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut var_expr = String::new();
-            let mut closed = false;
-
-            for next_ch in chars.by_ref() {
-                if next_ch == '}' {
-                    closed = true;
-                    break;
-                }
-                var_expr.push(next_ch);
+        for line in raw.split_inclusive('\n') {
+            if line.trim_start().starts_with('#') {
+                result.push_str(line);
+                continue;
             }
+            result.push_str(&self.expand_line(line));
+        }
 
-            if closed {
-                let val = resolve_var_expr(&var_expr);
-                result.push_str(&val);
+        result
+    }
+
+    fn expand_line(&self, raw: &str) -> String {
+        let mut result = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '$' && chars.peek() == Some(&'{') {
+                chars.next(); // consume '{'
+                let mut var_expr = String::new();
+                let mut closed = false;
+
+                for next_ch in chars.by_ref() {
+                    if next_ch == '}' {
+                        closed = true;
+                        break;
+                    }
+                    var_expr.push(next_ch);
+                }
+
+                if closed {
+                    let val = self.resolve_var_expr(&var_expr);
+                    result.push_str(&val);
+                } else {
+                    // Unclosed '${' sequence: emit raw prefix unchanged
+                    result.push_str("${");
+                    result.push_str(&var_expr);
+                }
             } else {
-                // Unclosed '${' sequence: emit raw prefix unchanged
-                result.push_str("${");
-                result.push_str(&var_expr);
+                result.push(ch);
+            }
+        }
+
+        result
+    }
+
+    fn resolve_var_expr<'a>(&self, expr: &'a str) -> Cow<'a, str> {
+        if let Some((var_name, default_val)) = expr.split_once(":-") {
+            let var_name = var_name.trim();
+            match std::env::var(var_name) {
+                Ok(val) if !val.is_empty() => Cow::Owned(val),
+                _ => Cow::Borrowed(default_val),
             }
         } else {
-            result.push(ch);
+            let var_name = expr.trim();
+            match std::env::var(var_name) {
+                Ok(val) => Cow::Owned(val),
+                Err(_) => Cow::Borrowed(""),
+            }
         }
     }
-
-    result
 }
 
-fn resolve_var_expr(expr: &str) -> Cow<'_, str> {
-    if let Some((var_name, default_val)) = expr.split_once(":-") {
-        let var_name = var_name.trim();
-        match std::env::var(var_name) {
-            Ok(val) if !val.is_empty() => Cow::Owned(val),
-            _ => Cow::Borrowed(default_val),
-        }
-    } else {
-        let var_name = expr.trim();
-        match std::env::var(var_name) {
-            Ok(val) => Cow::Owned(val),
-            Err(_) => Cow::Borrowed(""),
-        }
-    }
+/// Expands environment variables in the format `${VAR}` or `${VAR:-default}` within a raw string.
+/// Comment lines starting with `#` are preserved verbatim without expansion.
+#[inline]
+pub fn expand_env_vars(raw: &str) -> String {
+    MacroExpander::new().expand(raw)
 }
 
 #[cfg(test)]
@@ -76,11 +94,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_expand_env_vars() {
+    fn test_macro_expander_struct_and_function() {
         unsafe {
             std::env::set_var("TEST_SUPERVISOR_PORT", "9001");
             std::env::remove_var("TEST_UNSET_VAR");
         }
+
+        let expander = MacroExpander::new();
+
+        assert_eq!(
+            expander.expand("http://127.0.0.1:${TEST_SUPERVISOR_PORT}/api"),
+            "http://127.0.0.1:9001/api"
+        );
 
         assert_eq!(
             expand_env_vars("http://127.0.0.1:${TEST_SUPERVISOR_PORT}/api"),
