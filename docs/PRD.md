@@ -30,7 +30,8 @@ In containerized environments, microservices architectures, edge devices, and Wi
 - **Lifecycle Hooks with Failure Degradation**: Supports `pre_start` and `pre_stop` execution. `pre_start` blocks start unless `pre_start_ignore_failure: true`, while `pre_stop` always degrades gracefully to guarantee processes are never unkillable.
 - **Activity-Aware Adaptive Metrics & Disableable Logging**: Automatically pauses CPU/memory sampling during idle periods when no CLI or Web clients are connected. Supports completely disabling process and daemon logging (`Stdio::null()`), eliminating pipeline overhead.
 - **Star-Topology Dual-Track Event Hub & SSE**: Unified system lifecycle event broadcasting (`SystemEvent`) and aggregated log bus (`LogEntry`) with dual-track isolation, zero-subscriber no-op optimization, real-time Web UI EventSource synchronization, and CLI streaming (`rsupervisorctl events` & `rsupervisorctl tail -f all`).
-- **Resilient Scope-Guarded Lifecycle Management**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`, guarantees leak-free OS handle management, and drives synchronous API waiting reactively via `EventHub` with zero busy-polling.
+- **Data-Plane Process Stdin Injection with Backpressure & Circuit Breaking**: Direct standard input (`stdin`) injection via `Stdio::piped()`, driven by an independent non-blocking writer Actor with an internal memory buffer (64KB), `tokio::select!` if-guard backpressure propagation, and 10s timeout circuit breaking.
+- **Resilient Scope-Guarded Lifecycle & Task Governance**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`. Core subordinate tasks (Manager, Process, StdinWriter, HealthProbe, LogPump) retain `JoinHandle` for deterministic draining; tasks without a direct subordinate relationship (IPC connection streams, async API dispatchers, external cancel bridges) may spawn without retaining `JoinHandle`, but **MUST be strictly governed by the parent object's `CancellationToken`** and bound to that object's lifecycle.
 - **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
 - **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance and multi-scheme auth (Bearer token & Basic Auth with plaintext or SHA-1); replaces XML-RPC with unified **IPC (UDS / Named Pipe) / TCP + JSON REST API**.
 - **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
@@ -191,6 +192,34 @@ Supports executing pre-flight preparation and pre-stop cleanup hooks:
   - **`pre_stop`**: Emits `ProcessPreStop` before execution and `ProcessPreStopFailed` on failure/timeout, but **always degrades gracefully to proceed with child process termination**. This guarantees that malfunctioning hooks can never block process termination or create unkillable zombie processes.
 - **Shell Execution Compatibility**: Unix executes via `sh -c`; Windows executes via `cmd.exe /C` using `raw_arg` to ensure nested quoting and redirection (`>`) execute transparently.
 
+#### 3.1.11 Data-Plane Standard Input (`sendProcessStdin`) & Backpressure Management
+
+Provides direct character/byte stream injection into the standard input (`stdin`) of any running supervised process:
+
+- **Piped Stdin Architecture**:
+  - Replaces traditional detached/null standard input (`Stdio::null()`) with asynchronous Tokio pipes (`Stdio::piped()`).
+  - Child stdin handle is driven by an independent, non-blocking `StdinWriterTask` Actor.
+- **Zero-Drop Bounded Backpressure Transmission**:
+  - Unlike naive supervisor implementations that drop bytes on buffer overflow (which corrupts command/binary streams for slow programs), `rsupervisord` employs an internal memory buffer (`BytesMut`, up to 64KB) paired with a bounded MPSC channel (`capacity: 16`).
+  - **`tokio::select!` If-Guard Backpressure**: When the child process reads slowly or the OS pipe buffer is saturated and the memory buffer reaches 64KB, the writer task's channel receiver branch is disabled via `if buffer.len() < MAX_STDIN_BUFFER_BYTES`. This naturally stalls upstream channel sends (`tx.send(data).await`), propagating backpressure directly to the caller (API / CLI).
+- **Timeout Circuit Breaker**:
+  - Upstream senders bound their transmission with a 10-second timeout. If a child process is completely deadlocked or permanently ceases reading stdin, the sender gracefully terminates with `StdinWriteTimeout` (HTTP 504 Gateway Timeout), ensuring the supervisor daemon and actor event loop remain 100% responsive without blocking.
+- **Pipe Lifecycle & Generation Safety**:
+  - **Immediate Rejection on Stopped Processes**: Sending stdin to a non-running or stopped process immediately returns `ProgramError::NotRunning` (HTTP 400 Bad Request) without channel allocation.
+  - **Graceful EOF on Exit**: Upon child exit or graceful stop, the writer task is cancelled and the write end of the OS pipe is dropped, properly signaling `EOF` to the child process.
+  - **Generation Isolation on Restart**: Restarting a process allocates a fresh stdin pipe and spawns a new writer task, cleanly isolating pipe lifecycles across process generations.
+
+#### 3.1.12 Asynchronous Task Lifecycle Governance & Cancellation Constraints
+
+To prevent background task leaks while maintaining pragmatic concurrency:
+
+- **Core Subordinate Tasks (Mandatory JoinHandle Tracking)**:
+  - Tasks with direct subordinate or dependency relationships (`ManagerActor`, `ProcessActor`, `StdinWriterTask`, `HealthProbeRunner`, and `LogPumpTask`) **MUST have their `JoinHandle` explicitly retained** by the parent supervisor.
+  - Shutdown routines (`drain_pumps`, `shutdown()`, or `RunningChild::drop`) enforce deterministic waiting within a bounded timeout (2s), with `JoinHandle::abort()` as an ultimate fallback to prevent stalled grandchild descriptor inheritance.
+- **Non-Subordinate Tasks (Permitted Detached Spawns with Mandatory Cancellation Token)**:
+  - Objects without direct subordinate or dependency relationships (such as individual IPC client connection streams in `run_ipc_listener`, fire-and-forget asynchronous API operation dispatchers in `api.rs`, and external cancellation signal bridges) **are permitted to spawn background tasks without retaining `JoinHandle`**.
+  - **Hard Constraint**: Every such task **MUST be strictly governed by the parent object's `CancellationToken`** and constrained by the object's lifecycle. Tasks must monitor `cancel_token.cancelled()` in their event loop (e.g. via `tokio::select!`), guaranteeing that they terminate immediately upon parent object destruction or daemon cancellation.
+
 ---
 
 ### 3.2 Log Streaming & Rotation Subsystem
@@ -268,6 +297,7 @@ Built with the production-proven `file-rotate` crate:
 | `GET` | `/api/v1/groups/:group/status` | Retrieve status of all programs belonging to the specified group |
 | `POST` | `/api/v1/reload` | **Incremental Hot Reload**: updates changed programs without interrupting unchanged ones |
 | `GET` | `/api/v1/programs/:name/logs` | Fetch buffered historical logs (`lines=100`) |
+| `POST` | `/api/v1/programs/:name/stdin` | Send input characters/bytes to program standard input (JSON `{"chars": "..."}` or raw body; 504 on timeout) |
 | `GET` | `/api/v1/programs/:name/logs/stream` | **SSE (Server-Sent Events)** real-time live log stream for a specific program |
 | `GET` | `/api/v1/events` | **SSE System Events Stream**: Real-time lifecycle events (`StateChanged`, `HealthChanged`, `ConfigReloaded`, `CronTriggered`, `ProcessPreStart`, `ProcessPreStartFailed`, `ProcessPreStop`, `ProcessPreStopFailed`, `DaemonLifecycle`) |
 | `GET` | `/api/v1/logs/stream` | **SSE Aggregated Log Stream**: Real-time global log stream across all managed programs |
@@ -308,6 +338,7 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
   - `rsupervisorctl stop <name | group:*> [--async] [--timeout 30]`: Stop individual program or entire group.
   - `rsupervisorctl restart <name | group:*> [--async]`: Restart individual program or entire group.
   - `rsupervisorctl reload`: Incrementally reload configuration, reporting added/removed/modified/unchanged counts.
+  - `rsupervisorctl stdin <name> <chars>` (alias: `send-stdin`): Send input characters or commands directly into the process's standard input.
   - `rsupervisorctl events`: Real-time streaming of system lifecycle and hook events.
   - `rsupervisorctl tail -f <name> [--lines=100]`: Live tail console output.
   - Flags: `--key <TOKEN>`, `--user <USER>`, `--password <PWD>`, `-s / --server <URL>` (enables connecting directly without local config).

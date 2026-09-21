@@ -81,6 +81,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/logs/stream", get(stream_all_logs))
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
+        .route("/api/v1/programs/{name}/stdin", post(send_stdin))
         .fallback(crate::server::web::static_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -406,9 +407,16 @@ async fn stop_program(
     if !query.sync {
         let mgr = state.manager.clone();
         let name_clone = name.clone();
+        let cancel = mgr.cancel_token();
         tokio::spawn(async move {
-            if let Err(e) = mgr.stop_program(&name_clone, grace).await {
-                tracing::warn!("Async stop for '{}' failed or timed out: {}", name_clone, e);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {},
+                res = mgr.stop_program(&name_clone, grace) => {
+                    if let Err(e) = res {
+                        tracing::warn!("Async stop for '{}' failed or timed out: {}", name_clone, e);
+                    }
+                }
             }
         });
 
@@ -488,13 +496,20 @@ async fn restart_program(
     if !query.sync {
         let mgr = state.manager.clone();
         let name_clone = name.clone();
+        let cancel = mgr.cancel_token();
         tokio::spawn(async move {
-            if let Err(e) = mgr.restart_program(&name_clone, grace).await {
-                tracing::warn!(
-                    "Async restart for '{}' failed or timed out: {}",
-                    name_clone,
-                    e
-                );
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {},
+                res = mgr.restart_program(&name_clone, grace) => {
+                    if let Err(e) = res {
+                        tracing::warn!(
+                            "Async restart for '{}' failed or timed out: {}",
+                            name_clone,
+                            e
+                        );
+                    }
+                }
             }
         });
 
@@ -902,4 +917,48 @@ async fn stream_all_logs(
 
     Ok(Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default().interval(Duration::from_secs(15))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendStdinPayload {
+    pub chars: Option<String>,
+    pub data: Option<String>,
+}
+
+/// POST /api/v1/programs/{name}/stdin
+async fn send_stdin(
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), StatusCode> {
+    check_auth(&headers, &state)?;
+
+    let input_bytes = if let Ok(payload) = serde_json::from_slice::<SendStdinPayload>(&body) {
+        if let Some(c) = payload.chars {
+            c.into_bytes()
+        } else if let Some(d) = payload.data {
+            d.into_bytes()
+        } else {
+            body.to_vec()
+        }
+    } else {
+        body.to_vec()
+    };
+
+    match state.manager.send_stdin(&name, input_bytes).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok(serde_json::json!({ "success": true }))),
+        )),
+        Err(e) => {
+            let status_code = match &e {
+                ProgramError::NotFound { .. } => StatusCode::NOT_FOUND,
+                ProgramError::NotRunning { .. } => StatusCode::BAD_REQUEST,
+                ProgramError::StdinWriteTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            Ok((status_code, Json(ApiResponse::err(e.to_string()))))
+        }
+    }
 }

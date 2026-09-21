@@ -60,4 +60,10 @@ pub enum ProgramError {
         expression: String,
         reason: String,
     },
+
+    #[error("Writing to stdin of program '{name}' timed out after {timeout_secs}s")]
+    StdinWriteTimeout { name: String, timeout_secs: u64 },
+
+    #[error("Failed to write to stdin of program '{name}': {error}")]
+    StdinWriteFailed { name: String, error: String },
 }

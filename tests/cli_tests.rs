@@ -66,6 +66,18 @@ fn test_cli_args_parsing() {
 
     let args = CliArgs::parse_from(["rsupervisorctl", "events"]);
     assert!(matches!(args.command, Some(CliCommand::Events)));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "stdin", "web", "command_line\n"]);
+    assert!(matches!(
+        args.command,
+        Some(CliCommand::Stdin { name, chars }) if name == "web" && chars == "command_line\n"
+    ));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "send-stdin", "worker", "echo ping"]);
+    assert!(matches!(
+        args.command,
+        Some(CliCommand::Stdin { name, chars }) if name == "worker" && chars == "echo ping"
+    ));
 }
 
 #[tokio::test]
@@ -240,4 +252,30 @@ async fn test_cli_connection_refused_error() {
             || err_msg.contains("Connection timed out")
             || err_msg.contains("refused")
     );
+}
+
+#[tokio::test]
+async fn test_cli_handle_stdin() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let body =
+                serde_json::to_string(&ApiResponse::ok(serde_json::json!({ "success": true })))
+                    .unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let client = SupervisorClient::new(Endpoint::Tcp(addr.to_string()), None);
+    let res = rsupervisord::cli::commands::handle_stdin(&client, "worker", "ping\n").await;
+    assert!(res.is_ok());
 }

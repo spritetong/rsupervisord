@@ -399,3 +399,45 @@ programs:
 
     manager.shutdown().await.expect("manager shutdown");
 }
+
+#[tokio::test]
+async fn test_manager_send_stdin() {
+    let yaml = format!(
+        r#"
+programs:
+  worker:
+    command: "{cmd}"
+    autostart: true
+    start_secs: 0
+    stop_wait_secs: 2
+"#,
+        cmd = get_sleep_cmd(10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    handle.start_program("worker").await.expect("start worker");
+    let st = handle.get_status("worker").await.unwrap();
+    assert_eq!(st.state, ProgramState::Running);
+
+    // Send stdin via manager handle
+    let res = handle
+        .send_stdin("worker", b"hello via manager\n".to_vec())
+        .await;
+    assert!(
+        res.is_ok(),
+        "Sending stdin via manager handle should succeed: {:?}",
+        res
+    );
+
+    // Send stdin to non-existent program returns NotFound
+    let err_res = handle.send_stdin("unknown_program", b"data".to_vec()).await;
+    assert!(matches!(
+        err_res,
+        Err(rsupervisord::error::ProgramError::NotFound { .. })
+    ));
+
+    manager.shutdown().await.expect("manager shutdown");
+}

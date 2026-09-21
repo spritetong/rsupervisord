@@ -444,3 +444,27 @@ pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
         .await?;
     Ok(())
 }
+
+/// Executes the 'stdin' command to send input characters to a running program.
+pub async fn handle_stdin(client: &SupervisorClient, name: &str, chars: &str) -> Result<()> {
+    match client.send_stdin(name, chars).await {
+        Ok(()) => {
+            println!(
+                "{} Sent {} byte(s) to stdin of '{}'",
+                "SUCCESS:".green().bold(),
+                chars.len(),
+                name.cyan().bold()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "{} Failed to send stdin to '{}': {}",
+                "ERROR:".red().bold(),
+                name.cyan().bold(),
+                e
+            );
+            Err(e)
+        }
+    }
+}

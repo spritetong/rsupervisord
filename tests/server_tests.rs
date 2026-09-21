@@ -909,3 +909,63 @@ programs:
     let _ = server_task.await;
     manager.shutdown().await.expect("shutdown manager");
 }
+
+#[tokio::test]
+async fn test_server_api_send_stdin() {
+    let _temp_dir = tempfile::tempdir().expect("create tempdir");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("stdin");
+    let ipc_str = ipc_path.to_string_lossy().replace('\\', "\\\\");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_str}"
+  http_bind: "127.0.0.1:{port}"
+
+program_defaults:
+  autostart: true
+  start_secs: 0
+  stop_wait_secs: 2
+
+programs:
+  worker:
+    command: |-
+      {cmd}
+"#,
+        cmd = get_worker_command("ready", 10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    handle.start_program("worker").await.expect("start worker");
+
+    let server_engine = ServerEngine::new(handle, None, config.server.clone());
+    let server_cancel = CancellationToken::new();
+    let cancel_clone = server_cancel.clone();
+
+    let server_task = tokio::spawn(async move {
+        let _ = server_engine.run(cancel_clone).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
+
+    // Send stdin via HTTP client
+    let res = client.send_stdin("worker", "test input payload\n").await;
+    assert!(res.is_ok(), "client.send_stdin should succeed: {:?}", res);
+
+    // Send stdin to unknown program returns error (404)
+    let err_res = client.send_stdin("nonexistent", "data\n").await;
+    assert!(
+        err_res.is_err(),
+        "client.send_stdin to unknown program should fail"
+    );
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}

@@ -40,4 +40,7 @@ pub trait Program: Send + Sync {
 
     /// Subscribes to real-time incoming log events.
     fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String>;
+
+    /// Asynchronously sends input data to the process's standard input.
+    async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ProgramError>;
 }

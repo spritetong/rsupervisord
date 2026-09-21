@@ -30,15 +30,19 @@ pub async fn run_ipc_listener(
                 match accept_res {
                     Ok(stream) => {
                         let tower_service = app.clone();
+                        let conn_token = cancel_token.clone();
                         tokio::spawn(async move {
                             let socket = hyper_util::rt::TokioIo::new(stream);
                             let hyper_service =
                                 hyper_util::service::TowerToHyperService::new(tower_service);
-                            let _ = hyper_util::server::conn::auto::Builder::new(
+                            let builder = hyper_util::server::conn::auto::Builder::new(
                                 hyper_util::rt::TokioExecutor::new(),
-                            )
-                            .serve_connection_with_upgrades(socket, hyper_service)
-                            .await;
+                            );
+                            tokio::select! {
+                                biased;
+                                _ = conn_token.cancelled() => {},
+                                _ = builder.serve_connection_with_upgrades(socket, hyper_service) => {},
+                            }
                         });
                     }
                     Err(e) => {

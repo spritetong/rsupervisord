@@ -109,4 +109,12 @@ pub enum CliCommand {
     },
     /// Stream real-time system lifecycle and state events
     Events,
+    /// Send input characters to the stdin of a managed program
+    #[command(alias = "send-stdin")]
+    Stdin {
+        /// Target program name
+        name: String,
+        /// Input characters to send to the process
+        chars: String,
+    },
 }

@@ -182,6 +182,15 @@ impl SupervisorClient {
         Ok(resp.lines)
     }
 
+    /// Sends characters/bytes to a running program's standard input.
+    pub async fn send_stdin(&self, name: &str, chars: &str) -> Result<()> {
+        let path = format!("/api/v1/programs/{}/stdin", name);
+        let body = serde_json::json!({ "chars": chars });
+        let body_bytes = serde_json::to_vec(&body)?;
+        let _: serde_json::Value = self.request_json("POST", &path, Some(&body_bytes)).await?;
+        Ok(())
+    }
+
     /// Streams real-time log lines from the daemon (Server-Sent Events).
     pub async fn stream_logs<F>(&self, name: &str, mut callback: F) -> Result<()>
     where

@@ -43,6 +43,30 @@ fn get_exit_command(code: i32) -> (String, Vec<String>) {
     }
 }
 
+fn get_stdin_echo_command() -> (String, Vec<String>) {
+    #[cfg(unix)]
+    {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "read -r line; echo \"ECHO:$line\"".to_string(),
+            ],
+        )
+    }
+    #[cfg(windows)]
+    {
+        (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "$line = [Console]::In.ReadLine(); Write-Output ('ECHO:' + $line)".to_string(),
+            ],
+        )
+    }
+}
+
 #[tokio::test]
 async fn test_program_lifecycle_start_and_stop() {
     let (cmd, args) = get_sleep_command(10);
@@ -510,4 +534,88 @@ async fn test_pre_stop_hook_executed_and_failure_degradation() {
 
     program.shutdown().await.expect("shutdown 1");
     program2.shutdown().await.expect("shutdown 2");
+}
+
+#[tokio::test]
+async fn test_process_send_stdin_success_echo() {
+    let (cmd, args) = get_stdin_echo_command();
+    let mut config = ProgramConfig::new("stdin_echo_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    // Send stdin
+    let send_res = program.send_stdin(b"HelloSupervisor\n".to_vec()).await;
+    assert!(
+        send_res.is_ok(),
+        "Sending stdin should succeed: {:?}",
+        send_res
+    );
+
+    // Wait up to 5s for the echo line to appear in logs
+    let mut found = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let logs = program.read_logs(Some(20));
+        if logs.iter().any(|l| l.contains("ECHO:HelloSupervisor")) {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "Child should have echoed stdin input to stdout");
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_process_send_stdin_not_running() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("stdin_stopped_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+
+    let program = ProcessProgram::new(config).expect("create");
+    // Program is not started yet
+    let res = program.send_stdin(b"test\n".to_vec()).await;
+    assert!(matches!(
+        res,
+        Err(rsupervisord::error::ProgramError::NotRunning { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_process_send_stdin_fresh_pipe_after_restart() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("stdin_restart_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    program
+        .send_stdin(b"before restart\n".to_vec())
+        .await
+        .expect("stdin 1");
+
+    program
+        .restart(Duration::from_secs(1))
+        .await
+        .expect("restart");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    // New child has fresh stdin writer
+    let res = program.send_stdin(b"after restart\n".to_vec()).await;
+    assert!(
+        res.is_ok(),
+        "Should send stdin to restarted child: {:?}",
+        res
+    );
+
+    program.stop(Duration::from_secs(1)).await.expect("stop");
+    program.shutdown().await.expect("shutdown");
 }

@@ -43,6 +43,7 @@ pub struct ProcessProgram {
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
     started_at: Arc<RwLock<Option<Instant>>>,
+    stdin_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
     event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
     _cancel_guard: tokio_util::sync::DropGuard,
@@ -82,6 +83,7 @@ impl ProcessProgram {
         )));
         let ring_buffer = Arc::new(RingBuffer::default());
         let started_at = Arc::new(RwLock::new(None));
+        let stdin_tx = Arc::new(RwLock::new(None));
         let cancel_token = CancellationToken::new();
         let (command_tx, command_rx) = mpsc::channel(32);
 
@@ -91,6 +93,7 @@ impl ProcessProgram {
             status_snapshot.clone(),
             ring_buffer.clone(),
             started_at.clone(),
+            stdin_tx.clone(),
             activity_tracker,
             event_hub.clone(),
             cancel_token.clone(),
@@ -105,6 +108,7 @@ impl ProcessProgram {
             status_snapshot,
             ring_buffer,
             started_at,
+            stdin_tx,
             event_hub,
             cancel_token,
             _cancel_guard: cancel_guard,
@@ -288,6 +292,104 @@ impl Program for ProcessProgram {
     fn subscribe_logs(&self) -> tokio::sync::broadcast::Receiver<String> {
         self.ring_buffer.subscribe()
     }
+
+    async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ProgramError> {
+        let tx = {
+            let guard = self.stdin_tx.read();
+            guard.clone()
+        };
+        let Some(tx) = tx else {
+            return Err(ProgramError::NotRunning {
+                name: self.config.name.clone(),
+            });
+        };
+
+        let timeout_dur = Duration::from_secs(10);
+        match tokio::time::timeout(timeout_dur, tx.send(data)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_closed)) => Err(ProgramError::NotRunning {
+                name: self.config.name.clone(),
+            }),
+            Err(_) => Err(ProgramError::StdinWriteTimeout {
+                name: self.config.name.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            }),
+        }
+    }
+}
+
+const MAX_STDIN_BUFFER_BYTES: usize = 64 * 1024;
+
+fn spawn_stdin_writer(
+    program_name: String,
+    mut child_stdin: tokio::process::ChildStdin,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    cancel_token: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        use bytes::{Buf, BytesMut};
+        use tokio::io::AsyncWriteExt;
+
+        let mut buffer = BytesMut::with_capacity(8192);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+
+                // Drain branch: active only if internal buffer has data to write to the OS pipe
+                write_res = child_stdin.write(&buffer[..]), if !buffer.is_empty() => {
+                    match write_res {
+                        Ok(0) => {
+                            tracing::debug!(program = %program_name, "Child stdin closed by reader (broken pipe)");
+                            break;
+                        }
+                        Ok(n) => {
+                            buffer.advance(n);
+                        }
+                        Err(e) => {
+                            tracing::debug!(program = %program_name, error = %e, "Child stdin write failed");
+                            break;
+                        }
+                    }
+                }
+
+                // Read branch: active only if internal buffer has not reached the backpressure limit
+                msg = rx.recv(), if buffer.len() < MAX_STDIN_BUFFER_BYTES => {
+                    match msg {
+                        Some(chunk) => {
+                            // Append into buffer without awaiting or blocking
+                            buffer.extend_from_slice(&chunk);
+                        }
+                        None => {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Best-effort drain of remaining buffer before dropping pipe (bounded by 500ms)
+        if !buffer.is_empty() && !cancel_token.is_cancelled() {
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                while !buffer.is_empty() {
+                    match child_stdin.write(&buffer[..]).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buffer.advance(n),
+                    }
+                }
+                let _ = child_stdin.flush().await;
+            })
+            .await;
+        }
+
+        // Dropping child_stdin explicitly closes the pipe handle, sending EOF to child
+        drop(child_stdin);
+        tracing::debug!(program = %program_name, "Stdin writer task finished");
+    })
 }
 
 struct RunningChild {
@@ -297,6 +399,7 @@ struct RunningChild {
     platform_guard: Box<dyn PlatformProcessGuard>,
     stdout_pump: Option<JoinHandle<()>>,
     stderr_pump: Option<JoinHandle<()>>,
+    stdin_writer: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
     _cancel_guard: tokio_util::sync::DropGuard,
     health_task: Option<JoinHandle<()>>,
@@ -305,15 +408,20 @@ struct RunningChild {
 impl RunningChild {
     async fn drain_pumps(&mut self) {
         self.cancel_token.cancel();
+        let stdin_w = self.stdin_writer.take();
         let health = self.health_task.take();
         let out = self.stdout_pump.take();
         let err = self.stderr_pump.take();
 
+        let stdin_abort = stdin_w.as_ref().map(|h| h.abort_handle());
         let health_abort = health.as_ref().map(|h| h.abort_handle());
         let out_abort = out.as_ref().map(|h| h.abort_handle());
         let err_abort = err.as_ref().map(|h| h.abort_handle());
 
         let hard_deadline = tokio::time::timeout(Duration::from_secs(2), async {
+            if let Some(w) = stdin_w {
+                let _ = w.await;
+            }
             if let Some(h) = health {
                 let _ = h.await;
             }
@@ -327,8 +435,11 @@ impl RunningChild {
 
         if hard_deadline.await.is_err() {
             tracing::warn!(
-                "Log pump drain timed out (inherited pipe by grandchild?); aborting pumps"
+                "Log/stdin pump drain timed out (inherited pipe by grandchild?); aborting pumps"
             );
+            if let Some(ref a) = stdin_abort {
+                a.abort();
+            }
             if let Some(ref a) = health_abort {
                 a.abort();
             }
@@ -342,6 +453,24 @@ impl RunningChild {
     }
 }
 
+impl Drop for RunningChild {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(w) = self.stdin_writer.take() {
+            w.abort();
+        }
+        if let Some(h) = self.health_task.take() {
+            h.abort();
+        }
+        if let Some(o) = self.stdout_pump.take() {
+            o.abort();
+        }
+        if let Some(e) = self.stderr_pump.take() {
+            e.abort();
+        }
+    }
+}
+
 struct ProgramActor {
     config: ProgramConfig,
     command_rx: mpsc::Receiver<ProgramCommand>,
@@ -350,6 +479,7 @@ struct ProgramActor {
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
     started_at: Arc<RwLock<Option<Instant>>>,
+    stdin_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
     cancel_token: CancellationToken,
@@ -370,6 +500,7 @@ impl ProgramActor {
         status_snapshot: Arc<RwLock<ProgramStatus>>,
         ring_buffer: Arc<RingBuffer>,
         started_at: Arc<RwLock<Option<Instant>>>,
+        stdin_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
         activity_tracker: crate::manager::ActivityTracker,
         event_hub: crate::manager::EventHub,
         cancel_token: CancellationToken,
@@ -436,6 +567,7 @@ impl ProgramActor {
             status_snapshot,
             ring_buffer,
             started_at,
+            stdin_tx,
             activity_tracker,
             event_hub,
             cancel_token,
@@ -755,7 +887,7 @@ impl ProgramActor {
             cmd.env(k, v);
         }
 
-        cmd.stdin(std::process::Stdio::null());
+        cmd.stdin(std::process::Stdio::piped());
 
         let stdout_disabled = self.config.logs.is_stdout_disabled();
         let stderr_disabled = self.config.logs.is_stderr_disabled();
@@ -791,6 +923,7 @@ impl ProgramActor {
             ProgramError::PlatformError("Process spawned without PID".to_string())
         })?;
 
+        let stdin = child_guard.stdin.take();
         let stdout = child_guard.stdout.take();
         let stderr = child_guard.stderr.take();
 
@@ -837,6 +970,20 @@ impl ProgramActor {
 
         *self.started_at.write() = Some(Instant::now());
         let child_cancel = CancellationToken::new();
+
+        let stdin_writer = if let Some(cin) = stdin {
+            let (tx, rx) = mpsc::channel(16);
+            *self.stdin_tx.write() = Some(tx);
+            Some(spawn_stdin_writer(
+                self.config.name.clone(),
+                cin,
+                rx,
+                child_cancel.clone(),
+            ))
+        } else {
+            *self.stdin_tx.write() = None;
+            None
+        };
 
         let health_task = if let Some(ref hcfg) = self.config.health_check {
             let runner = crate::manager::HealthProbeRunner::new(
@@ -888,6 +1035,7 @@ impl ProgramActor {
             platform_guard,
             stdout_pump,
             stderr_pump,
+            stdin_writer,
             cancel_token: child_cancel,
             _cancel_guard: cancel_guard,
             health_task,
@@ -898,6 +1046,7 @@ impl ProgramActor {
 
     async fn stop_current_child(&mut self, grace_period: Duration) {
         *self.started_at.write() = None;
+        *self.stdin_tx.write() = None;
         if let Some(mut child_info) = self.current_child.take() {
             self.update_status(
                 ProgramState::Stopping,
@@ -1022,6 +1171,7 @@ impl ProgramActor {
         exit_res: std::io::Result<std::process::ExitStatus>,
     ) -> bool {
         *self.started_at.write() = None;
+        *self.stdin_tx.write() = None;
         let mut child_info = self.current_child.take();
         let pid = child_info.as_ref().map(|c| c.pid);
         let marked_running = child_info

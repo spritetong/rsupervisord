@@ -179,8 +179,13 @@ pub async fn run_daemon(
     if let Some(ext) = external_cancel {
         let ct = cancel_token.clone();
         tokio::spawn(async move {
-            ext.cancelled().await;
-            ct.cancel();
+            tokio::select! {
+                biased;
+                _ = ext.cancelled() => {
+                    ct.cancel();
+                }
+                _ = ct.cancelled() => {}
+            }
         });
     }
 

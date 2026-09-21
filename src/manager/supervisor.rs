@@ -83,6 +83,11 @@ pub enum ManagerCommand {
         name: String,
         reply: oneshot::Sender<Result<tokio::sync::broadcast::Receiver<String>, ProgramError>>,
     },
+    SendStdin {
+        name: String,
+        data: Vec<u8>,
+        reply: oneshot::Sender<Result<(), ProgramError>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), ProgramError>>,
     },
@@ -99,6 +104,10 @@ pub struct ManagerHandle {
 impl ManagerHandle {
     pub fn activity_tracker(&self) -> &crate::manager::ActivityTracker {
         &self.activity_tracker
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     pub fn event_hub(&self) -> &crate::manager::EventHub {
@@ -460,6 +469,35 @@ impl ManagerHandle {
             })?
     }
 
+    pub async fn send_stdin(
+        &self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+    ) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::SendStdin {
+                name: name.into(),
+                data,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(15);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
     pub async fn shutdown(&self) -> Result<(), ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -701,6 +739,21 @@ impl ManagerActor {
                                 .and_then(|n| self.programs.get(&n))
                                 .map(|p| p.subscribe_logs())
                                 .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::SendStdin { name, data, reply } => {
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = if let Some(t) = target
+                                && let Some(p) = self.programs.get(&t)
+                            {
+                                p.send_stdin(data).await
+                            } else {
+                                Err(ProgramError::NotFound { name })
+                            };
                             let _ = reply.send(res);
                         }
                         ManagerCommand::Shutdown { reply } => {

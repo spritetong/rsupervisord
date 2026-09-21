@@ -14,8 +14,9 @@ To fundamentally eliminate high CPU consumption, orphan process leaks, lock cont
    - Both the `Manager` and every managed `Program` are designed as asynchronous tasks (`async task`) with independent lifecycles.
    - **Read-Write Separation & Lock-Free Reads**: High-concurrency, zero-contention read access is provided through thread-safe shared snapshots (`Arc<RwLock<ProgramStatus>>`). However, **all state transitions and control mutations MUST be serialized via asynchronous message channels (`tokio::sync::mpsc`)**, preventing race conditions and inconsistent states.
    - **Deadlock Elimination**: Synchronous Request-Response interactions follow strict hierarchical one-way messaging with timeout circuit breakers, completely preventing circular wait deadlocks.
-2. **Explicit JoinHandle Lifecycle Tracking**:
-   - Detached asynchronous tasks are strictly forbidden. Every task spawned with `tokio::spawn` must have its `JoinHandle` explicitly retained by its supervisor, ensuring deterministic tracking, graceful draining, and clean destruction during stop or reload phases.
+2. **Deterministic Task Lifecycle & Cancellation Governance**:
+   - For core subordinate tasks (e.g. `ManagerActor`, `ProcessActor`, `StdinWriterTask`, `HealthProbeRunner`, `LogPumpTask`), `JoinHandle` must be explicitly retained by the parent supervisor, ensuring deterministic tracking, graceful draining, and clean destruction during stop or reload phases.
+   - For tasks without a direct subordinate/dependency relationship (e.g. individual IPC client connection streams, async API dispatchers, external cancellation bridges), spawning tasks without retaining `JoinHandle` is permitted, **provided that every such task MUST be strictly governed by the parent object's `CancellationToken`** and subject to the logical constraint of that object's lifecycle, guaranteeing immediate termination upon parent shutdown.
 3. **Cooperative Cancellation (`CancellationToken`) & Bounded Drain Guard**:
    - Cooperative cancellation is governed by `tokio_util::sync::CancellationToken`, giving process control blocks, OS handles, and log buffers a deterministic window to flush and release resources safely.
    - For log pipe draining after process termination, a hard 2-second timeout guard prevents rogue grandchild processes inheriting standard descriptors from deadlocking the supervisor, aborting stalled pumps only as an ultimate fallback.
@@ -92,7 +93,8 @@ The runtime consists of four primary asynchronous task categories:
 1. **`ManagerTask`**: Parses global configurations, constructs DAG dependencies, schedules Cron deadlines, processes program groups, computes incremental diffs, processes external CLI/Web commands, and drives global orchestration in response to program lifecycle events.
 2. **`ProgramTask`**: Each managed process runs as an independent Actor task driving its internal state machine (`Stopped -> Starting -> Running -> Backoff -> Stopping -> Exited -> Fatal`), executing lifecycle hooks (`pre_start` / `pre_stop`), interfacing with platform guards, and supervising log pumps.
 3. **`LogPumpTask`**: Dedicated asynchronous readers per process for `stdout` and `stderr`, handling line buffering, feeding `file-rotate`, and broadcasting to `RingBuffer`.
-4. **`ServerTask`**: Powered by Axum, listening on local UDS, Windows Named Pipe, and optional TCP endpoints, converting external requests into commands delivered to `ManagerTask`.
+4. **`StdinWriterTask`**: Dedicated non-blocking writer Actor managing child standard input pipes, utilizing internal `BytesMut` memory buffers (up to 64KB), `tokio::select!` if-guard backpressure propagation, and graceful EOF on cancellation.
+5. **`ServerTask`**: Powered by Axum, listening on local UDS, Windows Named Pipe, and optional TCP endpoints, converting external requests into commands delivered to `ManagerTask`.
 
 ---
 
@@ -319,9 +321,11 @@ flowchart TD
 
 ## 4. Lifecycle & JoinHandle Management
 
-### 4.1 Task Registry (`ManagedTask`)
+### 4.1 Task Registry (`ManagedTask`) & Governance Model
 
-To ensure clean shutdown and hot reloading, untracked `tokio::spawn` calls are prohibited. Every background task is encapsulated with its `JoinHandle` and `CancellationToken`:
+To balance pragmatic concurrency with strict leak-prevention:
+- **Core Subordinate Tasks**: Core Actors and supervised worker tasks (`ManagerActor`, `ProcessActor`, `StdinWriterTask`, `HealthProbeRunner`, and `LogPumpTask`) are encapsulated with explicit `JoinHandle` and `CancellationToken` tracking:
+- **Non-Subordinate Tasks**: Tasks without a direct subordinate/dependency relationship (such as per-connection IPC handling or fire-and-forget API calls) may spawn without retaining a `JoinHandle`, but **must be strictly bound to the parent object's `CancellationToken`**, guaranteeing prompt termination upon parent cancellation.
 
 ```rust
 use tokio::task::JoinHandle;
@@ -881,6 +885,39 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   - If the hook fails or times out, broadcasts `SystemEvent::ProcessPreStopFailed` and logs a warning.
   - **Guaranteed Degradation**: The stop sequence **always degrades gracefully to proceed with child process termination**. This guarantees that malfunctioning or hanging hooks can never deadlock the supervisor or leave unkillable processes running.
 
+### 15.18 Data-Plane Process Stdin Architecture: Zero-Drop Backpressure & Timeout Circuit Breaking
+
+- **Background & Pain Point of Naive Implementations**:
+  - In `go-supervisord`, `sendProcessStdin` invoked `p.stdin.Write()` synchronously inside the request goroutine. If a child process failed to read or read slowly, the OS pipe buffer filled up, causing the goroutine to block indefinitely and leaking system threads.
+  - Conversely, simplistic "try_write + drop on overflow" approaches are fatal for programs with slow initialization or bursty reads, causing silent data corruption and broken commands.
+- **Dedicated `StdinWriterTask` & Memory Buffer**:
+  - Each child process is spawned with `Stdio::piped()`.
+  - An asynchronous writer task (`StdinWriterTask`) manages `tokio::process::ChildStdin` with an internal memory buffer (`bytes::BytesMut`, up to 64KB).
+- **Reactor Backpressure via `tokio::select!` If-Guards**:
+  - In `StdinWriterTask::run`, the event loop is structured as follows:
+    ```rust
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => break,
+        write_res = child_stdin.write(&buffer[..]), if !buffer.is_empty() => {
+            buffer.advance(n);
+        }
+        msg = rx.recv(), if buffer.len() < MAX_STDIN_BUFFER_BYTES => {
+            buffer.extend_from_slice(&chunk);
+        }
+    }
+    ```
+  - When the child reads slower than the input stream and `buffer.len() >= 64KB`, the `rx.recv()` branch is disabled.
+  - The bounded MPSC channel (`capacity: 16`) fills up, naturally suspending `tx.send(data).await` on the caller side.
+  - No bytes are dropped; backpressure propagates naturally through the OS pipe, internal buffer, MPSC channel, to the caller.
+- **Timeout Circuit Breaker**:
+  - Callers (`ManagerHandle::send_stdin` and `ProcessProgram::send_stdin`) await `tx.send(data)` under a 10-second timeout.
+  - If a child process is completely deadlocked and never reads, the request fails with `ProgramError::StdinWriteTimeout`, returning HTTP 504 Gateway Timeout while keeping the supervisor actor and daemon completely responsive.
+- **Lifecycle & Pipe Management**:
+  - Stopped/non-running processes return `ProgramError::NotRunning` immediately without allocating channels.
+  - When a child process terminates or is stopped, the cancel token fires, `child_stdin` is dropped (sending `EOF` to the child), and `stdin_tx` is cleared to `None`.
+  - On restart, a fresh pipe and writer Actor are allocated for the new process generation.
+
 ---
 
 ## 16. Verification Matrix
@@ -889,16 +926,18 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 95 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 99 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
 | **Windows Native IPC** | Bind Named Pipe (`\\.\pipe\...`) & AF_UNIX; connect CLI & reverse proxy | Zero-port, elevation-free high-compatibility IPC | ✅ Named Pipe + AF_UNIX dual listeners verified |
 | **Process Group Operations** | Start, stop, restart groups via CLI and REST APIs | Group sub-DAG priority order strictly honored | ✅ `test_manager_start_and_stop_group` verified |
 | **Cron Scheduling** | Scheduled start/stop via cron expressions with zero polling | Precise trigger at scheduled time; autostart: false | ✅ `cron_tests.rs` (3 tests passed) |
 | **Lifecycle Hooks & Degradation**| Pre-start blocking, pre-start ignore failure, pre-stop graceful degradation | Safe degradation guarantees clean process termination | ✅ `program_tests.rs` (4 hook tests passed) |
+| **Data-Plane Stdin & Backpressure**| Send stdin to echo child, restart pipe isolation, backpressure & error on stopped | Zero-drop bounded buffer, backpressure propagation, EOF on drop | ✅ `program_tests.rs`, `manager_tests.rs`, `server_tests.rs`, `cli_tests.rs` (6 stdin tests passed) |
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
 | **System Service Lifecycles** | Install, uninstall, start, stop, restart, and SCM loop | Zero resource leaks, clean drain | ✅ Verified across Windows SCM & Linux systemd |
 | **Windows GUI & Console Close** | Send `WM_CLOSE`, `Ctrl+Close`, and `Ctrl+C` to daemon | Immediate graceful shutdown triggered | ✅ Verified with `test_windows_gui_wm_close_shutdown_signal` |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 95/95 passed; Linux: 93/93 passed |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 99/99 passed; Linux: 97/97 passed |
+
