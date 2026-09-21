@@ -50,4 +50,14 @@ pub enum ProgramError {
 
     #[error("Entity '{name}' is currently shutting down")]
     ShuttingDown { name: String },
+
+    #[error("Program '{name}' pre_start hook failed: {reason}")]
+    PreStartHookFailed { name: String, reason: String },
+
+    #[error("Invalid cron expression for program '{name}': '{expression}' ({reason})")]
+    InvalidCronExpression {
+        name: String,
+        expression: String,
+        reason: String,
+    },
 }

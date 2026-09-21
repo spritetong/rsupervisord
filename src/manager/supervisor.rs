@@ -506,11 +506,13 @@ impl SupervisorManager {
 
         let cancel_token = CancellationToken::new();
         let (command_tx, command_rx) = mpsc::channel(64);
+        let cron_table = crate::manager::cron::CronTable::from_configs(&programs_map);
 
         let actor = ManagerActor {
             programs,
             configs: programs_map,
             dag,
+            cron_table,
             command_rx,
             activity_tracker: activity_tracker.clone(),
             event_hub: event_hub.clone(),
@@ -553,6 +555,7 @@ struct ManagerActor {
     programs: HashMap<String, Box<dyn Program>>,
     configs: HashMap<String, ProgramConfig>,
     dag: DependencyGraph,
+    cron_table: crate::manager::cron::CronTable,
     command_rx: mpsc::Receiver<ManagerCommand>,
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
@@ -563,6 +566,8 @@ struct ManagerActor {
 impl ManagerActor {
     async fn run(mut self) {
         loop {
+            let next_cron_deadline = self.cron_table.earliest_deadline();
+
             tokio::select! {
                 biased;
 
@@ -570,6 +575,15 @@ impl ManagerActor {
                     self.is_shutting_down = true;
                     self.execute_stop_all(None).await;
                     break;
+                }
+
+                _ = async {
+                    match next_cron_deadline {
+                        Some(instant) => tokio::time::sleep_until(instant).await,
+                        None => std::future::pending().await,
+                    }
+                }, if next_cron_deadline.is_some() && !self.is_shutting_down => {
+                    self.handle_due_cron_jobs().await;
                 }
 
                 Some(cmd) = self.command_rx.recv() => {
@@ -641,13 +655,28 @@ impl ManagerActor {
                                 self.find_match(&name).into_iter().next()
                             };
                             let res = target
-                                .and_then(|n| self.programs.get(&n))
-                                .map(|p| p.status())
+                                .and_then(|n| {
+                                    self.programs.get(&n).map(|p| {
+                                        let mut st = p.status();
+                                        st.cron = self.cron_table.get_cron_expr(&n);
+                                        st.next_cron_run = self.cron_table.get_next_run(&n);
+                                        st
+                                    })
+                                })
                                 .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
                             let _ = reply.send(res);
                         }
                         ManagerCommand::GetAllStatus { reply } => {
-                            let statuses = self.programs.values().map(|p| p.status()).collect();
+                            let statuses = self
+                                .programs
+                                .iter()
+                                .map(|(n, p)| {
+                                    let mut st = p.status();
+                                    st.cron = self.cron_table.get_cron_expr(n);
+                                    st.next_cron_run = self.cron_table.get_next_run(n);
+                                    st
+                                })
+                                .collect();
                             let _ = reply.send(statuses);
                         }
                         ManagerCommand::ReadLogs { name, lines, reply } => {
@@ -970,7 +999,10 @@ impl ManagerActor {
         // 4. Update the active DAG
         self.dag = new_dag;
 
-        // 5. Broadcast ConfigReloaded event to subscribers
+        // 5. Rebuild cron table with updated configurations
+        self.cron_table = crate::manager::cron::CronTable::from_configs(&self.configs);
+
+        // 6. Broadcast ConfigReloaded event to subscribers
         self.event_hub
             .publish_system(crate::manager::SystemEvent::ConfigReloaded {
                 added: summary.added.clone(),
@@ -980,5 +1012,72 @@ impl ManagerActor {
             });
 
         Ok(summary)
+    }
+
+    /// Handles cron actions that became due at current wall-clock time.
+    async fn handle_due_cron_jobs(&mut self) {
+        let now = chrono::Utc::now();
+        let actions = self.cron_table.pop_due_actions(now);
+
+        for action in actions {
+            match action {
+                crate::manager::cron::CronAction::Start {
+                    name,
+                    group,
+                    expression,
+                } => {
+                    if let Some(prog) = self.programs.get(&name) {
+                        let st = prog.status();
+                        if !st.state.is_active() {
+                            tracing::info!(
+                                program = %name,
+                                cron = %expression,
+                                "Cron schedule triggered program start"
+                            );
+                            self.event_hub.publish_system(
+                                crate::manager::SystemEvent::CronTriggered {
+                                    name: name.clone(),
+                                    group,
+                                    action: "start".to_string(),
+                                    expression,
+                                },
+                            );
+                            let _ = self.execute_start_program(&name).await;
+                        } else {
+                            tracing::info!(
+                                program = %name,
+                                state = ?st.state,
+                                "Cron trigger skipped: program is already active"
+                            );
+                        }
+                    }
+                }
+                crate::manager::cron::CronAction::Stop {
+                    name,
+                    group,
+                    expression,
+                } => {
+                    if let Some(prog) = self.programs.get(&name) {
+                        let st = prog.status();
+                        if st.state.is_active() {
+                            tracing::info!(
+                                program = %name,
+                                cron = %expression,
+                                "Cron schedule triggered program stop"
+                            );
+                            self.event_hub.publish_system(
+                                crate::manager::SystemEvent::CronTriggered {
+                                    name: name.clone(),
+                                    group,
+                                    action: "stop".to_string(),
+                                    expression,
+                                },
+                            );
+                            let _ = self.execute_stop_program(&name, None).await;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

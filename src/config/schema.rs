@@ -155,6 +155,14 @@ pub struct ProgramDefaults {
     pub logs: Option<ProgramLogsConfigRaw>,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default, alias = "pre_start_hook")]
+    pub pre_start: Option<String>,
+    #[serde(default, alias = "pre_stop_hook")]
+    pub pre_stop: Option<String>,
+    #[serde(default)]
+    pub pre_start_ignore_failure: Option<bool>,
+    #[serde(default)]
+    pub hook_timeout_secs: Option<u64>,
 }
 
 /// Raw representation of program log configuration with optional booleans for inheritance.
@@ -213,6 +221,18 @@ pub struct ProgramConfigRaw {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub group: Option<String>,
+    #[serde(default)]
+    pub cron: Option<String>,
+    #[serde(default, alias = "stop_cron")]
+    pub cron_stop: Option<String>,
+    #[serde(default, alias = "pre_start_hook")]
+    pub pre_start: Option<String>,
+    #[serde(default, alias = "pre_stop_hook")]
+    pub pre_stop: Option<String>,
+    #[serde(default)]
+    pub pre_start_ignore_failure: Option<bool>,
+    #[serde(default)]
+    pub hook_timeout_secs: Option<u64>,
 }
 
 /// Process group configuration definition.
@@ -348,6 +368,24 @@ impl SupervisorConfig {
                     name, stop_wait
                 )));
             }
+            if let Some(ref expr) = raw.cron
+                && let Err(e) = expr.parse::<croner::Cron>()
+            {
+                return Err(ProgramError::InvalidCronExpression {
+                    name: name.clone(),
+                    expression: expr.clone(),
+                    reason: e.to_string(),
+                });
+            }
+            if let Some(ref expr) = raw.cron_stop
+                && let Err(e) = expr.parse::<croner::Cron>()
+            {
+                return Err(ProgramError::InvalidCronExpression {
+                    name: name.clone(),
+                    expression: expr.clone(),
+                    reason: e.to_string(),
+                });
+            }
         }
 
         for (group_name, group_cfg) in &self.groups {
@@ -392,7 +430,7 @@ impl SupervisorConfig {
             let autostart = raw
                 .autostart
                 .or(self.program_defaults.autostart)
-                .unwrap_or(true);
+                .unwrap_or(raw.cron.is_none());
 
             let autorestart = raw
                 .autorestart
@@ -507,6 +545,23 @@ impl SupervisorConfig {
                 found_group.unwrap_or_else(|| name.clone())
             };
 
+            let pre_start = raw
+                .pre_start
+                .clone()
+                .or_else(|| self.program_defaults.pre_start.clone());
+            let pre_stop = raw
+                .pre_stop
+                .clone()
+                .or_else(|| self.program_defaults.pre_stop.clone());
+            let pre_start_ignore_failure = raw
+                .pre_start_ignore_failure
+                .or(self.program_defaults.pre_start_ignore_failure)
+                .unwrap_or(false);
+            let hook_timeout_secs = raw
+                .hook_timeout_secs
+                .or(self.program_defaults.hook_timeout_secs)
+                .unwrap_or(15);
+
             let prog = ProgramConfig {
                 name: name.clone(),
                 command,
@@ -527,6 +582,12 @@ impl SupervisorConfig {
                 logs,
                 health_check,
                 group,
+                cron: raw.cron.clone(),
+                cron_stop: raw.cron_stop.clone(),
+                pre_start,
+                pre_stop,
+                pre_start_ignore_failure,
+                hook_timeout_secs,
             };
 
             resolved.insert(name.clone(), prog);

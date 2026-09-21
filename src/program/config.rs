@@ -142,6 +142,18 @@ pub struct ProgramConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub group: String,
+    #[serde(default)]
+    pub cron: Option<String>,
+    #[serde(default)]
+    pub cron_stop: Option<String>,
+    #[serde(default)]
+    pub pre_start: Option<String>,
+    #[serde(default)]
+    pub pre_stop: Option<String>,
+    #[serde(default)]
+    pub pre_start_ignore_failure: bool,
+    #[serde(default = "default_hook_timeout_secs")]
+    pub hook_timeout_secs: u64,
 }
 
 impl ProgramConfig {
@@ -253,6 +265,12 @@ impl ProgramConfig {
             umask: None,
             logs: ProgramLogsConfig::default(),
             health_check: None,
+            cron: None,
+            cron_stop: None,
+            pre_start: None,
+            pre_stop: None,
+            pre_start_ignore_failure: false,
+            hook_timeout_secs: default_hook_timeout_secs(),
         }
     }
 
@@ -272,6 +290,28 @@ impl ProgramConfig {
         if let Some(ref mb) = self.logs.max_bytes {
             crate::logging::parse_byte_size(mb)?;
         }
+        if let Some(ref expr) = self.cron
+            && let Err(e) = expr.parse::<croner::Cron>()
+        {
+            return Err(crate::error::ProgramError::InvalidCronExpression {
+                name: self.name.clone(),
+                expression: expr.clone(),
+                reason: e.to_string(),
+            });
+        }
+        if let Some(ref expr) = self.cron_stop
+            && let Err(e) = expr.parse::<croner::Cron>()
+        {
+            return Err(crate::error::ProgramError::InvalidCronExpression {
+                name: self.name.clone(),
+                expression: expr.clone(),
+                reason: e.to_string(),
+            });
+        }
         Ok(())
     }
+}
+
+pub fn default_hook_timeout_secs() -> u64 {
+    15
 }

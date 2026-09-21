@@ -68,6 +68,10 @@ pub struct ProgramStatus {
     pub health: HealthStatus,
     pub metrics: Option<ProcessMetrics>,
     pub description: String,
+    #[serde(default)]
+    pub cron: Option<String>,
+    #[serde(default)]
+    pub next_cron_run: Option<String>,
 }
 
 impl ProgramStatus {
@@ -84,6 +88,8 @@ impl ProgramStatus {
             health: HealthStatus::None,
             metrics: None,
             description: "Stopped".to_string(),
+            cron: None,
+            next_cron_run: None,
         }
     }
 
@@ -101,6 +107,8 @@ impl ProgramStatus {
             health: HealthStatus::None,
             metrics: None,
             description: "Stopped".to_string(),
+            cron: None,
+            next_cron_run: None,
         }
     }
 

@@ -397,3 +397,117 @@ async fn test_program_backoff_cancelled_on_shutdown() {
     );
     assert_eq!(program.status().state, ProgramState::Stopped);
 }
+
+fn get_hook_exit_command(exit_code: i32) -> String {
+    format!("exit {}", exit_code)
+}
+
+#[tokio::test]
+async fn test_pre_start_hook_success_and_marker() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let marker = temp_dir.path().join("pre_start_ok.txt");
+
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("pre_start_ok_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+
+    let hook = format!("echo ok > \"{}\"", marker.display());
+    config.pre_start = Some(hook);
+    config.pre_start_ignore_failure = false;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start program");
+    assert_eq!(program.status().state, ProgramState::Running);
+    assert!(marker.exists(), "pre_start hook marker file must exist");
+
+    program.stop(Duration::from_secs(2)).await.expect("stop");
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_pre_start_hook_failure_blocks_start() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("pre_start_fail_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+    config.pre_start = Some(get_hook_exit_command(1));
+    config.pre_start_ignore_failure = false;
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    let res = program.start().await;
+    assert!(
+        res.is_err(),
+        "Start must fail when pre_start hook returns non-zero"
+    );
+    assert_eq!(program.status().state, ProgramState::Fatal);
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_pre_start_hook_failure_degradation_ignored() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("pre_start_degrade_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+    config.pre_start = Some(get_hook_exit_command(1));
+    config.pre_start_ignore_failure = true; // Degrade gracefully
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    let res = program.start().await;
+    assert!(
+        res.is_ok(),
+        "Start must succeed when pre_start_ignore_failure is true"
+    );
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    program.stop(Duration::from_secs(2)).await.expect("stop");
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_pre_stop_hook_executed_and_failure_degradation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let marker = temp_dir.path().join("pre_stop_ok.txt");
+
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("pre_stop_test", cmd);
+    config.args = args;
+    config.start_secs = 0;
+
+    let hook = format!("echo stopped > \"{}\"", marker.display());
+    config.pre_stop = Some(hook);
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start program");
+    assert_eq!(program.status().state, ProgramState::Running);
+
+    program.stop(Duration::from_secs(2)).await.expect("stop");
+    assert_eq!(program.status().state, ProgramState::Stopped);
+    assert!(
+        marker.exists(),
+        "pre_stop marker must be written before stop completes"
+    );
+
+    // Also test failing pre_stop hook does NOT prevent process stop
+    let (cmd2, args2) = get_sleep_command(10);
+    let mut config2 = ProgramConfig::new("pre_stop_fail_test", cmd2);
+    config2.args = args2;
+    config2.start_secs = 0;
+    config2.pre_stop = Some(get_hook_exit_command(42));
+
+    let mut program2 = ProcessProgram::new(config2).expect("create");
+    program2.start().await.expect("start");
+    assert_eq!(program2.status().state, ProgramState::Running);
+
+    let stop_res = program2.stop(Duration::from_secs(2)).await;
+    assert!(
+        stop_res.is_ok(),
+        "Process must stop gracefully even if pre_stop hook fails"
+    );
+    assert_eq!(program2.status().state, ProgramState::Stopped);
+
+    program.shutdown().await.expect("shutdown 1");
+    program2.shutdown().await.expect("shutdown 2");
+}

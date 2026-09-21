@@ -52,6 +52,7 @@ pub async fn handle_status(client: &SupervisorClient, names: &[String]) -> Resul
             cpu: p.cpu,
             mem: p.mem,
             uptime: p.uptime,
+            cron: p.cron,
             description: p.description,
         });
     }
@@ -373,6 +374,66 @@ pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
                             "DaemonLifecycle".yellow().bold(),
                             action,
                             timestamp_secs
+                        );
+                    }
+                    crate::manager::SystemEvent::CronTriggered {
+                        name,
+                        group,
+                        action,
+                        expression,
+                    } => {
+                        println!(
+                            "[{}] CronTriggered ({}): action={} expr='{}'",
+                            name.cyan().bold(),
+                            group,
+                            action.green().bold(),
+                            expression
+                        );
+                    }
+                    crate::manager::SystemEvent::ProcessPreStart {
+                        name,
+                        group: _,
+                        command,
+                    } => {
+                        println!(
+                            "[{}] ProcessPreStart: command='{}'",
+                            name.cyan().bold(),
+                            command
+                        );
+                    }
+                    crate::manager::SystemEvent::ProcessPreStartFailed {
+                        name,
+                        group: _,
+                        error,
+                    } => {
+                        println!(
+                            "[{}] {}: {}",
+                            name.cyan().bold(),
+                            "ProcessPreStartFailed".red().bold(),
+                            error
+                        );
+                    }
+                    crate::manager::SystemEvent::ProcessPreStop {
+                        name,
+                        group: _,
+                        command,
+                    } => {
+                        println!(
+                            "[{}] ProcessPreStop: command='{}'",
+                            name.cyan().bold(),
+                            command
+                        );
+                    }
+                    crate::manager::SystemEvent::ProcessPreStopFailed {
+                        name,
+                        group: _,
+                        error,
+                    } => {
+                        println!(
+                            "[{}] {}: {}",
+                            name.cyan().bold(),
+                            "ProcessPreStopFailed".red().bold(),
+                            error
                         );
                     }
                 }

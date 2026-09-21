@@ -61,6 +61,10 @@ pub struct ProgramStatusDto {
     #[tabled(rename = "UPTIME")]
     pub uptime: String,
 
+    #[serde(default)]
+    #[tabled(rename = "CRON")]
+    pub cron: String,
+
     #[tabled(rename = "DESCRIPTION")]
     pub description: String,
 }
@@ -79,6 +83,14 @@ pub struct ProgramDetailsDto {
     pub cpu_percent: Option<f32>,
     pub memory_rss_bytes: Option<u64>,
     pub description: String,
+    #[serde(default)]
+    pub cron: Option<String>,
+    #[serde(default)]
+    pub next_cron_run: Option<String>,
+    #[serde(default)]
+    pub pre_start: Option<String>,
+    #[serde(default)]
+    pub pre_stop: Option<String>,
 }
 
 /// Request parameters for lifecycle operations (start, stop, restart).

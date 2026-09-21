@@ -2,7 +2,7 @@
 
 | Document Version | Status | Target Language | Runtime Targets |
 | :--- | :--- | :--- | :--- |
-| **v1.0.0** | Approved / Baseline | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
+| **v1.3.0** | Approved / Baseline | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
 
 ---
 
@@ -33,29 +33,33 @@ To fundamentally eliminate high CPU consumption, orphan process leaks, lock cont
 ```mermaid
 flowchart TD
     subgraph ControlPlane ["Control & Communication Plane (Control Plane)"]
+        Pipe["Windows Named Pipe (\\\\.\\pipe\\<cmd_name>)"]
         UDS["Local UDS Listener (AF_UNIX)"]
         TCP["Remote TCP Listener (Optional)"]
         Router["Axum REST API & Embedded Web UI Engine"]
-        PeerSecurity["Caller Security Validation (Unix UID/GID / Windows Token)"]
+        PeerSecurity["Caller Security & Auth Validation (Tokens / Basic Auth / TokenElevation)"]
+        Pipe --> PeerSecurity --> Router
         UDS --> PeerSecurity --> Router
-        TCP --> Router
+        TCP --> PeerSecurity --> Router
     end
 
     subgraph ManagerPlane ["Orchestration Plane (Manager Plane)"]
         ManagerTask["Manager Async Task (Global Topology & Lifecycle)"]
         DAG["DAG Dependency Engine (petgraph: 0~99 Priority Topology)"]
+        CronEngine["Cron Scheduler Engine (croner: Earliest Deadline Sleep)"]
         DiffEngine["Config 3-Way Diff Engine (Zero-Downtime Hot Reload)"]
         ManagerInbox["Manager MPSC Channel (Command & Event Queue)"]
         ManagerTask --- DAG
+        ManagerTask --- CronEngine
         ManagerTask --- DiffEngine
         Router -->|Dispatch Command| ManagerInbox --> ManagerTask
     end
 
     subgraph ProgramPlane ["Process Execution Plane (Program Actor Plane)"]
         direction TB
-        ProgramA["Program Task: MySQL\n(priority: 10)"]
-        ProgramB["Program Task: Core-API\n(priority: 20)"]
-        ProgramC["Program Task: Web-Frontend\n(priority: 60)"]
+        ProgramA["Program Task: MySQL\n(priority: 10, group: backend)"]
+        ProgramB["Program Task: Core-API\n(priority: 20, group: backend)"]
+        ProgramC["Program Task: Web-Frontend\n(priority: 60, group: frontend)"]
         
         ManagerTask -->|MPSC Command| ProgramA
         ManagerTask -->|MPSC Command| ProgramB
@@ -85,10 +89,10 @@ flowchart TD
 
 The runtime consists of four primary asynchronous task categories:
 
-1. **`ManagerTask`**: Parses global configurations, constructs DAG dependencies, computes incremental diffs, processes external CLI/Web commands, and drives global orchestration in response to program lifecycle events.
-2. **`ProgramTask`**: Each managed process runs as an independent Actor task driving its internal state machine (`Stopped -> Starting -> Running -> Backoff -> Stopping -> Exited -> Fatal`), interfacing with platform guards, and supervising log pumps.
+1. **`ManagerTask`**: Parses global configurations, constructs DAG dependencies, schedules Cron deadlines, processes program groups, computes incremental diffs, processes external CLI/Web commands, and drives global orchestration in response to program lifecycle events.
+2. **`ProgramTask`**: Each managed process runs as an independent Actor task driving its internal state machine (`Stopped -> Starting -> Running -> Backoff -> Stopping -> Exited -> Fatal`), executing lifecycle hooks (`pre_start` / `pre_stop`), interfacing with platform guards, and supervising log pumps.
 3. **`LogPumpTask`**: Dedicated asynchronous readers per process for `stdout` and `stderr`, handling line buffering, feeding `file-rotate`, and broadcasting to `RingBuffer`.
-4. **`ServerTask`**: Powered by Axum, listening on local UDS and optional TCP endpoints, converting external requests into commands delivered to `ManagerTask`.
+4. **`ServerTask`**: Powered by Axum, listening on local UDS, Windows Named Pipe, and optional TCP endpoints, converting external requests into commands delivered to `ManagerTask`.
 
 ---
 
@@ -109,7 +113,7 @@ sequenceDiagram
     Client->>Server: POST /programs/core-api/start (Sync Mode)
     Server->>Manager: ManagerCommand::StartProgram { name, reply }
     Manager->>Program: ProgramCommand::Start { reply }
-    Program->>OS: Spawn process & attach to JobObject / Process Group
+    Program->>OS: Execute pre_start hook & Spawn process & attach to JobObject
     OS-->>Program: Spawned successfully (PID 18492)
     Program-->>Manager: oneshot reply: Ok(Status)
     Manager-->>Server: oneshot reply: Ok(Status)
@@ -144,32 +148,80 @@ pub enum ManagerCommand {
         name: String,
         reply: oneshot::Sender<anyhow::Result<ProgramStatus>>,
     },
+    StartGroup {
+        group: String,
+        reply: oneshot::Sender<anyhow::Result<Vec<ProgramStatus>>>,
+    },
+    StopGroup {
+        group: String,
+        reply: oneshot::Sender<anyhow::Result<Vec<ProgramStatus>>>,
+    },
+    RestartGroup {
+        group: String,
+        reply: oneshot::Sender<anyhow::Result<Vec<ProgramStatus>>>,
+    },
+    GetGroupStatus {
+        group: String,
+        reply: oneshot::Sender<anyhow::Result<Vec<ProgramStatus>>>,
+    },
     ReloadConfig {
         reply: oneshot::Sender<anyhow::Result<ReloadSummary>>,
     },
     GetAllStatus {
         reply: oneshot::Sender<Vec<ProgramStatus>>,
     },
+    GetProgramDetails {
+        name: String,
+        reply: oneshot::Sender<Option<ProgramDetails>>,
+    },
 }
 
-/// Asynchronous lifecycle events reported by Programs to Manager
-#[derive(Debug, Clone)]
-pub enum ProgramEvent {
+/// Asynchronous lifecycle events broadcast across EventHub
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", content = "data")]
+pub enum SystemEvent {
     StateChanged {
         name: String,
-        old_state: ProgramState,
-        new_state: ProgramState,
+        state: ProgramState,
         pid: Option<u32>,
-    },
-    Exited {
-        name: String,
         exit_code: Option<i32>,
-        expected: bool,
     },
     HealthChanged {
         name: String,
         healthy: bool,
         reason: Option<String>,
+    },
+    ConfigReloaded {
+        added: Vec<String>,
+        removed: Vec<String>,
+        modified: Vec<String>,
+        unchanged: Vec<String>,
+    },
+    CronTriggered {
+        name: String,
+        action: String,
+        expression: String,
+    },
+    ProcessPreStart {
+        name: String,
+        command: String,
+    },
+    ProcessPreStartFailed {
+        name: String,
+        error: String,
+        ignored: bool,
+    },
+    ProcessPreStop {
+        name: String,
+        command: String,
+    },
+    ProcessPreStopFailed {
+        name: String,
+        error: String,
+    },
+    DaemonLifecycle {
+        action: String,
+        message: String,
     },
 }
 
@@ -551,13 +603,27 @@ pub fn is_current_process_elevated() -> bool {
 }
 ```
 
+### 9.2 Multi-Scheme Authentication (`src/server/auth.rs`)
+
+The HTTP engine supports both Bearer tokens and HTTP Basic Authentication:
+
+1. **Bearer Token Authentication**:
+   - Compares the `Authorization: Bearer <token>` header or `?token=<token>` query param against `server.auth_token`.
+2. **HTTP Basic Authentication**:
+   - Parses the `Authorization: Basic <base64(user:pass)>` header and validates against `server.user`.
+   - **Password Verification**:
+     - *Plaintext match*: Compares against `server.password`.
+     - *SHA-1 hash match*: When `server.password_sha1` is configured (supports `{SHA}<base64>` or raw 40-character hex string), computes `sha1::Sha1` of the input and performs constant-time comparison.
+3. **CLI Standalone Connectivity**:
+   - CLI flags `--key <token>` or `--user <user>` / `--password <pass>` enable direct connection to local or remote daemons even when no local configuration file exists.
+
 ---
 
 ## 10. CLI Execution Flow (Sync vs Async)
 
 - **Synchronous Execution (Sync)**:
-  1. CLI submits `POST /api/v1/programs/foo/start`.
-  2. Axum Server sends `ManagerCommand::StartProgram`.
+  1. CLI submits `POST /api/v1/programs/foo/start` or `/api/v1/groups/web/start`.
+  2. Axum Server sends `ManagerCommand::StartProgram` or `ManagerCommand::StartGroup`.
   3. Manager drives `ProgramTask`, waiting until state confirms `RUNNING` (past `start_secs`) or fails.
   4. Server returns final result and elapsed time to CLI.
 - **Asynchronous Execution (Async, `--async`)**:
@@ -567,21 +633,41 @@ pub fn is_current_process_elevated() -> bool {
 
 ---
 
-## 11. Windows Native UDS & Reverse Proxy Integration
+## 11. Windows IPC Architecture: Named Pipe & UDS Dual-Listening
 
-Enables seamless zero-port reverse proxy integration with Caddy and Nginx on Windows 10 (17063+) and 11:
+On Windows platforms, `rsupervisord` provides concurrent dual IPC listening to maximize compatibility and performance:
 
 ```mermaid
-flowchart LR
-    Caddy["Caddy Server / Reverse Proxy"] -->|unix/C:/run/rsupervisord.sock| UDS["Windows Unix Domain Socket"]
-    UDS --> UdsWindows["uds_windows::UnixListener"]
-    UdsWindows --> RawSocket["from_raw_socket + set_nonblocking(true)"]
-    RawSocket --> TokioIo["hyper_util::rt::TokioIo"]
-    TokioIo --> AxumRouter["Axum REST API & Web UI Router"]
+flowchart TD
+    subgraph WindowsClient ["Windows Clients"]
+        CLI_Pipe["rsupervisorctl (Default: Named Pipe)"]
+        ReverseProxy["Caddy / Nginx Reverse Proxy"]
+    end
+
+    subgraph WindowsIPC ["Daemon IPC Listeners"]
+        PipeListener["tokio::net::windows::named_pipe::ServerOptions\n(\\\\.\\pipe\\<cmd_name>)"]
+        UdsListener["uds_windows::UnixListener\n(<config_dir>/<cmd_name>.sock)"]
+    end
+
+    subgraph CoreEngine ["Axum Router Engine"]
+        AxumRouter["Axum REST API & Web UI Router"]
+    end
+
+    CLI_Pipe -->|\\\\.\\pipe\\rsupervisord| PipeListener
+    ReverseProxy -->|AF_UNIX Socket| UdsListener
+    PipeListener --> AxumRouter
+    UdsListener --> AxumRouter
 ```
 
-1. **Zero Port Conflicts**: Eliminates localhost TCP port allocation and collisions.
-2. **NTFS ACL Protection**: Leverages filesystem permissions to restrict socket file access to administrator and proxy accounts.
+1. **Windows Named Pipe (Default IPC)**:
+   - Server binds `\\.\pipe\<cmd_name>` using asynchronous `ServerOptions::create()`.
+   - Bypasses filesystem path and Unix Domain Socket implementation quirks across diverse Windows builds (e.g. Windows Server, Windows 10 without AF_UNIX support).
+   - Handles continuous client reconnection loops via Tokio tasks.
+2. **Native Windows AF_UNIX UDS Listener**:
+   - Binds `<config_dir>/<cmd_name>.sock` using `uds_windows::UnixListener` converted into `hyper_util::rt::TokioIo`.
+   - Enables zero-port reverse proxy integration with Caddy and Nginx without exposing local TCP ports.
+3. **Automatic Client Transport Selection**:
+   - `rsupervisorctl` automatically attempts Named Pipe connection on Windows by default, gracefully falling back to UDS or TCP.
 
 ---
 
@@ -753,6 +839,48 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 - **POSIX Signal Multiplexing**:
   - On Unix platforms, concurrently catches `SIGTERM` and `SIGINT` via Tokio signal streams, initiating identical graceful supervisor drain and child process group cleanup.
 
+### 15.15 Hierarchical Process Group Orchestration Architecture
+
+- **Flexible Group Resolution**:
+  - Programs can specify `group: <name>` directly, or top-level `groups: { <name>: [program1, program2] }` can define groups declaratively.
+  - Merged during configuration resolution into unified group mappings with validation against unknown program names.
+- **Sub-DAG Topological Execution**:
+  - Group start/stop operations resolve the sub-graph of programs belonging to the target group and execute them adhering to their mutual DAG dependencies and `priority` tiers.
+  - Group stop executes in strict reverse DAG priority order.
+- **Unified Control Plane Integration**:
+  - CLI: Supports `<group>:*` and `<group>:` syntax (e.g. `rsupervisorctl start web:*`).
+  - REST API: Dedicated endpoints under `/api/v1/groups/:group/(start|stop|restart|status)`.
+  - Web UI: Group tabs and filter views.
+
+### 15.16 High-Precision Zero-Polling Cron Scheduler (`CronTable`)
+
+- **Reactor-Driven Deadline Execution**:
+  - Powered by `croner::Cron` parsing standard 5-part POSIX crontab (`minute hour day month weekday`) and extended 6-part formats.
+  - Maintains a `CronTable` tracking active start/stop cron schedules and calculating the global earliest deadline (`min_by_key(|e| e.next_run)`).
+  - In `ManagerActor::run`, the earliest deadline is mounted into `tokio::select!` via `tokio::time::sleep_until()`. When no cron schedules are active, the branch gracefully disables via `std::future::pending()`.
+  - Incurs **0% CPU overhead and zero polling loops** during idle intervals between scheduled executions.
+- **Hot Reload Resiliency**:
+  - When configuration reloads, `SupervisorManager::execute_reload_config` rebuilds the `CronTable` with newly added, modified, or retained cron expressions, immediately recalculating next deadlines.
+- **Automated Lifecycle & Event Broadcast**:
+  - Automatically schedules starts (`CronAction::Start`) and stops (`CronAction::Stop`).
+  - Broadcasts `SystemEvent::CronTriggered` across the `EventHub` upon each trigger.
+
+### 15.17 Lifecycle Hooks Engine & Failure Degradation Semantics
+
+- **Execution Model (`run_hook`)**:
+  - Hooks execute as independent child processes wrapped in timeout circuit breakers (`hook_timeout_secs`, default 15s).
+  - Unix: Dispatched via `sh -c "<command>"`.
+  - Windows: Dispatched via `cmd.exe /C "<command>"` using `raw_arg` to ensure quotation marks and output redirection (`>`) are preserved without incorrect automatic quote escaping.
+- **Pre-Start Failure Semantics (`pre_start`)**:
+  - Executed before the child process is spawned.
+  - *Default (Strict)*: Hook failure (exit code != 0 or timeout) aborts process launch, transitions state to `Fatal`, and broadcasts `SystemEvent::ProcessPreStartFailed { ignored: false }`.
+  - *Graceful Degradation*: When `pre_start_ignore_failure: true` is configured, errors are logged as warnings and broadcast as `ProcessPreStartFailed { ignored: true }`, but startup proceeds with spawning the child process.
+- **Pre-Stop Failure Semantics (`pre_stop`)**:
+  - Executed before termination signals are delivered to the child process.
+  - Broadcasts `SystemEvent::ProcessPreStop` prior to execution.
+  - If the hook fails or times out, broadcasts `SystemEvent::ProcessPreStopFailed` and logs a warning.
+  - **Guaranteed Degradation**: The stop sequence **always degrades gracefully to proceed with child process termination**. This guarantees that malfunctioning or hanging hooks can never deadlock the supervisor or leave unkillable processes running.
+
 ---
 
 ## 16. Verification Matrix
@@ -761,13 +889,16 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 | :--- | :--- | :--- | :--- |
 | **0% Silent CPU** | Run 50 idle programs with no health check or active client; monitor for 10 min | CPU usage steady at 0.00% ~ 0.01% | ✅ Verified with event-driven `wait_exit` and adaptive metrics dormancy |
 | **Windows Orphan Prevention** | Spawn multi-tier child scripts; stop or kill daemon | All descendants reclaimed by Job Object | ✅ Win32 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 100% verified |
-| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 74 automated unit and integration tests passed |
+| **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 95 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Intercepted with friendly error message | ✅ Platform privilege checks verified |
-| **Windows Native UDS** | Bind `AF_UNIX` via `uds_windows`; proxy through Caddy | Transparent HTTP proxying with zero open ports | ✅ Windows 11 Native UDS verified |
+| **Windows Native IPC** | Bind Named Pipe (`\\.\pipe\...`) & AF_UNIX; connect CLI & reverse proxy | Zero-port, elevation-free high-compatibility IPC | ✅ Named Pipe + AF_UNIX dual listeners verified |
+| **Process Group Operations** | Start, stop, restart groups via CLI and REST APIs | Group sub-DAG priority order strictly honored | ✅ `test_manager_start_and_stop_group` verified |
+| **Cron Scheduling** | Scheduled start/stop via cron expressions with zero polling | Precise trigger at scheduled time; autostart: false | ✅ `cron_tests.rs` (3 tests passed) |
+| **Lifecycle Hooks & Degradation**| Pre-start blocking, pre-start ignore failure, pre-stop graceful degradation | Safe degradation guarantees clean process termination | ✅ `program_tests.rs` (4 hook tests passed) |
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
 | **System Service Lifecycles** | Install, uninstall, start, stop, restart, and SCM loop | Zero resource leaks, clean drain | ✅ Verified across Windows SCM & Linux systemd |
 | **Windows GUI & Console Close** | Send `WM_CLOSE`, `Ctrl+Close`, and `Ctrl+C` to daemon | Immediate graceful shutdown triggered | ✅ Verified with `test_windows_gui_wm_close_shutdown_signal` |
-| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 74/74 passed; Linux: 72/72 passed |
+| **Dual-Platform Matrix** | Windows 11 MSVC + Ubuntu 22.04 LTS (WSL2) CI suite | 0 fmt diffs, 0 clippy warnings (`-D warnings`), 100% tests pass | ✅ Windows: 95/95 passed; Linux: 93/93 passed |

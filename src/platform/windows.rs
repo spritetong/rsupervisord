@@ -363,8 +363,9 @@ impl PlatformBackend for WindowsPlatformBackend {
     }
 
     fn build_shell_command(&self, command: &str) -> TokioCommand {
+        use std::os::windows::process::CommandExt;
         let mut cmd = TokioCommand::new("cmd");
-        cmd.args(["/C", command]);
+        cmd.as_std_mut().raw_arg(format!("/C \"{}\"", command));
         cmd
     }
 

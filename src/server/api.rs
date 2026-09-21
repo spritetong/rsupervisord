@@ -197,6 +197,7 @@ async fn get_status(
                 cpu,
                 mem,
                 uptime,
+                cron: s.cron.unwrap_or_else(|| "-".to_string()),
                 description: s.description,
             }
         })
@@ -229,6 +230,20 @@ async fn get_program_details(
         None => (None, None),
     };
 
+    let (pre_start, pre_stop) = if let Some(ref path) = state.config_path {
+        if let Ok(cfg) = SupervisorConfig::from_file(path) {
+            let prog_cfg = cfg.programs.get(&status.name);
+            (
+                prog_cfg.and_then(|p| p.pre_start.clone()),
+                prog_cfg.and_then(|p| p.pre_stop.clone()),
+            )
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let dto = ProgramDetailsDto {
         name: status.name,
         group: status.group,
@@ -240,6 +255,10 @@ async fn get_program_details(
         cpu_percent,
         memory_rss_bytes,
         description: status.description,
+        cron: status.cron,
+        next_cron_run: status.next_cron_run,
+        pre_start,
+        pre_stop,
     };
 
     Ok((StatusCode::OK, Json(ApiResponse::ok(dto))))

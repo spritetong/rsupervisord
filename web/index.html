@@ -461,6 +461,21 @@
       color: #c7d2fe;
     }
 
+    .badge-cron {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #fbbf24;
+      font-size: 10px;
+      font-weight: 500;
+      padding: 1px 5px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      margin-left: 6px;
+    }
+
     /* Program Name Cell */
     .prog-name {
       font-weight: 600;
@@ -956,7 +971,10 @@
             <!-- Program name & description -->
             <td>
               <div class="prog-name" @click="openDetails(prog.name)" title="View configuration details">
-                {{ prog.name }}
+                <span>{{ prog.name }}</span>
+                <span v-if="prog.cron && prog.cron !== '-'" class="badge-cron" :title="'Cron schedule: ' + prog.cron">
+                  ⏰ {{ prog.cron }}
+                </span>
               </div>
               <div class="prog-desc" :title="prog.description">{{ prog.description }}</div>
             </td>
@@ -1166,6 +1184,22 @@
             <tr>
               <td class="kv-key">Description</td>
               <td class="kv-val" style="color: #9ca3af; font-family: inherit;">{{ currentDetails.description }}</td>
+            </tr>
+            <tr v-if="currentDetails.cron">
+              <td class="kv-key">Cron Schedule</td>
+              <td class="kv-val" style="color: #fbbf24;">{{ currentDetails.cron }}</td>
+            </tr>
+            <tr v-if="currentDetails.next_cron_run">
+              <td class="kv-key">Next Trigger</td>
+              <td class="kv-val" style="color: #34d399;">{{ currentDetails.next_cron_run }}</td>
+            </tr>
+            <tr v-if="currentDetails.pre_start">
+              <td class="kv-key">Pre-Start Hook</td>
+              <td class="kv-val" style="color: #cbd5e1;"><code>{{ currentDetails.pre_start }}</code></td>
+            </tr>
+            <tr v-if="currentDetails.pre_stop">
+              <td class="kv-key">Pre-Stop Hook</td>
+              <td class="kv-val" style="color: #cbd5e1;"><code>{{ currentDetails.pre_stop }}</code></td>
             </tr>
           </table>
         </div>

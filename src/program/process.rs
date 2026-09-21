@@ -706,6 +706,44 @@ impl ProgramActor {
 
         self.manual_stop = false;
 
+        if let Some(ref hook) = self.config.pre_start {
+            self.event_hub
+                .publish_system(crate::manager::SystemEvent::ProcessPreStart {
+                    name: self.config.name.clone(),
+                    group: self.config.group.clone(),
+                    command: hook.clone(),
+                });
+
+            let timeout_dur = Duration::from_secs(self.config.hook_timeout_secs);
+            if let Err(err) = self.run_hook(hook, timeout_dur).await {
+                self.event_hub
+                    .publish_system(crate::manager::SystemEvent::ProcessPreStartFailed {
+                        name: self.config.name.clone(),
+                        group: self.config.group.clone(),
+                        error: err.clone(),
+                    });
+
+                if !self.config.pre_start_ignore_failure {
+                    self.update_status(
+                        ProgramState::Fatal,
+                        None,
+                        None,
+                        format!("pre_start hook failed: {}", err),
+                    );
+                    return Err(ProgramError::PreStartHookFailed {
+                        name: self.config.name.clone(),
+                        reason: err,
+                    });
+                } else {
+                    tracing::warn!(
+                        program = %self.config.name,
+                        error = %err,
+                        "pre_start hook failed, but pre_start_ignore_failure is true; continuing start"
+                    );
+                }
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(&self.config.command);
         cmd.args(&self.config.args);
 
@@ -868,6 +906,32 @@ impl ProgramActor {
                 "Stopping".to_string(),
             );
 
+            // Execute pre_stop hook if configured (with graceful failure degradation)
+            if let Some(ref hook) = self.config.pre_stop {
+                self.event_hub
+                    .publish_system(crate::manager::SystemEvent::ProcessPreStop {
+                        name: self.config.name.clone(),
+                        group: self.config.group.clone(),
+                        command: hook.clone(),
+                    });
+
+                let timeout_dur = Duration::from_secs(self.config.hook_timeout_secs);
+                if let Err(err) = self.run_hook(hook, timeout_dur).await {
+                    self.event_hub.publish_system(
+                        crate::manager::SystemEvent::ProcessPreStopFailed {
+                            name: self.config.name.clone(),
+                            group: self.config.group.clone(),
+                            error: err.clone(),
+                        },
+                    );
+                    tracing::warn!(
+                        program = %self.config.name,
+                        error = %err,
+                        "pre_stop hook failed; degrading to proceed with process termination"
+                    );
+                }
+            }
+
             // Signal the process tree using the platform guard
             let _ = child_info
                 .platform_guard
@@ -916,6 +980,39 @@ impl ProgramActor {
             }
         } else {
             self.update_status(ProgramState::Stopped, None, None, "Stopped".to_string());
+        }
+    }
+
+    /// Executes an external lifecycle hook script with bounded timeout.
+    async fn run_hook(&self, hook_cmd: &str, timeout_dur: Duration) -> Result<(), String> {
+        let mut cmd = crate::platform::native_platform().build_shell_command(hook_cmd);
+        if let Some(ref dir) = self.config.directory {
+            cmd.current_dir(dir);
+        }
+        for (k, v) in &self.config.environment {
+            cmd.env(k, v);
+        }
+        let platform = crate::platform::native_platform();
+        if let Err(e) =
+            platform.configure_command(&mut cmd, self.config.user.as_deref(), self.config.umask)
+        {
+            return Err(format!("Failed to configure hook command: {}", e));
+        }
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+
+        match tokio::time::timeout(timeout_dur, cmd.status()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(format!(
+                "Hook exited with failure status {}",
+                status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            )),
+            Ok(Err(e)) => Err(format!("Hook spawn failed: {}", e)),
+            Err(_) => Err(format!("Hook timed out after {}s", timeout_dur.as_secs())),
         }
     }
 

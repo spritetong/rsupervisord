@@ -96,6 +96,7 @@ async fn test_cli_client_against_mock_daemon() {
                             cpu: "0.5%".to_string(),
                             mem: "15.2 MB".to_string(),
                             uptime: "5m".to_string(),
+                            cron: "-".to_string(),
                             description: "Running for 5m".to_string(),
                         },
                         ProgramStatusDto {
@@ -107,6 +108,7 @@ async fn test_cli_client_against_mock_daemon() {
                             cpu: "-".to_string(),
                             mem: "-".to_string(),
                             uptime: "-".to_string(),
+                            cron: "-".to_string(),
                             description: "Stopped".to_string(),
                         },
                     ];
@@ -208,6 +210,7 @@ async fn test_cli_command_handlers_execution() {
                 cpu: "1.2%".to_string(),
                 mem: "8.5 MB".to_string(),
                 uptime: "10s".to_string(),
+                cron: "-".to_string(),
                 description: "Demo task".to_string(),
             }];
             let body = serde_json::to_string(&ApiResponse::ok(dtos)).unwrap();

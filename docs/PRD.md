@@ -2,7 +2,9 @@
 
 | Document Version | Status | Target Language | Runtime Targets |
 | :--- | :--- | :--- | :--- |
-| **v1.1.0** | Approved / Baseline | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
+| Document Version | Status | Target Language | Runtime Targets |
+| :--- | :--- | :--- | :--- |
+| **v1.3.0** | Approved / Baseline | Rust (Edition 2024) | Linux / Windows 10/11 / BSD / macOS |
 
 ---
 
@@ -22,11 +24,15 @@ In containerized environments, microservices architectures, edge devices, and Wi
 
 - **Zero Process Polling in Minimal Feature Set (0% CPU Overhead)**: Purely event-driven via OS kernel notifications (Linux `pidfd`/`epoll`/signals, Windows kernel handle events via `RegisterWaitForSingleObject` and `Job Objects`). Zero background polling timers when health checks are omitted.
 - **First-Class Cross-Platform Architecture**: Strict separation between core business orchestration and platform-specific implementations. The business layer contains zero `#[cfg]` branches, relying on uniform platform traits and Windows native Job Objects for 100% reliable descendant tree reclamation.
+- **High-Compatibility Windows Named Pipe & AF_UNIX Dual Transports**: Listens concurrently on Windows Named Pipes (`\\.\pipe\<cmd_name>`) and AF_UNIX sockets. Named pipe is enabled by default on Windows for superior OS version compatibility without administrator elevation issues.
+- **Hierarchical Process Groups**: Support for `group` classifications and batch operations across CLI (`<group>:*`), Web UI, and REST APIs.
+- **High-Precision Zero-Polling Cron Scheduling**: Native Cron expressions (`cron` for start, `cron_stop` for stop) supporting standard 5-part POSIX crontabs and 6-part second extensions, waking up reactively via earliest-deadline calculation without periodic polling.
+- **Lifecycle Hooks with Failure Degradation**: Supports `pre_start` and `pre_stop` execution. `pre_start` blocks start unless `pre_start_ignore_failure: true`, while `pre_stop` always degrades gracefully to guarantee processes are never unkillable.
 - **Activity-Aware Adaptive Metrics & Disableable Logging**: Automatically pauses CPU/memory sampling during idle periods when no CLI or Web clients are connected. Supports completely disabling process and daemon logging (`Stdio::null()`), eliminating pipeline overhead.
 - **Star-Topology Dual-Track Event Hub & SSE**: Unified system lifecycle event broadcasting (`SystemEvent`) and aggregated log bus (`LogEntry`) with dual-track isolation, zero-subscriber no-op optimization, real-time Web UI EventSource synchronization, and CLI streaming (`rsupervisorctl events` & `rsupervisorctl tail -f all`).
 - **Resilient Scope-Guarded Lifecycle Management**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`, guarantees leak-free OS handle management, and drives synchronous API waiting reactively via `EventHub` with zero busy-polling.
 - **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
-- **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance; replaces XML-RPC with unified **UDS (Unix Domain Socket) / TCP + JSON REST API**.
+- **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance and multi-scheme auth (Bearer token & Basic Auth with plaintext or SHA-1); replaces XML-RPC with unified **IPC (UDS / Named Pipe) / TCP + JSON REST API**.
 - **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
 
 ---
@@ -153,6 +159,38 @@ Executing `rsupervisorctl reload` or sending `SIGHUP` triggers an incremental di
   - Windows: Uses kernel-notified wait callbacks via `RegisterWaitForSingleObject` on process `HANDLE`, achieving zero polling.
   - Unix: Uses Tokio's native async signal and `pidfd` drivers, with fallback polling abstracted inside platform layers.
 
+#### 3.1.8 Process Groups & Hierarchical Operations
+
+`rsupervisord` provides comprehensive support for logical grouping of related processes:
+
+- **Group Declaration**: Programs can specify a `group: <group_name>` in their configuration, or top-level `groups:` can map group names to arrays of program names (`groups: { web: ["nginx", "api"] }`).
+- **DAG Group Ordering**: Batch start and stop operations across a group strictly honor the topological dependencies and `priority` values among members of that group.
+- **Unified Control**: Supports group operations across CLI (`rsupervisorctl start <group>:*`, `stop <group>:*`, `restart <group>:*`, `status <group>:*`), REST API endpoints (`/api/v1/groups/:group/...`), and Web Dashboard filtering.
+
+#### 3.1.9 Cron Expression Scheduling (`cron` & `cron_stop`)
+
+Supports time-based automated process lifecycle scheduling:
+
+- **Expression Formats**: Supports standard 5-field POSIX crontab (`minute hour day month weekday`, e.g. `0 2 * * *`) and extended 6-field formats, powered by `croner`.
+- **Dual Trigger Schedules**:
+  - `cron`: Schedules process startup at specified cron intervals. When configured without explicit `autostart`, `autostart` automatically defaults to `false`.
+  - `cron_stop` (alias `stop_cron`): Schedules process graceful shutdown at specified cron intervals.
+- **Zero-Polling Reactor**: The Manager calculates the earliest upcoming deadline across all registered cron jobs and registers it directly into the `tokio::select!` event loop timer branch. The daemon sleeps until the exact trigger moment without periodic polling overhead.
+- **Event Notification**: Emits `SystemEvent::CronTriggered` to the `EventHub` upon execution.
+
+#### 3.1.10 Lifecycle Hooks (`pre_start` / `pre_stop`) & Failure Degradation Semantics
+
+Supports executing pre-flight preparation and pre-stop cleanup hooks:
+
+- **Hook Configuration**:
+  - `pre_start` (alias `pre_start_hook`): Shell command executed prior to spawning the child process.
+  - `pre_stop` (alias `pre_stop_hook`): Shell command executed prior to sending termination signals to the child process.
+  - `hook_timeout_secs`: Execution timeout for hook commands (default: 15s).
+- **Failure & Degradation Semantics**:
+  - **`pre_start`**: By default, hook non-zero exit or timeout aborts startup, entering `Fatal` state and emitting `ProcessPreStartFailed`. When `pre_start_ignore_failure: true` is configured, errors are logged and emitted as events, but startup **gracefully degrades to continue spawning the child process**.
+  - **`pre_stop`**: Emits `ProcessPreStop` before execution and `ProcessPreStopFailed` on failure/timeout, but **always degrades gracefully to proceed with child process termination**. This guarantees that malfunctioning hooks can never block process termination or create unkillable zombie processes.
+- **Shell Execution Compatibility**: Unix executes via `sh -c`; Windows executes via `cmd.exe /C` using `raw_arg` to ensure nested quoting and redirection (`>`) execute transparently.
+
 ---
 
 ### 3.2 Log Streaming & Rotation Subsystem
@@ -180,18 +218,23 @@ Built with the production-proven `file-rotate` crate:
 
 ### 3.3 Control, IPC & Security Design
 
-#### 3.3.1 Transport Endpoints
+#### 3.3.1 Transport Endpoints & Dual Transports
 
+- **Windows Named Pipe (Default IPC on Windows)**:
+  - Listens on `\\.\pipe\<cmd_name>` (e.g. `\\.\pipe\rsupervisord`).
+  - Enabled by default on Windows (unless explicitly disabled via `pipe_path: ""`). Provides superior OS compatibility and zero file-permission/socket-path issues across Windows 10/11 and Server editions.
+  - Windows daemon binds **both Named Pipe and AF_UNIX UDS concurrently**, allowing clients to connect via either mechanism.
+  - CLI automatically selects the Named Pipe transport on Windows when available.
 - **Unix Domain Socket (UDS)**:
-  - Linux / BSD / macOS: Listens on `/var/run/rsupervisord.sock` (or `~/.rsupervisord/rsupervisord.sock`).
-  - Windows 10 (17063+) / 11: Listens natively on AF_UNIX sockets (e.g., `C:\ProgramData\rsupervisord\rsupervisord.sock`), enabling zero-port integration with Caddy / Nginx reverse proxies.
+  - Linux / BSD / macOS: Listens on `/var/run/<cmd_name>.sock` (or `~/.<cmd_name>/<cmd_name>.sock`).
+  - Windows: Listens on AF_UNIX socket at `<config_dir>/<cmd_name>.sock` for zero-port Caddy / Nginx reverse proxying.
 - **TCP Socket (Optional)**:
   - Example: `http_bind: "127.0.0.1:9001"`.
-  - Supports optional Bearer token authentication via `auth_token`.
+  - Supports multi-scheme authentication: Bearer token (`auth_token`) and HTTP Basic Auth (`user`, `password` or `password_sha1`).
 
-#### 3.3.2 Strict Caller Security & Compatibility Checks
+#### 3.3.2 Caller Security & Multi-Scheme Authentication
 
-`rsupervisorctl` and API endpoints enforce strict privilege validation:
+`rsupervisorctl` and API endpoints enforce strict privilege and identity validation:
 
 - **Unix / BSD (Peer Credentials Compatibility)**:
   - Extracts peer credentials via socket options (Linux `SO_PEERCRED`, BSD/macOS `getpeereid`).
@@ -202,23 +245,31 @@ Built with the production-proven `file-rotate` crate:
 - **Windows (Token Elevation Checks)**:
   - If `rsupervisord` runs as an elevated administrator (`is_admin = true`) or under `NT AUTHORITY\SYSTEM`;
   - The calling `rsupervisorctl` process must also hold elevated privileges (`TokenElevation`).
-  - Unelevated callers are intercepted with clear actionable guidance: `"Error: rsupervisord is running with elevated administrator privileges. Please run rsupervisorctl in an elevated (Run as Administrator) terminal."`
+  - Unelevated callers are intercepted with clear actionable guidance.
+- **HTTP Authentication (Bearer Token & Basic Auth)**:
+  - Bearer Token: Validated against `server.auth_token`.
+  - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.user` and either plaintext `server.password` or SHA-1 hashed `server.password_sha1` (supporting `{SHA}...` or raw 40-character hex strings).
+  - CLI Standalone Connectivity: `rsupervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
 
 #### 3.3.3 Core RESTful JSON API Specification
 
 | Method | Route | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/status` | List aggregated status and metrics for all programs |
-| `GET` | `/api/v1/programs/:name` | Get detailed configuration, status, and metrics (PID, CPU %, RSS) |
+| `GET` | `/api/v1/status` | List aggregated status, cron info, and metrics for all programs |
+| `GET` | `/api/v1/programs/:name` | Get detailed configuration, status, hooks, cron schedule, and metrics |
 | `POST` | `/api/v1/programs/:name/start` | Start program (accepts `sync: bool`, `timeout: u64`) |
 | `POST` | `/api/v1/programs/:name/stop` | Stop program (accepts `sync: bool`, `timeout: u64`) |
 | `POST` | `/api/v1/programs/:name/restart` | Restart program (supports sync/async waiting) |
 | `POST` | `/api/v1/all/start` | Concurrently start all programs based on DAG topological order |
 | `POST` | `/api/v1/all/stop` | Gracefully stop all programs in reverse topological order |
+| `POST` | `/api/v1/groups/:group/start` | Start all programs in the specified group according to group DAG priority |
+| `POST` | `/api/v1/groups/:group/stop` | Gracefully stop all programs in the group in reverse priority order |
+| `POST` | `/api/v1/groups/:group/restart` | Restart all programs belonging to the specified group |
+| `GET` | `/api/v1/groups/:group/status` | Retrieve status of all programs belonging to the specified group |
 | `POST` | `/api/v1/reload` | **Incremental Hot Reload**: updates changed programs without interrupting unchanged ones |
 | `GET` | `/api/v1/programs/:name/logs` | Fetch buffered historical logs (`lines=100`) |
 | `GET` | `/api/v1/programs/:name/logs/stream` | **SSE (Server-Sent Events)** real-time live log stream for a specific program |
-| `GET` | `/api/v1/events` | **SSE System Events Stream**: Real-time lifecycle events (`StateChanged`, `HealthChanged`, `ConfigReloaded`, `DaemonLifecycle`) |
+| `GET` | `/api/v1/events` | **SSE System Events Stream**: Real-time lifecycle events (`StateChanged`, `HealthChanged`, `ConfigReloaded`, `CronTriggered`, `ProcessPreStart`, `ProcessPreStartFailed`, `ProcessPreStop`, `ProcessPreStopFailed`, `DaemonLifecycle`) |
 | `GET` | `/api/v1/logs/stream` | **SSE Aggregated Log Stream**: Real-time global log stream across all managed programs |
 
 #### 3.3.4 Activity-Aware Adaptive Metrics Sampling
@@ -251,24 +302,28 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
     Command accepted: core-api status changed to STARTING.
     ```
 
-- **CLI Commands**:
-  - `rsupervisorctl status`: Formatted colored table with status, PID, Uptime, Priority, and Health.
-  - `rsupervisorctl start <name> [--async] [--timeout 30]`: Start a program.
-  - `rsupervisorctl stop <name> [--async] [--timeout 30]`: Stop a program.
-  - `rsupervisorctl restart <name> [--async]`: Restart a program.
+- **CLI Commands & Group Syntax**:
+  - `rsupervisorctl status [name | group:*]`: Formatted table with status, PID, Uptime, Priority, Health, and Cron schedule.
+  - `rsupervisorctl start <name | group:*> [--async] [--timeout 30]`: Start individual program or entire group.
+  - `rsupervisorctl stop <name | group:*> [--async] [--timeout 30]`: Stop individual program or entire group.
+  - `rsupervisorctl restart <name | group:*> [--async]`: Restart individual program or entire group.
   - `rsupervisorctl reload`: Incrementally reload configuration, reporting added/removed/modified/unchanged counts.
+  - `rsupervisorctl events`: Real-time streaming of system lifecycle and hook events.
   - `rsupervisorctl tail -f <name> [--lines=100]`: Live tail console output.
+  - Flags: `--key <TOKEN>`, `--user <USER>`, `--password <PWD>`, `-s / --server <URL>` (enables connecting directly without local config).
 
 #### 3.4.2 Embedded Web Dashboard
 
 - Embedded via `rust-embed` with a single-file Vue 3 production runtime (`vue.global.prod.js`) and zero NPM dependencies.
 - Modern dark-mode responsive dashboard:
   - Aggregated stats (Total Programs, Running, Stopped, Degraded, Total CPU %, Total RSS Memory).
-  - Program table with luminous status badges, PID, Uptime, Priority, CPU %, and Memory.
+  - Group filtering tabs and group-based status organization.
+  - Program table with luminous status badges, PID, Uptime, Priority, Cron schedule badge (`⏰ <cron>`), CPU %, and Memory.
+  - Program details modal displaying Cron Schedule, Next Trigger time, Pre-Start Hook, and Pre-Stop Hook commands.
   - Batch operations with multi-select checkboxes (Batch Start/Stop/Restart, Start All, Stop All).
   - Zero-downtime hot reload trigger with modal diff breakdown.
   - SSE real-time terminal log drawer with scroll locking and buffer clearing.
-  - Bearer token authentication with local storage persistence.
+  - Bearer token & Basic Auth credentials with local storage persistence.
 
 ---
 
@@ -286,9 +341,15 @@ worker_threads: 2
 server:
   # Native local UDS socket path (Supported on Linux, macOS, BSD, and Windows 10/11)
   uds_path: "/var/run/rsupervisord.sock"
+  # Windows Named Pipe path (Defaults to \\.\pipe\<cmd_name> on Windows; set to "" to disable)
+  pipe_path: "\\\\.\\pipe\\rsupervisord"
   # Optional: Remote TCP listener
   http_bind: "127.0.0.1:9001"
   auth_token: ""
+  # Optional: HTTP Basic Authentication credentials
+  user: "admin"
+  # Plaintext password or SHA-1 hash (supports {SHA}... or 40-char hex)
+  password_sha1: "{SHA}d033e22ae348aeb5660fc2140aec35850c4da997" # "admin"
 
 # Daemon logging configuration
 logging:
@@ -306,6 +367,18 @@ metrics:
   interval_secs: 2      # Sampling interval when active
 
 # ==========================================
+# Logical Process Groups (Optional)
+# ==========================================
+groups:
+  backend:
+    programs:
+      - "mysql"
+      - "core-api"
+  frontend:
+    programs:
+      - "web-frontend"
+
+# ==========================================
 # Common Parameter Inheritance (program_defaults)
 # ==========================================
 program_defaults:
@@ -316,6 +389,7 @@ program_defaults:
   stop_signal: "SIGTERM"
   stop_wait_secs: 10
   priority: 50 # Default priority: range [0, 99]
+  hook_timeout_secs: 15 # Default timeout for lifecycle hooks
   logs:
     enabled: true
     max_bytes: "20MB"
@@ -373,6 +447,23 @@ programs:
       stdout: "C:\\logs\\frontend.log"
       max_bytes: "10MB"
       backups: 2
+
+  # Scheduled Cron Job with Lifecycle Hooks
+  nightly-backup:
+    command: "python3 backup.py --all"
+    # When cron is configured, autostart defaults to false
+    autostart: false
+    cron: "0 2 * * *"       # Standard 5-field POSIX crontab: start at 02:00
+    cron_stop: "0 4 * * *"  # Optional: stop at 04:00 if still running
+    # Pre-start hook: exit != 0 blocks start unless pre_start_ignore_failure: true
+    pre_start: "sh -c 'echo Preparing backup storage...'"
+    pre_start_ignore_failure: false
+    # Pre-stop hook: failures emit warnings/events but always degrade to proceed with stop
+    pre_stop: "sh -c 'echo Flushing backup locks...'"
+    hook_timeout_secs: 15
+    logs:
+      stdout: "/var/log/rsupervisord/backup.log"
+      redirect_stderr: true
 ```
 
 ---
@@ -385,14 +476,15 @@ programs:
 | :--- | :--- | :--- |
 | **Async Runtime** | `tokio = { version = "1", features = ["full"] }` | Production async foundation with customizable worker threads and single-threaded mode |
 | **Trait Async** | `async-trait` | Async interface definitions for `Program` and `PlatformProcessGuard` |
-| **Web & Networking** | `axum = "0.8"`, `hyper-util`, `serde_json` | High-performance streaming HTTP engine natively binding both UDS and TCP |
+| **Cron Scheduling** | `croner = "4.0"`, `chrono = "0.4"` | Robust POSIX 5-field & extended cron expression parsing and next occurrence calculations |
+| **Web & Networking** | `axum = "0.8"`, `hyper-util`, `serde_json` | High-performance streaming HTTP engine natively binding UDS, Named Pipe, and TCP |
 | **Static Embedding** | `rust-embed`, `mime_guess` | Single-binary delivery of Vue 3 Web UI assets |
 | **Configuration** | `serde_yaml`, `shellexpand` | Strict YAML serialization and environment variable substitution |
 | **CLI & Output** | `clap = { version = "4", features = ["derive"] }`, `tabled` | Strongly typed argument parsing and ANSI terminal table formatting |
 | **Logging & Tracing** | `tracing`, `tracing-subscriber`, `file-rotate = "0.8"` | Structured logging and industrial-grade file rotation |
 | **Graph Algorithms** | `petgraph = "0.8"` | Directed acyclic graph verification and topological sorting |
 | **POSIX Bindings** | `nix = { version = "0.31", features = ["process", "signal", "user", "socket", "fs"] }` | Safe Linux / BSD system calls and peer credential extraction |
-| **Windows Bindings** | `windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Foundation"] }`, `uds_windows = "1"` | Ultra-lightweight Win32 bindings and native Windows UDS listeners |
+| **Windows Bindings** | `windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Foundation"] }`, `uds_windows = "1"`, `tokio = { features = ["net"] }` | Lightweight Win32 bindings, native Windows UDS listeners, and Named Pipe support |
 
 ---
 
@@ -403,12 +495,10 @@ rsupervisord/
 ├── Cargo.toml                       # Dependencies and compiler optimization metadata
 ├── config-example.yaml              # Fully commented production reference configuration
 ├── docs/
-│   ├── PRD.md                       # Product Requirements Document (Chinese)
-│   ├── PRD_EN.md                    # Product Requirements Document (English)
-│   ├── DESIGN.md                    # System Architecture & Design Specification (Chinese)
-│   └── DESIGN_EN.md                 # System Architecture & Design Specification (English)
+│   ├── PRD.md                       # Product Requirements Document (English/Chinese)
+│   └── DESIGN.md                    # System Architecture & Design Specification (English/Chinese)
 ├── web/                             # Embedded Web UI static assets
-│   ├── index.html                   # Modern dark-mode dashboard SPA HTML
+│   ├── index.html                   # Modern dark-mode dashboard SPA HTML (Vue 3 + Cron/Group/Hook)
 │   └── vue.global.prod.js           # Production single-file Vue 3 runtime (Zero NPM dependencies)
 ├── src/
 │   ├── main.rs                      # Daemon entry point and Tokio runtime builder
@@ -417,14 +507,14 @@ rsupervisord/
 │   │   └── rsupervisorctl.rs        # Standalone rsupervisorctl CLI binary
 │   ├── cli/                         # CLI client implementation
 │   │   ├── mod.rs
-│   │   ├── client.rs                # UDS / HTTP client transport
+│   │   ├── client.rs                # UDS / Named Pipe / HTTP client transport
 │   │   ├── security.rs              # Client privilege self-checks (Windows is_admin check)
-│   │   └── commands.rs              # status, start, stop, tail commands
+│   │   └── commands.rs              # status, start, stop, tail, events, group commands
 │   ├── config/                      # YAML configuration parsing and validation
 │   │   ├── mod.rs
-│   │   ├── schema.rs                # Serde schema and program_defaults inheritance
+│   │   ├── schema.rs                # Serde schema, group resolution, and program_defaults
 │   │   ├── diff.rs                  # 3-Way diff engine for hot reload
-│   │   └── validator.rs             # Priority [0, 99] and semantic validation
+│   │   └── validator.rs             # Priority [0, 99], Cron expressions, and semantic validation
 │   ├── logging/                     # Logging pipeline and file rotation
 │   │   ├── mod.rs
 │   │   ├── rotator.rs               # file-rotate integration
@@ -432,7 +522,9 @@ rsupervisord/
 │   ├── manager/                     # Process orchestration manager
 │   │   ├── mod.rs
 │   │   ├── activity.rs              # Client activity tracking and idle sampling pause
+│   │   ├── cron.rs                  # Cron table scheduler and deadline resolution
 │   │   ├── dag.rs                   # petgraph DAG dependency algorithms
+│   │   ├── event.rs                 # EventHub dual-track system event and log broadcast
 │   │   ├── supervisor.rs            # Core Manager Actor, hot reload, and event broadcast
 │   │   └── health.rs                # HTTP/TCP/Exec health check probes
 │   ├── platform/                    # Cross-platform isolation abstractions
@@ -442,13 +534,28 @@ rsupervisord/
 │   │   └── windows.rs               # Windows: Job Objects, wait_exit, RunAs, is_admin check
 │   ├── program/                     # Program Trait and lifecycle execution
 │   │   ├── mod.rs                   # Program Trait abstraction
-│   │   └── process.rs               # ProcessProgram implementation (Zero-poll event driven)
+│   │   ├── config.rs                # Resolved program configuration
+│   │   ├── process.rs               # ProcessProgram implementation (Zero-poll event driven)
+│   │   └── state.rs                 # Program status, metrics, and state definitions
 │   └── server/                      # Communication server layer
 │       ├── mod.rs
-│       ├── api.rs                   # Axum REST JSON routing and activity middleware
-│       ├── uds.rs                   # Cross-platform native UDS listener and authentication
+│       ├── api.rs                   # Axum REST JSON routing, group APIs, activity middleware
+│       ├── auth.rs                  # Multi-scheme Bearer and Basic Auth (plaintext/SHA1)
+│       ├── uds.rs                   # Cross-platform native UDS listener
 │       └── embedded_ui.rs           # rust-embed static asset handler and SPA routing
 └── tests/                           # Integration and unit test suite
+    ├── cli_tests.rs
+    ├── cron_tests.rs
+    ├── event_tests.rs
+    ├── health_tests.rs
+    ├── logging_tests.rs
+    ├── manager_tests.rs
+    ├── metrics_tests.rs
+    ├── platform_tests.rs
+    ├── program_tests.rs
+    ├── server_tests.rs
+    ├── service_tests.rs
+    └── web_tests.rs
 ```
 
 ---
@@ -482,6 +589,14 @@ rsupervisord/
 - [x] Implement HTTP / TCP / Exec active health probe state machines.
 - [x] Bundle modern single-page Web Dashboard via `rust-embed` (Zero NPM dependencies, single-file Vue 3).
 - [x] Implement activity awareness to automatically pause CPU and RSS metrics sampling during idle periods.
+
+### Milestone 5: Windows Named Pipe, Process Groups, Cron Scheduler & Lifecycle Hooks
+
+- [x] Implement native Windows Named Pipe (`\\.\pipe\<cmd_name>`) IPC transport with dual-listener support.
+- [x] Add hierarchical process groups with group DAG batch operations across CLI, REST API, and Web UI.
+- [x] Integrate zero-polling Cron expressions (`cron` / `cron_stop`) with dynamic deadline scheduling.
+- [x] Implement `pre_start` and `pre_stop` lifecycle hooks with failure degradation semantics.
+- [x] Add multi-scheme authentication (HTTP Basic Auth with plaintext or SHA-1 hashes, Bearer tokens).
 
 ### Future Milestone: Legacy Compatibility Layer (Optional Adaptor)
 

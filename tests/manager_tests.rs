@@ -190,16 +190,17 @@ fn test_config_example_yaml_parsing() {
 
     let config =
         SupervisorConfig::from_file(&example_path).expect("config-example.yaml must be valid");
-    assert_eq!(config.programs.len(), 4);
+    assert_eq!(config.programs.len(), 5);
     assert!(config.programs.contains_key("redis"));
     assert!(config.programs.contains_key("api-server"));
     assert!(config.programs.contains_key("worker-task"));
     assert!(config.programs.contains_key("web-frontend"));
+    assert!(config.programs.contains_key("nightly-backup"));
 
     let resolved = config
         .resolve_programs()
         .expect("resolve programs in config-example.yaml");
-    assert_eq!(resolved.len(), 4);
+    assert_eq!(resolved.len(), 5);
 
     let redis = &resolved["redis"];
     assert_eq!(redis.priority, 10);
@@ -209,6 +210,12 @@ fn test_config_example_yaml_parsing() {
     assert_eq!(api.priority, 20);
     assert_eq!(api.depends_on, vec!["redis"]);
     assert!(api.health_check.is_some());
+
+    let backup = &resolved["nightly-backup"];
+    assert_eq!(backup.cron.as_deref(), Some("0 2 * * *"));
+    assert_eq!(backup.cron_stop.as_deref(), Some("0 4 * * *"));
+    assert!(backup.pre_start.is_some());
+    assert!(backup.pre_stop.is_some());
 }
 
 #[tokio::test]

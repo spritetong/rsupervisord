@@ -37,6 +37,37 @@ pub enum SystemEvent {
     },
     /// Fired on daemon-level lifecycle milestones (startup, shutdown).
     DaemonLifecycle { action: String, timestamp_secs: u64 },
+    /// Fired when a program is scheduled or triggered by a cron expression.
+    CronTriggered {
+        name: String,
+        group: String,
+        action: String,
+        expression: String,
+    },
+    /// Fired immediately before a program's pre_start hook script begins execution.
+    ProcessPreStart {
+        name: String,
+        group: String,
+        command: String,
+    },
+    /// Fired when a program's pre_start hook fails or times out.
+    ProcessPreStartFailed {
+        name: String,
+        group: String,
+        error: String,
+    },
+    /// Fired immediately before a program's pre_stop hook script begins execution.
+    ProcessPreStop {
+        name: String,
+        group: String,
+        command: String,
+    },
+    /// Fired when a program's pre_stop hook fails or times out.
+    ProcessPreStopFailed {
+        name: String,
+        group: String,
+        error: String,
+    },
 }
 
 /// A structured log record emitted by a managed program's stdout or stderr.

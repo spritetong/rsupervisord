@@ -257,3 +257,36 @@ programs:
     logs:
       stdout: "logs/frontend.log"
       redirect_stderr: true
+
+  # ----------------------------------------------------------------------------
+  # Example 5: Scheduled Cron Job with Lifecycle Hooks
+  # Schedules start and stop via cron expressions; executes hooks before start/stop.
+  # ----------------------------------------------------------------------------
+  nightly-backup:
+    command: "python3 backup.py --all"
+    # When cron is defined, autostart defaults to false (waits for cron trigger)
+    autostart: false
+    autorestart: unexpected
+
+    # Cron schedule for start: standard 5-part POSIX crontab (e.g. 02:00 every day)
+    cron: "0 2 * * *"
+    # Optional cron schedule to automatically stop if still running (e.g. at 04:00)
+    cron_stop: "0 4 * * *"
+
+    # Lifecycle Hooks (compatible with Go supervisord pre_start_hook / pre_stop_hook):
+    # Executed before child process starts. If exit code != 0, start is aborted
+    # (unless pre_start_ignore_failure is set to true for degradation).
+    pre_start: "sh -c 'echo Preparing backup directories...'"
+    pre_start_ignore_failure: false
+
+    # Executed before stopping the child process. If it fails or times out,
+    # a warning and event are emitted, but stop degrades gracefully to ensure process termination.
+    pre_stop: "sh -c 'echo Flushing backup locks...'"
+
+    # Maximum duration (in seconds) permitted for hook execution before timeout (default: 15s)
+    hook_timeout_secs: 15
+
+    logs:
+      stdout: "logs/backup.log"
+      redirect_stderr: true
+
