@@ -74,6 +74,10 @@ pub enum ManagerCommand {
         new_config: Box<SupervisorConfig>,
         reply: oneshot::Sender<Result<ReloadSummary, ProgramError>>,
     },
+    RestartDaemon {
+        new_config: Box<SupervisorConfig>,
+        reply: oneshot::Sender<Result<(), ProgramError>>,
+    },
     AddProcessGroup {
         name: String,
         reply: oneshot::Sender<Result<bool, ProgramError>>,
@@ -434,6 +438,30 @@ impl ManagerHandle {
             })?;
 
         let timeout_dur = Duration::from_secs(60);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn restart_daemon(&self, new_config: SupervisorConfig) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::RestartDaemon {
+                new_config: Box::new(new_config),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(120);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -873,6 +901,17 @@ impl SupervisorManager {
         self.handle.clone()
     }
 
+    pub async fn reload_config(
+        &self,
+        new_config: SupervisorConfig,
+    ) -> Result<ReloadSummary, ProgramError> {
+        self.handle.reload_config(new_config).await
+    }
+
+    pub async fn restart_daemon(&self, new_config: SupervisorConfig) -> Result<(), ProgramError> {
+        self.handle.restart_daemon(new_config).await
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), ProgramError> {
         let _ = self.handle.shutdown().await;
         if let Some(handle) = self.actor_handle.take() {
@@ -1005,6 +1044,14 @@ impl ManagerActor {
                                 let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
                             } else {
                                 let res = self.execute_reload_config(*new_config).await;
+                                let _ = reply.send(res);
+                            }
+                        }
+                        ManagerCommand::RestartDaemon { new_config, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
+                            } else {
+                                let res = self.execute_restart_daemon(*new_config).await;
                                 let _ = reply.send(res);
                             }
                         }
@@ -1439,6 +1486,59 @@ impl ManagerActor {
             });
 
         Ok(summary)
+    }
+
+    /// Performs Python-compatible daemon reload: stops all programs, drops instances,
+    /// and restarts all programs from the newly parsed configuration.
+    async fn execute_restart_daemon(
+        &mut self,
+        new_config: SupervisorConfig,
+    ) -> Result<(), ProgramError> {
+        let new_programs_map = new_config.resolve_programs()?;
+        let _new_dag = DependencyGraph::build(&new_programs_map)?;
+
+        // 1. Stop all running programs gracefully
+        self.execute_stop_all(None).await;
+
+        // 2. Shutdown existing program instances
+        for (_, mut prog) in self.programs.drain() {
+            let _ = prog.shutdown().await;
+        }
+
+        self.configs.clear();
+        self.event_pools.clear();
+
+        // 3. Store pending configs and instantiate programs from the new configuration
+        self.pending_configs = new_programs_map.clone();
+
+        for (name, cfg) in &new_programs_map {
+            let prog = instantiate_program(
+                cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut self.event_pools,
+            )?;
+            self.programs.insert(name.clone(), prog);
+            self.configs.insert(name.clone(), cfg.clone());
+        }
+
+        self.refresh_derived_state().await;
+
+        // 4. Autostart programs configured with autostart = true
+        let _ = self.execute_start_all().await;
+
+        self.event_hub
+            .publish_system(crate::manager::SystemEvent::DaemonLifecycle {
+                action: "restarted".to_string(),
+                timestamp_secs: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+
+        Ok(())
     }
 
     /// Activates a process group from the pending/source config at runtime.

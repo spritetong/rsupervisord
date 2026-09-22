@@ -215,9 +215,22 @@ impl SupervisorClient {
         }
     }
 
-    /// Instructs the daemon to perform a zero-downtime hot reload.
-    pub async fn reload(&self) -> Result<ReloadResponse> {
-        self.request_json("POST", "/api/v1/reload", None).await
+    /// Instructs the daemon to perform a zero-downtime hot reload of configuration.
+    pub async fn config_reload(&self) -> Result<ReloadResponse> {
+        self.request_json("POST", "/api/v1/config/reload", None)
+            .await
+    }
+
+    /// Instructs the daemon to perform a full reload/restart (Python compatible).
+    pub async fn reload(&self) -> Result<String> {
+        let resp: serde_json::Value = self.request_json("POST", "/api/v1/reload", None).await?;
+        if let Some(msg) = resp.get("message").and_then(|m| m.as_str()) {
+            Ok(msg.to_string())
+        } else if let Some(msg) = resp.get("result").and_then(|m| m.as_str()) {
+            Ok(msg.to_string())
+        } else {
+            Ok("Daemon restarted successfully".to_string())
+        }
     }
 
     /// Fetches historical buffered log lines.

@@ -328,8 +328,11 @@ programs:
     );
     std::fs::write(&config_path, &yaml_v2).expect("write v2 config");
 
-    // Trigger reload via API
-    let reload_resp = client.reload().await.expect("execute reload via client");
+    // Trigger config reload via API (hot reload)
+    let reload_resp = client
+        .config_reload()
+        .await
+        .expect("execute config_reload via client");
     assert_eq!(reload_resp.unchanged, vec!["service_alpha"]);
     assert_eq!(reload_resp.added, vec!["service_beta"]);
 
@@ -339,6 +342,10 @@ programs:
     let names: Vec<String> = updated.into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"service_alpha".to_string()));
     assert!(names.contains(&"service_beta".to_string()));
+
+    // Trigger full daemon reload (Python compatible restart)
+    let restart_msg = client.reload().await.expect("execute reload via client");
+    assert!(restart_msg.contains("restarted") || restart_msg.contains("OK"));
 
     server_cancel.cancel();
     let _ = server_task.await;

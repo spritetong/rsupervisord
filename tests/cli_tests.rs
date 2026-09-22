@@ -140,7 +140,7 @@ async fn test_cli_client_against_mock_daemon() {
                         "200 OK",
                         serde_json::to_string(&ApiResponse::ok(action)).unwrap(),
                     )
-                } else if request.starts_with("POST /api/v1/reload") {
+                } else if request.starts_with("POST /api/v1/config/reload") {
                     let reload = ReloadResponse {
                         added: vec!["redis".to_string()],
                         removed: vec![],
@@ -150,6 +150,12 @@ async fn test_cli_client_against_mock_daemon() {
                     (
                         "200 OK",
                         serde_json::to_string(&ApiResponse::ok(reload)).unwrap(),
+                    )
+                } else if request.starts_with("POST /api/v1/reload") {
+                    (
+                        "200 OK",
+                        serde_json::to_string(&ApiResponse::ok("Daemon restarted successfully"))
+                            .unwrap(),
                     )
                 } else if request.starts_with("GET /api/v1/programs/web/logs") {
                     let logs = LogLinesResponse {
@@ -193,11 +199,14 @@ async fn test_cli_client_against_mock_daemon() {
     assert_eq!(start_res[0].name, "web");
     assert_eq!(start_res[0].pid, Some(5678));
 
-    // 3. Test reload
-    let reload_res = client.reload().await.unwrap();
+    // 3. Test config reload & daemon reload
+    let reload_res = client.config_reload().await.unwrap();
     assert_eq!(reload_res.unchanged, vec!["mysql"]);
     assert_eq!(reload_res.added, vec!["redis"]);
     assert_eq!(reload_res.modified, vec!["web"]);
+
+    let daemon_reload_msg = client.reload().await.unwrap();
+    assert!(daemon_reload_msg.contains("restarted") || daemon_reload_msg.contains("OK"));
 
     // 4. Test read logs
     let logs = client.read_logs("web", 10).await.unwrap();

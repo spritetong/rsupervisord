@@ -92,7 +92,15 @@ pub enum CliCommand {
         #[arg(short = 't', long = "timeout", default_value = "30")]
         timeout: u64,
     },
+    /// Configuration management subcommands (e.g. 'config reload')
+    Config {
+        #[command(subcommand)]
+        action: ConfigSubcommand,
+    },
     /// Perform zero-downtime hot reload of configuration file
+    #[command(alias = "reload-config")]
+    ConfigReload,
+    /// Restart daemon: gracefully stop all programs and reload configuration (Python compatible)
     Reload,
     /// Tail console output for a specific program, or 'all' for aggregated stream
     Tail {
@@ -117,4 +125,11 @@ pub enum CliCommand {
         /// Input characters to send to the process
         chars: String,
     },
+}
+
+/// Actions available under the 'config' subcommand.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigSubcommand {
+    /// Perform zero-downtime hot reload of configuration file
+    Reload,
 }

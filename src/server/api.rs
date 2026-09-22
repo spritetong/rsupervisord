@@ -97,7 +97,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/groups/{group}/restart", post(restart_group))
         .route("/api/v1/all/start", post(start_all))
         .route("/api/v1/all/stop", post(stop_all))
-        .route("/api/v1/reload", post(reload_config))
+        .route("/api/v1/config/reload", post(reload_config))
+        .route("/api/v1/config-reload", post(reload_config))
+        .route("/api/v1/reload", post(restart_daemon))
+        .route("/api/v1/restart", post(restart_daemon))
         .route("/api/v1/events", get(stream_system_events))
         .route("/api/v1/logs/stream", get(stream_all_logs))
         .route("/api/v1/programs/{name}/logs", get(read_logs))
@@ -813,6 +816,47 @@ async fn reload_config(
         Err(e) => Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::err(format!("Hot reload failed: {}", e))),
+        )),
+    }
+}
+
+/// POST /api/v1/reload or POST /api/v1/restart
+async fn restart_daemon(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<ApiResponse<String>>), StatusCode> {
+    check_auth(&headers, &state)?;
+
+    let config_path = match state.config_path {
+        Some(ref p) => p.clone(),
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::err(
+                    "No configuration file path specified for reload",
+                )),
+            ));
+        }
+    };
+
+    let new_config = match SupervisorConfig::from_file(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::err(format!("Invalid configuration: {}", e))),
+            ));
+        }
+    };
+
+    match state.manager.restart_daemon(new_config).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok("Daemon restarted successfully".to_string())),
+        )),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(format!("Daemon restart failed: {}", e))),
         )),
     }
 }

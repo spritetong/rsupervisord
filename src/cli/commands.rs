@@ -190,10 +190,10 @@ pub async fn handle_restart(
     Ok(())
 }
 
-/// Executes the 'reload' command.
-pub async fn handle_reload(client: &SupervisorClient) -> Result<()> {
+/// Executes the 'config reload' command (hot reload).
+pub async fn handle_config_reload(client: &SupervisorClient) -> Result<()> {
     println!("{}", "Reloading configuration...".cyan());
-    let res = client.reload().await?;
+    let res = client.config_reload().await?;
 
     println!("{}", "Configuration reloaded successfully:".green().bold());
     println!(
@@ -233,6 +233,17 @@ pub async fn handle_reload(client: &SupervisorClient) -> Result<()> {
         println!("  {}:   0", "Removed".bold());
     }
 
+    Ok(())
+}
+
+/// Executes the 'reload' command (Python compatible daemon restart).
+pub async fn handle_daemon_reload(client: &SupervisorClient) -> Result<()> {
+    println!(
+        "{}",
+        "Restarting daemon and reloading configuration...".cyan()
+    );
+    let msg = client.reload().await?;
+    println!("{}", msg.green().bold());
     Ok(())
 }
 

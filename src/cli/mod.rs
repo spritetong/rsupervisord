@@ -92,7 +92,11 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
             r#async,
             timeout,
         } => commands::handle_restart(&client, &names, r#async, timeout).await?,
-        CliCommand::Reload => commands::handle_reload(&client).await?,
+        CliCommand::Config {
+            action: args::ConfigSubcommand::Reload,
+        } => commands::handle_config_reload(&client).await?,
+        CliCommand::ConfigReload => commands::handle_config_reload(&client).await?,
+        CliCommand::Reload => commands::handle_daemon_reload(&client).await?,
         CliCommand::Tail {
             name,
             follow,

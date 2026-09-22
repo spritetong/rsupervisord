@@ -264,9 +264,18 @@ pub async fn handle_supervisor_method(
             ctx.manager.shutdown().await.map_err(Fault::from)?;
             Ok(Value::Boolean(true))
         }
-        "supervisor.restart" => Err(Fault::failed(
-            "FAILED: daemon restart requires external supervisor; use reloadConfig or shutdown",
-        )),
+        "supervisor.restart" => {
+            let config_path = ctx.config_path.as_ref().ok_or_else(|| {
+                Fault::cant_reread("No configuration file path specified for reload")
+            })?;
+            let new_config = crate::config::SupervisorConfig::from_file(config_path)
+                .map_err(|e| Fault::cant_reread(format!("Invalid configuration: {}", e)))?;
+            ctx.manager
+                .restart_daemon(new_config)
+                .await
+                .map_err(Fault::from)?;
+            Ok(Value::Boolean(true))
+        }
         "supervisor.addProcessGroup" => {
             let name = get_str_param(params, 0, "addProcessGroup requires group name parameter")?;
             let ok = ctx
