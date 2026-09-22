@@ -18,39 +18,34 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
 
     if stem.to_ascii_lowercase().ends_with("ctl") {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(rsupervisord::cli::run());
+        // Binary renamed/symlinked as *ctl: dispatch to the shared CLI entry.
+        return rsupervisord::cli::run();
     }
 
     if args.len() > 1 && args[1] == "ctl" {
-        // Dispatch "rsupervisord ctl ..." to CLI
+        // "rsupervisord ctl ..." is an alias of rsupervisorctl; strip the token
+        // and render usage/help as "<bin> ctl".
+        let bin_name = format!(
+            "{} ctl",
+            std::path::Path::new(&args[0])
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "rsupervisord".to_string())
+        );
         args.remove(1);
-        let parsed = rsupervisord::cli::CliArgs::parse_from(args);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(rsupervisord::cli::run_with_args(parsed));
+        return rsupervisord::cli::run_from(args, Some(&bin_name));
     }
 
     let daemon_args = DaemonArgs::parse_from(args);
 
-    let cmd_name = rsupervisord::config::paths::get_cmd_name();
-    let config_path = daemon_args.config.clone().unwrap_or_else(|| {
-        rsupervisord::config::paths::find_default_config_path(&cmd_name).unwrap_or_else(|| {
-            rsupervisord::config::paths::get_default_config_path_fallback(&cmd_name)
-        })
-    });
-
-    // Check if a service management action (--install, --uninstall, --start, --stop, --restart) was requested
-    if rsupervisord::service::handle_service_command(
-        &daemon_args,
-        &cmd_name,
-        daemon_args.config.as_deref(),
-    )? {
-        return Ok(());
+    // Service lifecycle: `rsupervisord service <install|uninstall|start|stop|restart>`
+    if let Some(rsupervisord::daemon::DaemonAction::Service { op }) = &daemon_args.action {
+        return rsupervisord::service::run_service_op(*op, daemon_args.config.as_deref());
     }
+
+    let cmd_name = rsupervisord::config::paths::get_cmd_name();
+    let config_path =
+        rsupervisord::config::paths::resolve_config_path(&cmd_name, daemon_args.config.as_deref())?;
 
     // System service invocation via --service (e.g. Windows SCM dispatcher)
     if daemon_args.service {

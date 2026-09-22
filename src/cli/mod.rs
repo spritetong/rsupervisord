@@ -15,18 +15,58 @@ pub use client::SupervisorClient;
 pub use transport::{Endpoint, StreamTransport};
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
+use std::ffi::OsString;
+use std::path::Path;
 
-/// Main entry point for the rsupervisorctl CLI utility.
-pub async fn run() -> Result<()> {
-    let args = CliArgs::parse();
-    run_with_args(args).await
+/// Entry point for the standalone `rsupervisorctl` binary.
+///
+/// The usage/help name is derived from `argv[0]`, mirroring clap's default.
+pub fn run() -> Result<()> {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let bin_name = argv
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .map(|f| f.to_string_lossy().into_owned());
+    run_from(argv, bin_name.as_deref())
 }
 
-/// Executes rsupervisorctl with parsed arguments.
-pub async fn run_with_args(args: CliArgs) -> Result<()> {
+/// Single shared entry used by both `rsupervisorctl` and `rsupervisord ctl ...`.
+///
+/// Argument parsing, `--help` rendering, and the Tokio runtime construction are
+/// defined exactly once here. `bin_name` overrides the usage/help program name
+/// (e.g. `"rsupervisord ctl"`) so help text reflects the actual invocation.
+pub fn run_from<I, T>(argv: I, bin_name: Option<&str>) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut cmd = CliArgs::command();
+    if let Some(b) = bin_name {
+        cmd = cmd.bin_name(b);
+    }
+    let matches = cmd.get_matches_from(argv);
+    let args = match CliArgs::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(e) => e.exit(),
+    };
+
+    // Short-lived client process: a lightweight current-thread runtime suffices.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(run_with_args(args, bin_name))
+}
+
+/// Executes the CLI with parsed arguments; `bin_name` is only forwarded to the
+/// `help` subcommand so it renders consistently with clap's `--help`.
+pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> {
     // Check caller privileges
     security::validate_caller_privileges(args.allow_unelevated)?;
+
+    // Keep a copy of the explicit config: endpoint resolution below consumes
+    // `args.config`, while local service operations need it too.
+    let service_config = args.config.clone();
 
     // Determine target daemon endpoint & configuration credentials
     let (endpoint, cfg_basic_auth, cfg_token) = if let Some(ref s) = args.server {
@@ -103,7 +143,7 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         CliCommand::Pid { names } => commands::handle_pid(&client, &names).await?,
         CliCommand::Shutdown => commands::handle_shutdown(&client).await?,
         CliCommand::Version => commands::handle_version().await?,
-        CliCommand::Help { command } => commands::handle_help(command.as_deref()).await?,
+        CliCommand::Help { command } => commands::handle_help(command.as_deref(), bin_name).await?,
         CliCommand::Signal { signal, names } => {
             commands::handle_signal(&client, &signal, &names).await?
         }
@@ -129,6 +169,10 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         CliCommand::Fg { name } => commands::handle_fg(&client, &name).await?,
         CliCommand::Events => commands::handle_events(&client).await?,
         CliCommand::Stdin { name, chars } => commands::handle_stdin(&client, &name, &chars).await?,
+        CliCommand::Service { op } => {
+            crate::service::run_service_op(op, service_config.as_deref())?;
+            0
+        }
     };
 
     if exit_code != 0 {

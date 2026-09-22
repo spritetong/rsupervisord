@@ -249,6 +249,37 @@ pub fn get_executable_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+/// Resolves the effective configuration path for the daemon:
+/// explicit `-c` value (normalized to an absolute path) → default search → fallback.
+pub fn resolve_config_path(cmd_name: &str, explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = explicit {
+        if p.is_absolute() {
+            return Ok(p.to_path_buf());
+        }
+        return Ok(std::env::current_dir()?.join(p));
+    }
+    Ok(find_default_config_path(cmd_name)
+        .unwrap_or_else(|| get_default_config_path_fallback(cmd_name)))
+}
+
+/// Resolves the daemon executable path for service installation.
+///
+/// The companion `*ctl` binary resolves the sibling `<cmd_name>[.exe]` next to
+/// itself (reusing `derive_cmd_name_from_stem`'s ctl detection); the daemon
+/// returns its own executable path.
+pub fn find_daemon_exe(cmd_name: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let is_ctl = exe.file_stem().map(|s| {
+            let s = s.to_string_lossy();
+            derive_cmd_name_from_stem(&s) != s.as_ref()
+        });
+        if is_ctl != Some(true) {
+            return exe;
+        }
+    }
+    get_executable_dir().join(format!("{}{}", cmd_name, std::env::consts::EXE_SUFFIX))
+}
+
 /// Searches for the default configuration file location in strict priority order.
 #[inline]
 pub fn find_default_config_path(cmd_name: &str) -> Option<PathBuf> {
@@ -373,5 +404,29 @@ mod tests {
         unsafe {
             std::env::remove_var(env_var);
         }
+    }
+
+    #[test]
+    fn test_resolve_config_path_explicit() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_config_path("testcmd", Some(Path::new("explicit.yaml"))).unwrap(),
+            cwd.join("explicit.yaml")
+        );
+
+        let abs = if cfg!(windows) {
+            PathBuf::from(r"C:\cfg\daemon.yaml")
+        } else {
+            PathBuf::from("/etc/daemon.yaml")
+        };
+        assert_eq!(resolve_config_path("testcmd", Some(&abs)).unwrap(), abs);
+    }
+
+    #[test]
+    fn test_find_daemon_exe_resolves_current_executable() {
+        // Integration-test harness stems never end in "ctl", so the current
+        // executable is returned (the ctl sibling branch needs a ctl-named binary).
+        let exe = find_daemon_exe("rsupervisord");
+        assert_eq!(exe, std::env::current_exe().unwrap());
     }
 }

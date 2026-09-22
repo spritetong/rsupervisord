@@ -12,6 +12,7 @@ use rsupervisord::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramStatusDto, ReloadResponse,
 };
 use rsupervisord::program::state::ProgramState;
+use rsupervisord::service::ServiceOp;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -80,6 +81,55 @@ fn test_cli_args_parsing() {
         args.command,
         Some(CliCommand::Stdin { name, chars }) if name == "worker" && chars == "echo ping"
     ));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "service", "install"]);
+    assert!(matches!(
+        args.command,
+        Some(CliCommand::Service {
+            op: ServiceOp::Install
+        })
+    ));
+
+    let args = CliArgs::parse_from(["rsupervisorctl", "service", "stop", "-c", "/etc/cfg.yaml"]);
+    assert!(matches!(
+        args.command,
+        Some(CliCommand::Service {
+            op: ServiceOp::Stop
+        })
+    ));
+    assert_eq!(
+        args.config.as_deref(),
+        Some(std::path::Path::new("/etc/cfg.yaml"))
+    );
+
+    // Bare `service` requires an operation.
+    assert!(CliArgs::try_parse_from(["rsupervisorctl", "service"]).is_err());
+}
+
+#[tokio::test]
+async fn test_cli_help_bridges_to_clap() {
+    // Bare `help` renders the full command surface derived from CliArgs.
+    let code = rsupervisord::cli::commands::handle_help(None, None)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+
+    // Per-command help, including alias-only names, with a bin_name override
+    // (the `rsupervisord ctl ...` invocation form).
+    let code = rsupervisord::cli::commands::handle_help(Some("status"), Some("rsupervisord ctl"))
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    let code = rsupervisord::cli::commands::handle_help(Some("send-stdin"), None)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+
+    // Unknown command reports an error exit code (wording is UX, not asserted).
+    let code = rsupervisord::cli::commands::handle_help(Some("no-such-cmd"), None)
+        .await
+        .unwrap();
+    assert_eq!(code, 1);
 }
 
 #[tokio::test]

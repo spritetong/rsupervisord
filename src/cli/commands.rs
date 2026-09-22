@@ -4,9 +4,11 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::cli::args::CliArgs;
 use crate::cli::client::SupervisorClient;
 use crate::control::protocol::ProgramStatusDto;
 use anyhow::Result;
+use clap::CommandFactory;
 use colored::Colorize;
 use std::io::IsTerminal;
 use tabled::Table;
@@ -604,17 +606,40 @@ pub async fn handle_version() -> Result<i32> {
     Ok(0)
 }
 
-/// Executes the 'help' command.
-pub async fn handle_help(command: Option<&str>) -> Result<i32> {
-    if let Some(cmd) = command {
-        println!("Help for '{}': see rsupervisorctl --help", cmd);
-    } else {
-        println!("rsupervisorctl - process supervisor CLI");
-        println!(
-            "Available commands: status, start, stop, restart, reload, reread, update, pid, shutdown, version, avail, signal, tail, maintail, clear, add, remove, open, fg, events, stdin"
-        );
+/// Executes the 'help' command by replaying it through clap's own `--help`
+/// pipeline (catching the `DisplayHelp` short-circuit instead of exiting), so
+/// output is byte-identical to `<bin> [--help|-h]` and the command surface is
+/// defined once in `CliArgs` (see `CLI_COMPAT.md` §6.1.1).
+pub async fn handle_help(command: Option<&str>, bin_name: Option<&str>) -> Result<i32> {
+    let mut probe = CliArgs::command();
+    if let Some(b) = bin_name {
+        probe = probe.bin_name(b);
     }
-    Ok(0)
+    let head = bin_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| probe.get_name().to_string());
+    let mut argv = vec![head];
+    if let Some(name) = command {
+        argv.push(name.to_string());
+    }
+    argv.push("--help".to_string());
+
+    match probe.try_get_matches_from(argv) {
+        // `--help` short-circuits as DisplayHelp; render it on stdout as-is.
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+            e.print()?;
+            Ok(0)
+        }
+        // Unreachable: `--help` always interrupts parsing.
+        Ok(_) => Ok(0),
+        // Unknown command name (or other parse failure).
+        Err(_) => {
+            if let Some(name) = command {
+                eprintln!("No such command: {}", name);
+            }
+            Ok(1)
+        }
+    }
 }
 
 /// Executes the 'signal' command.

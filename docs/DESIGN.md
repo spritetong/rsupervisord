@@ -824,7 +824,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 ### 15.13 System Service Integration (Windows Service & Linux Systemd)
 
 - **First-Class Windows Service Control Manager (SCM) Integration**:
-  - Implemented using the `windows-service` crate, supporting `--install`, `--uninstall`, `--start`, `--stop`, `--restart`, and internal `--service`.
+  - Implemented using the `windows-service` crate, supporting the `service install/uninstall/start/stop/restart` subcommand (shared by `rsupervisord` and `rsupervisorctl`), and internal `--service`.
   - Dynamically registers the service under the canonical `cmd_name` (derived from `argv[0]`), ensuring custom-named binaries (e.g. `myd`) install and run under matching service identities.
   - SCM control events (`ServiceControl::Stop`, `ServiceControl::Shutdown`) are handled by reporting `ServiceState::StopPending` with a 30-second bounded timeout, followed by cooperative broadcast cancellation via `tokio_util::sync::CancellationToken`.
   - Supervised child processes are gracefully terminated inside Win32 Job Objects before the service transitions to `ServiceState::Stopped`.

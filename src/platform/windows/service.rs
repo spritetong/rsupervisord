@@ -278,36 +278,21 @@ pub fn run_as_service(
 }
 
 /// Installs the binary as an auto-start Windows system service with crash recovery.
-pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
+///
+/// `exe_path` and `config_path` are resolved by the caller
+/// (`service::run_service_op`) so the companion ctl binary can install
+/// the sibling daemon instead of itself.
+pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> anyhow::Result<()> {
     if !crate::platform::native_platform().is_elevated() {
         anyhow::bail!(
             "Administrator privileges are required to install the Windows service. Please run as Administrator."
         );
     }
 
-    let exe_path = std::env::current_exe()?;
-    let abs_cfg_path = if let Some(cfg) = config_path {
-        if cfg.is_absolute() {
-            cfg.to_path_buf()
-        } else {
-            std::env::current_dir()?.join(cfg)
-        }
-    } else {
-        crate::config::paths::find_default_config_path(cmd_name)
-            .unwrap_or_else(|| crate::config::paths::get_default_config_path_fallback(cmd_name))
-    };
-
-    if !abs_cfg_path.exists() {
-        eprintln!(
-            "Warning: Configuration file {:?} does not exist yet. Please ensure it is present before starting the service.",
-            abs_cfg_path
-        );
-    }
-
     let launch_arguments = vec![
         OsString::from("--service"),
         OsString::from("-c"),
-        abs_cfg_path.into_os_string(),
+        config_path.as_os_str().to_os_string(),
     ];
 
     let manager = ServiceManager::local_computer(
@@ -322,7 +307,7 @@ pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Re
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: exe_path,
+        executable_path: exe_path.to_path_buf(),
         launch_arguments,
         dependencies: vec![
             ServiceDependency::Group(OsString::from("network")),
@@ -522,8 +507,8 @@ fn wait_for_state(
 }
 
 impl PlatformService for WindowsService {
-    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
-        install_service(cmd_name, config_path)
+    fn install(&self, cmd_name: &str, exe_path: &Path, config_path: &Path) -> anyhow::Result<()> {
+        install_service(cmd_name, exe_path, config_path)
     }
 
     fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()> {

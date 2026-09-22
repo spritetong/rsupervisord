@@ -5,48 +5,60 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::daemon::DaemonArgs;
+use clap::Subcommand;
 use std::path::{Path, PathBuf};
 
-/// Inspects command-line service flags and executes service management actions if specified.
+/// Service lifecycle operations shared by `rsupervisord service ...` and
+/// `rsupervisorctl service ...`.
+#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceOp {
+    /// Install as a system service
+    Install,
+    /// Uninstall the system service
+    Uninstall,
+    /// Start the system service
+    Start,
+    /// Stop the system service
+    Stop,
+    /// Restart the system service
+    Restart,
+}
+
+/// Executes a service lifecycle operation.
 ///
-/// Returns `Ok(true)` if a service management flag was present and processed, or `Ok(false)`
-/// if no service management flags were specified (meaning normal daemon startup should proceed).
-pub fn handle_service_command(
-    args: &DaemonArgs,
-    cmd_name: &str,
-    config_path: Option<&Path>,
-) -> anyhow::Result<bool> {
-    let actions = [
-        args.install,
-        args.uninstall,
-        args.start,
-        args.stop,
-        args.restart,
-    ];
-    let count = actions.iter().filter(|&&b| b).count();
-    if count > 1 {
-        anyhow::bail!(
-            "Only one service management flag (--install, --uninstall, --start, --stop, --restart) may be specified at a time."
-        );
-    }
-    if count == 0 {
-        return Ok(false);
-    }
-
+/// Single entry point shared by the daemon binary (`rsupervisord service ...`)
+/// and the control binary (`rsupervisorctl service ...`). Resolves the command
+/// name, configuration path, and daemon executable through the existing
+/// `config::paths` helpers, then dispatches to the platform service backend.
+pub fn run_service_op(op: ServiceOp, explicit_config: Option<&Path>) -> anyhow::Result<()> {
+    let cmd_name = crate::config::paths::get_cmd_name();
     let service = crate::platform::native_platform().service();
-    if args.install {
-        service.install(cmd_name, config_path)?;
-    } else if args.uninstall {
-        service.uninstall(cmd_name)?;
-    } else if args.start {
-        service.start(cmd_name)?;
-    } else if args.stop {
-        service.stop(cmd_name)?;
-    } else if args.restart {
-        service.restart(cmd_name)?;
-    }
 
-    Ok(true)
+    match op {
+        ServiceOp::Install => {
+            let exe_path = crate::config::paths::find_daemon_exe(&cmd_name);
+            if !exe_path.is_file() {
+                anyhow::bail!(
+                    "Daemon executable not found at {:?}. Deploy {} next to this binary.",
+                    exe_path,
+                    cmd_name
+                );
+            }
+            let config_path =
+                crate::config::paths::resolve_config_path(&cmd_name, explicit_config)?;
+            if !config_path.exists() {
+                eprintln!(
+                    "Warning: Configuration file {:?} does not exist yet. Please ensure it is present before starting the service.",
+                    config_path
+                );
+            }
+            service.install(&cmd_name, &exe_path, &config_path)
+        }
+        ServiceOp::Uninstall => service.uninstall(&cmd_name),
+        ServiceOp::Start => service.start(&cmd_name),
+        ServiceOp::Stop => service.stop(&cmd_name),
+        ServiceOp::Restart => service.restart(&cmd_name),
+    }
 }
 
 /// Runs the daemon as a system service.

@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -115,6 +116,11 @@ pub enum CliCommand {
     },
     /// Shut down the remote rsupervisord daemon
     Shutdown,
+    /// Manage the local system service (install/uninstall/start/stop/restart)
+    Service {
+        #[command(subcommand)]
+        op: ServiceOp,
+    },
     /// Display rsupervisorctl and protocol version
     Version,
     /// Display help information for commands

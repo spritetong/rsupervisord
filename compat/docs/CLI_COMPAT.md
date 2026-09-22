@@ -191,7 +191,7 @@ rsupervisorctl start all
 
 ### 4.4 Interactive shell (Not Supported)
 
-**Requirement**: Python enters a REPL with no arguments or with `-i` (`supervisor> ` prompt, auto-runs `status` at startup, tab completion, `quit`/`exit`/`^D`, interactive mode always returns 0).
+**Requirement**: Python enters a REPL with no arguments or with `-i` (`supervisor>` prompt, auto-runs `status` at startup, tab completion, `quit`/`exit`/`^D`, interactive mode always returns 0).
 
 **Decision**: **Not Supported**. Reasons:
 
@@ -321,6 +321,7 @@ rsupervisorctl shutdown
 **Classification**: contract surface — `reload`'s **semantics** must match Python's (restart the daemon); the output wording is UX surface (currently `Daemon restarted successfully`; no contract assertion, only exit code 0 + daemon alive).
 
 > **Python reference**:
+>
 > - `reread` = re-read config only, **no add/remove**
 > - `update` = re-read + add/remove + restart affected groups
 > - `reload` = **restart the daemon**
@@ -333,6 +334,7 @@ rsupervisorctl reload        # restart the daemon
 ```
 
 **Implementation (already landed)**:
+
 - Client: `rsupervisorctl reload` → daemon restart (`handle_daemon_reload`; daemon stops all → re-reads config → restarts; see `manager/supervisor.rs::execute_restart_daemon`); the output prose is UX surface, no contract assertion.
 - Protocol: HTTP `POST /api/v1/reload`; XML-RPC `supervisor.restart` (both implemented).
 - **hot-reload and reload are two separate paths on the daemon side**: hot reload goes via `POST /api/v1/config/reload` and `supervisor.reloadConfig`; `reload` goes via `/api/v1/reload` and `supervisor.restart`.

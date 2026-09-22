@@ -7,7 +7,8 @@
 use crate::config::SupervisorConfig;
 use crate::manager::SupervisorManager;
 use crate::server::ServerEngine;
-use clap::Parser;
+use crate::service::ServiceOp;
+use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 )]
 pub struct DaemonArgs {
     /// Path to YAML configuration file
-    #[arg(short = 'c', long = "config")]
+    #[arg(short = 'c', long = "config", global = true)]
     pub config: Option<PathBuf>,
 
     /// Run daemon in the foreground (default: true)
@@ -36,29 +37,23 @@ pub struct DaemonArgs {
     #[arg(long = "worker-threads")]
     pub worker_threads: Option<usize>,
 
-    /// Install as a system service
-    #[arg(long = "install")]
-    pub install: bool,
-
-    /// Uninstall the system service
-    #[arg(long = "uninstall")]
-    pub uninstall: bool,
-
-    /// Start the system service
-    #[arg(long = "start")]
-    pub start: bool,
-
-    /// Stop the system service
-    #[arg(long = "stop")]
-    pub stop: bool,
-
-    /// Restart the system service
-    #[arg(long = "restart")]
-    pub restart: bool,
-
     /// Run as a system service (e.g. Windows SCM)
     #[arg(long = "service")]
     pub service: bool,
+
+    /// Service lifecycle management (e.g. 'service install')
+    #[command(subcommand)]
+    pub action: Option<DaemonAction>,
+}
+
+/// Top-level subcommands of the daemon binary.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonAction {
+    /// Manage the system service (install/uninstall/start/stop/restart)
+    Service {
+        #[command(subcommand)]
+        op: ServiceOp,
+    },
 }
 
 /// Orchestrator for the rsupervisord daemon process lifecycle.

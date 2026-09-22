@@ -5,8 +5,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
 fn main() -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(rsupervisord::cli::run())
+    rsupervisord::cli::run()
 }

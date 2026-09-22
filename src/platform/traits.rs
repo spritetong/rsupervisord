@@ -128,8 +128,12 @@ pub trait PlatformBackend: Send + Sync {
 
 /// Trait representing platform-specific system service management and execution.
 pub trait PlatformService: Send + Sync {
-    /// Installs the binary as an auto-start system service.
-    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()>;
+    /// Installs the daemon as an auto-start system service.
+    ///
+    /// `exe_path` and `config_path` are resolved by the caller
+    /// (`service::run_service_op`) so the companion ctl binary installs the
+    /// sibling daemon instead of itself.
+    fn install(&self, cmd_name: &str, exe_path: &Path, config_path: &Path) -> anyhow::Result<()>;
 
     /// Uninstalls the system service.
     fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()>;

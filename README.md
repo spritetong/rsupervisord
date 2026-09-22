@@ -205,12 +205,13 @@ When `-c / --config` is not explicitly specified on the command line, the daemon
 
 `rsupervisord` provides built-in, cross-platform system service lifecycle management without requiring external wrappers.
 
-#### Command-Line Service Flags
-- `--install`: Installs `rsupervisord` as an auto-starting system service (Windows Service via SCM, or Linux systemd unit). An optional `-c / --config <path>` embeds an explicit configuration path.
-- `--uninstall`: Stops the running service (if active) and removes it from the service database.
-- `--start`: Starts the registered system service.
-- `--stop`: Gracefully stops the registered system service and drains all supervised child processes.
-- `--restart`: Restarts the registered system service.
+#### `service` Subcommand
+Available on both `rsupervisord` and `rsupervisorctl` (the ctl form locates the daemon executable next to itself):
+- `service install`: Installs `rsupervisord` as an auto-starting system service (Windows Service via SCM, or Linux systemd unit). An optional `-c / --config <path>` embeds an explicit configuration path.
+- `service uninstall`: Stops the running service (if active) and removes it from the service database.
+- `service start`: Starts the registered system service.
+- `service stop`: Gracefully stops the registered system service and drains all supervised child processes.
+- `service restart`: Restarts the registered system service.
 - `--service` (*Windows only*): Invoked automatically by the Windows Service Control Manager (SCM) to execute the daemon within the SCM background worker thread.
 
 #### Windows Service (SCM)
@@ -218,16 +219,16 @@ Open **PowerShell** or **Command Prompt** as Administrator:
 
 ```powershell
 # Install Windows Service with auto-start (uses default config path if -c is omitted)
-rsupervisord.exe --install
+rsupervisord.exe service install
 
 # Install with explicit configuration file
-rsupervisord.exe --install -c C:\rsupervisord\config.yaml
+rsupervisord.exe service install -c C:\rsupervisord\config.yaml
 
 # Manage service lifecycle
-rsupervisord.exe --start
-rsupervisord.exe --stop
-rsupervisord.exe --restart
-rsupervisord.exe --uninstall
+rsupervisord.exe service start
+rsupervisord.exe service stop
+rsupervisord.exe service restart
+rsupervisord.exe service uninstall
 ```
 
 When running as a Windows Service, SCM control requests (`Stop`, `Shutdown`) signal cooperative cancellation via `tokio_util::sync::CancellationToken`, cleanly terminating all supervised processes within native Win32 Job Objects before reporting `ServiceState::Stopped`.
@@ -237,16 +238,16 @@ On Linux systems, run with root privileges:
 
 ```bash
 # Install and enable systemd service (/etc/systemd/system/<cmd_name>.service)
-sudo rsupervisord --install
+sudo rsupervisord service install
 
 # Install with explicit configuration path
-sudo rsupervisord --install -c /etc/rsupervisord/config.yaml
+sudo rsupervisord service install -c /etc/rsupervisord/config.yaml
 
-# Manage service lifecycle via rsupervisord CLI
-sudo rsupervisord --start
-sudo rsupervisord --stop
-sudo rsupervisord --restart
-sudo rsupervisord --uninstall
+# Manage service lifecycle via rsupervisord (or rsupervisorctl)
+sudo rsupervisord service start
+sudo rsupervisord service stop
+sudo rsupervisord service restart
+sudo rsupervisord service uninstall
 
 # Or manage directly via native systemctl
 sudo systemctl status rsupervisord

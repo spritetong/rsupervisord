@@ -57,33 +57,18 @@ fn run_systemctl(args: &[&str], ignore_error: bool) -> anyhow::Result<()> {
 }
 
 /// Installs the binary as an auto-start systemd service on Linux.
-pub fn install_service(cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
+///
+/// `exe_path` and `config_path` are resolved by the caller
+/// (`service::run_service_op`) so the companion ctl binary can install
+/// the sibling daemon instead of itself.
+pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> anyhow::Result<()> {
     if !crate::platform::native_platform().is_elevated() {
         anyhow::bail!(
             "Root privileges are required to install systemd service. Please run with sudo."
         );
     }
 
-    let exe_path = std::env::current_exe()?;
-    let cfg_path: PathBuf = if let Some(p) = config_path {
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            std::env::current_dir()?.join(p)
-        }
-    } else {
-        crate::config::paths::find_default_config_path(cmd_name)
-            .unwrap_or_else(|| crate::config::paths::get_default_config_path_fallback(cmd_name))
-    };
-
-    if !cfg_path.exists() {
-        eprintln!(
-            "Warning: Configuration file {:?} does not exist yet. Please ensure it is present before starting the service.",
-            cfg_path
-        );
-    }
-
-    let unit_content = generate_systemd_unit(cmd_name, &exe_path, &cfg_path);
+    let unit_content = generate_systemd_unit(cmd_name, exe_path, config_path);
     let unit_file = PathBuf::from(format!("/etc/systemd/system/{}.service", cmd_name));
 
     std::fs::write(&unit_file, unit_content)
@@ -156,8 +141,8 @@ pub fn restart_service(cmd_name: &str) -> anyhow::Result<()> {
 }
 
 impl PlatformService for UnixService {
-    fn install(&self, cmd_name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
-        install_service(cmd_name, config_path)
+    fn install(&self, cmd_name: &str, exe_path: &Path, config_path: &Path) -> anyhow::Result<()> {
+        install_service(cmd_name, exe_path, config_path)
     }
 
     fn uninstall(&self, cmd_name: &str) -> anyhow::Result<()> {
