@@ -250,6 +250,46 @@ impl SupervisorClient {
         Ok(())
     }
 
+    /// Invokes an XML-RPC method on `/RPC2` on the daemon.
+    pub async fn call_xmlrpc(&self, method_name: &str, params_xml: &str) -> Result<String> {
+        let payload = format!(
+            "<?xml version=\"1.0\"?><methodCall><methodName>{}</methodName><params>{}</params></methodCall>",
+            method_name, params_xml
+        );
+        let mut req_headers = format!(
+            "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n",
+            payload.len()
+        );
+        self.append_auth_header(&mut req_headers);
+        req_headers.push_str("\r\n");
+
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), self.endpoint.connect())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Connection timed out connecting to rsupervisord daemon at {:?}.",
+                    self.endpoint
+                )
+            })?
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to connect to daemon at {:?}: {}", self.endpoint, e)
+            })?;
+
+        stream.write_all(req_headers.as_bytes()).await?;
+        stream.write_all(payload.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await?;
+
+        let response_str = String::from_utf8_lossy(&buf);
+        if let Some(body_start) = response_str.find("\r\n\r\n") {
+            Ok(response_str[body_start + 4..].to_string())
+        } else {
+            Ok(response_str.to_string())
+        }
+    }
+
     /// Streams real-time log lines from the daemon (Server-Sent Events).
     pub async fn stream_logs<F>(&self, name: &str, mut callback: F) -> Result<()>
     where

@@ -76,7 +76,7 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         .command
         .unwrap_or(CliCommand::Status { names: Vec::new() });
 
-    match command {
+    let exit_code = match command {
         CliCommand::Status { names } => commands::handle_status(&client, &names).await?,
         CliCommand::Start {
             names,
@@ -98,13 +98,41 @@ pub async fn run_with_args(args: CliArgs) -> Result<()> {
         } => commands::handle_config_reload(&client).await?,
         CliCommand::ConfigReload => commands::handle_config_reload(&client).await?,
         CliCommand::Reload => commands::handle_daemon_reload(&client).await?,
+        CliCommand::Reread => commands::handle_reread(&client).await?,
+        CliCommand::Update { names } => commands::handle_update(&client, &names).await?,
+        CliCommand::Pid { names } => commands::handle_pid(&client, &names).await?,
+        CliCommand::Shutdown => commands::handle_shutdown(&client).await?,
+        CliCommand::Version => commands::handle_version().await?,
+        CliCommand::Help { command } => commands::handle_help(command.as_deref()).await?,
+        CliCommand::Signal { signal, names } => {
+            commands::handle_signal(&client, &signal, &names).await?
+        }
+        CliCommand::Avail => commands::handle_avail(&client).await?,
         CliCommand::Tail {
             name,
+            channel,
             follow,
+            bytes,
             lines,
-        } => commands::handle_tail(&client, &name, follow, lines).await?,
+        } => {
+            commands::handle_tail(&client, &name, channel.as_deref(), follow, bytes, lines).await?
+        }
+        CliCommand::Maintail {
+            follow,
+            bytes,
+            lines,
+        } => commands::handle_maintail(&client, follow, bytes, lines).await?,
+        CliCommand::Clear { names } => commands::handle_clear(&client, &names).await?,
+        CliCommand::Add { names } => commands::handle_add(&client, &names).await?,
+        CliCommand::Remove { names } => commands::handle_remove(&client, &names).await?,
+        CliCommand::Open { url } => commands::handle_open(&client, &url).await?,
+        CliCommand::Fg { name } => commands::handle_fg(&client, &name).await?,
         CliCommand::Events => commands::handle_events(&client).await?,
         CliCommand::Stdin { name, chars } => commands::handle_stdin(&client, &name, &chars).await?,
+    };
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 
     Ok(())

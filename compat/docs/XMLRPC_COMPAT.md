@@ -24,7 +24,7 @@
 | :--- | :--- |
 | **P0** | 让 stock `supervisorctl` 的日常命令直连可用(status/start/stop/restart/signal/tail/maintail/version/shutdown/reread/update/all)。 |
 | **P1** | 完整覆盖其余只读/辅助方法(clear、read*、avail/getAllConfigInfo、system.* 内省、group 级 signal)。 |
-| **P2 / 搁置** | 依赖 daemon 重启语义(`restart`),或尚无对应基础能力的项。 |
+| **P2 / 搁置** | 尚无对应基础能力的项(当前无)。 |
 | **不支持 / 降级** | 复杂或与架构冲突,明确声明降级行为。 |
 
 ---
@@ -119,7 +119,7 @@
 | `sendProcessStdin` | **P1** | `(name, chars) → bool` | `SendStdin`(依赖 **#7**) | #7 未落地前返回 `FAILED`/`NO_FILE` |
 | `sendRemoteCommEvent` | **P0** | `(type, data) → bool` | `send_remote_comm_event` → `REMOTE_COMMUNICATION` | 直达事件监听池 |
 | `shutdown` | **P0** | `() → bool` | `ManagerCommand::Shutdown` | 直接 |
-| `restart` | **P2** | `() → bool` | daemon 重启(非 hot-reload) | **语义差异**:见 §7.5 |
+| `restart` | **P0** | `() → bool` | `ManagerCommand::RestartDaemon`(停全部→重读配置→再启动) | **语义差异**:见 §7.5(与 hot-reload 分离) |
 | 别名 `getVersion`/`readMainLog`/`readProcessLog`/`tailProcessLog`/`clearProcessLog` | **P0/P1** | 同对应方法 | 直接转发 | 零成本,必做 |
 
 ### 5.2 `system` 命名空间(内省)
@@ -199,7 +199,10 @@ Python 返回每个 program(组被摊平)的**配置快照**,键含:`autostart, 
 
 - Python `restart`:置 daemon mood 为 `RESTARTING`,进程退出后由外部(init/systemd/supervisor 自身)**重新拉起**,配置随之生效。
 - rsupervisord 的"热重载"是 `reloadConfig` 的应用路径,**不是** `restart`。
-- **裁决**:`restart` 归 **P2**,需在实现"进程自重启(exit code 约定 + 外部 supervisor 拉起)"后才提供;在此之前返回 `FAILED` 并提示用 `reloadConfig`/`shutdown`。**不要把 hot-reload 嫁接到 `restart`**(与 `CLI_COMPAT.md` P0 的 `reload` 语义裁决一致)。
+- **裁决**:`restart` 已实现为 `ManagerCommand::RestartDaemon`(**停全部 → 重读配置 → 再启动**,见 `manager/supervisor.rs::execute_restart_daemon`),语义与 Python `reload`/`restart` 对齐。与 hot-reload 的边界:
+  - `supervisor.restart` / CLI `reload` → **重启 daemon**(停全部、重建实例、autostart 重启)。
+  - `supervisor.reloadConfig` / CLI `reload-config` / `config reload` → **零停机热重载**(增量 diff,未变化程序保 PID 在线)。
+- **不要把 hot-reload 嫁接到 `restart`**(与 `CLI_COMPAT.md` P0 的 `reload` 语义裁决一致)。
 
 ### 7.6 `sendProcessStdin` / `sendRemoteCommEvent`
 
@@ -226,7 +229,7 @@ Python 返回每个 program(组被摊平)的**配置快照**,键含:`autostart, 
 3. `getAllProcessInfo`、`getProcessInfo`(§6 全字段)。
 4. `startProcess`/`stopProcess` + group + all;`signalProcess`。
 5. `tailProcessStdoutLog`/`tailProcessStderrLog` + 别名;`readLog`(maintail)。
-6. `reloadConfig`;`shutdown`。
+6. `reloadConfig`;`shutdown`;**`restart`**(daemon 重启语义,§7.5)。
 
 **P1**
 7. `readProcessStdoutLog`/`readProcessStderrLog`、`clearLog`/`clearProcessLogs`/`clearAllProcessLogs`。
@@ -235,7 +238,7 @@ Python 返回每个 program(组被摊平)的**配置快照**,键含:`autostart, 
 10. `addProcessGroup`/`removeProcessGroup`(pending 配置激活/移除,Python 语义)。
 
 **P2 / 搁置**
-11. `restart`(daemon 重启语义)。
+11. (已并入 P0:`restart` daemon 重启已实现)
 
 **不支持 / 降级**
 12. 长操作回调分块(`NOT_DONE_YET`)→ **同步返回降级**。

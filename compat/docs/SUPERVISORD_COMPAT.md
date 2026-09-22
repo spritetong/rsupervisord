@@ -131,7 +131,7 @@ Basic auth 兼容(`[inet_http_server]` username/password)。可覆盖的方法�
 | #9 | 皮 | **Cron 计划 + Hook(pre_start / pre_stop)** | `cron:` 表达式调度启停;pre_start / pre_stop 脚本勾子;失败语义与事件挂钩 | cron 程序按时启动;hook 按生命周期点执行并可失败降级 |
 | #10 | 皮 | **文件/二进制变更触发重启** | filechangemonitor 语义:监控文件/目录模式,命中变化重启并支持自定义重启命令/信号 | 文件变更→程序按配置重启,N 次内收敛 |
 | #11 | 皮 | **Prometheus metrics 端点** | 基于现有 activity-aware 采样器导出 `process_*` 指标;`/metrics` 可开关 | `/metrics` 输出符合命名规范;空闲采样自动暂停仍生效 |
-| #12 | 皮 | **daemon 运行面补全** | pidfile、minfds / minprocs rlimit、`reload` 与现有 hot-reload 对齐 | 各选项生效且有参数校验;`reload` 语义与 `#5` 的 XML-RPC `reloadConfig` 一致 |
+| #12 | 皮 | **daemon 运行面补全** | pidfile、minfds / minprocs rlimit、`reload`(daemon 重启)与 hot-reload(`reload-config`)语义分离 | 各选项生效且有参数校验;`reload` = 停全部→重读→再启动(Python 语义),与 XML-RPC `supervisor.restart` 一致;`reload-config`/`config reload` = 零停机热重载(`reloadConfig`) |
 
 ### 7.3 关键决策记录(本次讨论定论)
 

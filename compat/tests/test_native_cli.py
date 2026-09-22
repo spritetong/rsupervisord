@@ -67,8 +67,5 @@ def test_native_reload_config(instance):
     # and programs stay up.  ``reload`` itself is reserved for the Python
     # "restart daemon" semantics (CLI_COMPAT.md §6.1.5/§6.4).
     res = instance.rctl("reload-config")
-    if res.returncode != 0 and "reload-config" in (res.stderr or ""):
-        # The CLI rename (reload -> reload-config) has not landed yet.
-        pytest.skip("reload-config command not present in this build")
     assert res.returncode == 0
     assert instance.wait_state("ticker", "RUNNING")

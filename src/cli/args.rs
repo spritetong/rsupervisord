@@ -12,15 +12,16 @@ use std::path::PathBuf;
 #[command(
     name = "rsupervisorctl",
     version,
-    about = "Control and monitor processes managed by rsupervisord"
+    about = "Control and monitor processes managed by rsupervisord",
+    disable_help_subcommand = true
 )]
 pub struct CliArgs {
     /// Endpoint to connect to (Unix Domain Socket, Windows Named Pipe, or TCP URL)
-    #[arg(short = 's', long = "server", global = true)]
+    #[arg(short = 's', long = "server", alias = "serverurl", global = true)]
     pub server: Option<String>,
 
     /// Path to rsupervisord.yaml configuration file
-    #[arg(short = 'c', long = "config", global = true)]
+    #[arg(short = 'c', long = "config", alias = "configuration", global = true)]
     pub config: Option<PathBuf>,
 
     /// Authentication token for protected TCP connections
@@ -28,11 +29,11 @@ pub struct CliArgs {
     pub auth_token: Option<String>,
 
     /// Username for HTTP Basic Authentication (Supervisord compatible)
-    #[arg(short = 'u', long = "user", global = true)]
+    #[arg(short = 'u', long = "user", alias = "username", global = true)]
     pub user: Option<String>,
 
     /// Password for HTTP Basic Authentication (Supervisord compatible)
-    #[arg(short = 'P', long = "password", global = true)]
+    #[arg(short = 'p', short_alias = 'P', long = "password", global = true)]
     pub password: Option<String>,
 
     /// Bypass caller elevation verification
@@ -54,7 +55,6 @@ pub enum CliCommand {
     /// Start specified program(s) or 'all'
     Start {
         /// Target program name(s) or 'all'
-        #[arg(required = true)]
         names: Vec<String>,
 
         /// Asynchronous fire-and-forget mode (returns immediately)
@@ -68,7 +68,6 @@ pub enum CliCommand {
     /// Stop specified program(s) or 'all'
     Stop {
         /// Target program name(s) or 'all'
-        #[arg(required = true)]
         names: Vec<String>,
 
         /// Asynchronous fire-and-forget mode (returns immediately)
@@ -82,7 +81,6 @@ pub enum CliCommand {
     /// Restart specified program(s) or 'all'
     Restart {
         /// Target program name(s) or 'all'
-        #[arg(required = true)]
         names: Vec<String>,
 
         /// Asynchronous fire-and-forget mode (returns immediately)
@@ -103,18 +101,95 @@ pub enum CliCommand {
     ConfigReload,
     /// Restart daemon: gracefully stop all programs and reload configuration (Python compatible)
     Reload,
-    /// Tail console output for a specific program, or 'all' for aggregated stream
+    /// Reread configuration files and output diff without starting/stopping processes
+    Reread,
+    /// Reread configuration and apply changes (restart/add/remove affected process groups)
+    Update {
+        /// Target group name(s) or 'all'
+        names: Vec<String>,
+    },
+    /// Get process ID for a program or all programs
+    Pid {
+        /// Target program name(s) or 'all'
+        names: Vec<String>,
+    },
+    /// Shut down the remote rsupervisord daemon
+    Shutdown,
+    /// Display rsupervisorctl and protocol version
+    Version,
+    /// Display help information for commands
+    Help {
+        /// Optional command to display help for
+        command: Option<String>,
+    },
+    /// Send a signal to a process, group, or all processes
+    Signal {
+        /// Signal name or number (e.g. HUP, TERM, KILL, QUIT, INT)
+        signal: String,
+
+        /// Target process or group name(s) or 'all'
+        names: Vec<String>,
+    },
+    /// Display available process configuration information
+    Avail,
+    /// Tail console output for a specific program
     Tail {
         /// Program name or 'all'
         name: String,
+
+        /// Log channel: stdout or stderr
+        channel: Option<String>,
 
         /// Continuously stream live log lines
         #[arg(short = 'f', long = "follow")]
         follow: bool,
 
+        /// Number of historical bytes to show (Python -N compatibility)
+        #[arg(short = 'B', long = "bytes")]
+        bytes: Option<usize>,
+
         /// Number of historical lines to show
-        #[arg(short = 'n', long = "lines", default_value = "100")]
-        lines: usize,
+        #[arg(short = 'n', long = "lines")]
+        lines: Option<usize>,
+    },
+    /// Tail daemon main log
+    Maintail {
+        /// Continuously stream live log lines
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+
+        /// Number of historical bytes to show
+        #[arg(short = 'B', long = "bytes")]
+        bytes: Option<usize>,
+
+        /// Number of historical lines to show
+        #[arg(short = 'n', long = "lines")]
+        lines: Option<usize>,
+    },
+    /// Clear log files and ring buffer for process(es)
+    Clear {
+        /// Target program name(s) or 'all'
+        names: Vec<String>,
+    },
+    /// Activates a process group from pending configuration at runtime
+    Add {
+        /// Target group name(s)
+        names: Vec<String>,
+    },
+    /// Deactivates a process group from active runtime set
+    Remove {
+        /// Target group name(s)
+        names: Vec<String>,
+    },
+    /// Connect to a different rsupervisord server URL for current session
+    Open {
+        /// Server URL (http:// or unix://)
+        url: String,
+    },
+    /// Foreground mode: stream logs and forward stdin to process
+    Fg {
+        /// Target program name
+        name: String,
     },
     /// Stream real-time system lifecycle and state events
     Events,

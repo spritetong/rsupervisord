@@ -69,7 +69,7 @@
 | `version` | 打印 daemon 版本 `4.2.5` | 打印自身身份 `rsupervisorctl <ver> (protocol supervisor 4.2.5)`;保留兼容标记,主体是"自己" |
 | `help` / `--help` | flat 命令列表 | clap 渲染:分组、示例、别名标注 |
 | 错误细节 | 混在 stdout 结果行里 | stdout 只走契约行;细节进 **stderr**,结构化、带上下文 |
-| `shutdown` / `reload` 文案 | `Shut down` / `Restarted supervisord` | 按自己的口气;退出码仍是契约 |
+| `shutdown` / `reload` 文案 | `Shut down` / `Restarted supervisord` | 自己的口气(`Daemon restarted successfully` …);退出码仍是契约 |
 | TTY 下的表格 / 颜色 | 逐字固定 | 表格 + 状态着色 + 高亮(已有,保留) |
 
 ### 落地机关
@@ -93,8 +93,8 @@
 | `version` | ✅ | ⚠️ 顶层 `version` | ❌ | **P0** | 体验(语法需存在) |
 | `pid` | ✅ | ✅ | ❌ | **P0** | 契约 |
 | `shutdown` | ✅ | ✅ | ❌ | **P0** | 契约(退出码)/文案体验 |
-| `reload` | ✅(重启 daemon) | ✅(同 Python) | ⚠️ 现为热重载,待改名 | **P0** | 契约(语义:重启 daemon) |
-| `reload-config` | ❌(扩展) | ❌ | ✅(现 `reload` 改名) | 保留扩展 | 扩展(热重载) |
+| `reload` | ✅(重启 daemon) | ✅(同 Python) | ✅ 重启 daemon(已实现) | **P0** | 契约(语义:重启 daemon) |
+| `reload-config` | ❌(扩展) | ❌ | ✅ 热重载(已实现) | 保留扩展 | 扩展(热重载) |
 | `reread` | ✅ | ✅ | ❌ | **P0** | 契约 |
 | `update` | ✅ | ✅ | ⚠️ 能力在 `reload` 里 | **P0** | 契约 |
 | `start` / `stop` / `restart` | ✅ namespec/`all` | ✅ | ⚠️ 有,namespec 语义待对齐 | **P0** | 契约 |
@@ -318,13 +318,13 @@ rsupervisorctl shutdown
 
 **语法**:`reload`
 **语义(对齐 Python)**:重启远端 daemon(停全部→重读配置→再启动);接受参数报错。
-**定位**:契约面——`reload` 的**语义**必须与 Python 一致(重启 daemon);输出文案属体验面。
-**输出**:契约行 `Restarted supervisord`(单一、稳定);daemon 实现见 §9 相关的重启(main loop)设计。
+**定位**:契约面——`reload` 的**语义**必须与 Python 一致(重启 daemon);输出文案属体验面(现为 `Daemon restarted successfully`,不设契约断言,仅要求退出码 0 + daemon 存活)。
 
-> **⚠️ 高危冲突**:当前 `rsupervisorctl reload` 是**热重载配置**(不重启 daemon),与 Python 相反。Python 中:
+> **Python 参照**:
 > - `reread` = 仅重读配置、**不增删**
 > - `update` = 重读 + 增删 + 重启受影响组
 > - `reload` = **重启 daemon**
+> - `reload-config`(rsupervisord 扩展)= 零停机**热重载**,与 `reload` 严格区分
 
 **示例**
 
@@ -332,7 +332,10 @@ rsupervisorctl shutdown
 rsupervisorctl reload        # 重启 daemon
 ```
 
-**现状差距**:需把现有热重载能力改名 **`reload-config`**(扩展命令,见 §6.4),并把 `reload` 改为重启 daemon。daemon 侧两条路分离:热重载仍走 `/api/v1/reload`,`reload` 走新重启(main loop)语义。
+**实现(已落地)**:
+- 客户端:`rsupervisorctl reload` → daemon 重启(`handle_daemon_reload`,daemon 停全部→重读配置→再启动,见 `manager/supervisor.rs::execute_restart_daemon`);输出 prose 属体验面,不设契约断言。
+- 协议:HTTP `POST /api/v1/reload`;XML-RPC `supervisor.restart`(均已实现)。
+- **hot-reload 与 reload 在 daemon 侧是两条路**:热重载走 `POST /api/v1/config/reload` 与 `supervisor.reloadConfig`;`reload` 走 `/api/v1/reload` 与 `supervisor.restart`。
 
 #### 6.1.6 `reread`〔契约面〕
 
@@ -347,7 +350,7 @@ web: changed
 api: available
 ```
 
-**现状**:无(能力部分在现 `reload` 里)。
+**现状**:无(其"读配置出 diff"能力可复用 `reloadConfig`/`config reload` 的解析路径)。
 
 #### 6.1.7 `update`〔契约面〕
 
@@ -362,7 +365,7 @@ rsupervisorctl update mygroup
 rsupervisorctl update all
 ```
 
-**现状**:现有 `reload` 能力即此项,建议改名迁移。
+**现状**:无(`reload-config`/`config reload` 已具备"读 + 应用"热重载路径,可在此复用;但缺 Python 输出行格式)。
 
 #### 6.1.8 `status`(改造)〔契约面〕
 
@@ -527,7 +530,7 @@ rsupervisorctl fg web
 | :--- | :--- |
 | `events` | SSE 实时系统事件流(rsupervisord 独有) |
 | `stdin <name> <chars>` | 向进程 stdin 注入(Python 仅 XML-RPC 暴露,无 CLI) |
-| `reload-config` | 零停机热重载(原 `reload` 改名;`reload` 归位为"重启 daemon"的 Python 语义) |
+| `reload-config`(别名 `config reload`) | 零停机热重载(已实现);`reload` 归位为"重启 daemon"的 Python 语义 |
 
 ### 6.5 不支持
 
@@ -580,7 +583,7 @@ rsupervisorctl --configuration /etc/supervisord.conf status
 
 两个兼容目标分别对应两套可执行基准(见 [`../compat/README.md`](../compat/README.md)):
 
-- **目标 B(native 语法对齐)**:[`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) 对编译出的 `rsupervisorctl` 做**契约面**冒烟验证(`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload-config`;退出码 + 状态断言,**不断言 UX 文案**),默认靶标下 **5 passed**(CLI 改名落地前 `reload-config` 一例 `skip`,落地后自动回归 5 passed)。
+- **目标 B(native 语法对齐)**:[`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) 对编译出的 `rsupervisorctl` 做**契约面**冒烟验证(`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload-config`;退出码 + 状态断言,**不断言 UX 文案**),默认靶标下 **5 passed**。
 - **目标 A(未改动的 stock `supervisorctl` 直连)**:[`../compat/tests/test_cli.py`](../compat/tests/test_cli.py) 的 27 例为 oracle,先在 Python 4.2.5 上 **27 passed**;对编译 bin 因 `/RPC2` 未实现而统一 `xfail`(同 [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §12)。
 
 即:§6/§7 列出的 P0/P1 需求,一旦服务端具备 XML-RPC(§7 #5),上述 oracle 会**自动**由 `xfail` 转为逐项断言。
@@ -599,7 +602,7 @@ rsupervisorctl --configuration /etc/supervisord.conf status
 要点:
 
 - `test_cli.py`(stock `supervisorctl` 直连)是契约面的权威 oracle;`test_native_cli.py` 只做
-  **契约面**的 native 冒烟(`status`/`start`/`stop`/`restart`/`tail`/`pid`/`reread`/`update`…),
+  **契约面**的 native 冒烟(`status`/`start`/`stop`/`restart`/`tail`/`stdin`/`reload-config`…),
   且每条只断言退出码与 stdout 可机器消费的形式,**不断言任何 UX 文案**。
 - 现代化是自由选择:**不许用测试把"现代"钉死**(例如不写"`version` 不得含 `4.2.5`"),
   也不许用测试把"Python 原样"钉死。契约不倒退、现代化不冻结。

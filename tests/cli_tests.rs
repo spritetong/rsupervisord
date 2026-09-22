@@ -51,7 +51,8 @@ fn test_cli_args_parsing() {
         Some(CliCommand::Tail {
             name,
             follow: true,
-            lines: 50
+            lines: Some(50),
+            ..
         }) if name == "web"
     ));
 
