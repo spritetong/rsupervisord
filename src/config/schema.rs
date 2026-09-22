@@ -757,17 +757,14 @@ impl SupervisorConfig {
                     .eval_named(&raw.command, "command")
                     .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
 
+                let platform = crate::platform::native_platform();
                 let (command, args) = if raw.args.is_empty() {
-                    if std::path::Path::new(&raw_cmd).is_file() {
-                        (raw_cmd, Vec::new())
-                    } else {
-                        match shell_words::split(&raw_cmd) {
-                            Ok(mut parts) if !parts.is_empty() => {
-                                let cmd = parts.remove(0);
-                                (cmd, parts)
-                            }
-                            _ => (raw_cmd, Vec::new()),
+                    match platform.split_command_line(&raw_cmd) {
+                        Ok(mut parts) if !parts.is_empty() => {
+                            let cmd = parts.remove(0);
+                            (cmd, parts)
                         }
+                        _ => (raw_cmd, Vec::new()),
                     }
                 } else {
                     let mut evaled_args = Vec::with_capacity(raw.args.len());
@@ -1111,17 +1108,14 @@ impl SupervisorConfig {
                     .eval_named(&raw.command, "command")
                     .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
 
+                let platform = crate::platform::native_platform();
                 let (command, args) = if raw.args.is_empty() {
-                    if std::path::Path::new(&raw_cmd).is_file() {
-                        (raw_cmd, Vec::new())
-                    } else {
-                        match shell_words::split(&raw_cmd) {
-                            Ok(mut parts) if !parts.is_empty() => {
-                                let cmd = parts.remove(0);
-                                (cmd, parts)
-                            }
-                            _ => (raw_cmd, Vec::new()),
+                    match platform.split_command_line(&raw_cmd) {
+                        Ok(mut parts) if !parts.is_empty() => {
+                            let cmd = parts.remove(0);
+                            (cmd, parts)
                         }
+                        _ => (raw_cmd, Vec::new()),
                     }
                 } else {
                     let mut evaled_args = Vec::with_capacity(raw.args.len());

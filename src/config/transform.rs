@@ -144,11 +144,7 @@ fn classify(section: Section, in_logs: bool, key: &str) -> Kind {
         }
         Program | ProgramDefaults => match key {
             "directory" | "restart_directory_monitor" => Path,
-            "command"
-            | "pre_start"
-            | "pre_stop"
-            | "restart_cmd_when_binary_changed"
-            | "restart_cmd_when_file_changed" => Command,
+            "command" => Command,
             _ => Default,
         },
         EventListener => match key {
@@ -160,7 +156,7 @@ fn classify(section: Section, in_logs: bool, key: &str) -> Kind {
     }
 }
 
-/// Expands macros on a string, then absolutizes it if it is a path field and
+/// Expands macros on a string, then absolutizes it if it is a path/command field and
 /// path translation is enabled.
 fn translate_string(
     s: &str,
@@ -170,13 +166,51 @@ fn translate_string(
     expr: &StringExpression,
 ) -> String {
     let expanded = expander.expand_value_with_expr(s, expr);
-    if kind == Kind::Path && ctx.path_translation {
-        absolutize(&expanded, ctx.config_dir)
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        expanded
+    match kind {
+        Kind::Path if ctx.path_translation => {
+            absolutize(&expanded, ctx.config_dir)
+                .to_string_lossy()
+                .into_owned()
+        }
+        Kind::Command if ctx.path_translation => {
+            translate_command(&expanded, ctx.config_dir)
+        }
+        _ => expanded,
     }
+}
+
+fn quote_token_if_needed(token: &str) -> String {
+    if token.is_empty() {
+        return "\"\"".to_string();
+    }
+    if token.contains(' ') || token.contains('\t') || token.contains('"') {
+        let escaped = token.replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    } else {
+        token.to_string()
+    }
+}
+
+fn join_command_tokens(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|t| quote_token_if_needed(t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn translate_command(cmd_str: &str, config_dir: Option<&Path>) -> String {
+    let platform = crate::platform::native_platform();
+    if let Ok(mut tokens) = platform.split_command_line(cmd_str) {
+        if let Some(first) = tokens.first_mut() {
+            if first.contains('/') || first.contains('\\') {
+                let abs = absolutize(first, config_dir);
+                *first = abs.to_string_lossy().into_owned();
+                return join_command_tokens(&tokens);
+            }
+        }
+    }
+    cmd_str.to_string()
 }
 
 /// Converts a relative path into an absolute path anchored at `config_dir`
@@ -184,7 +218,7 @@ fn translate_string(
 /// Sentinel and special values are preserved verbatim:
 /// - `AUTO` / `NONE` (case-insensitive, python compat sentinels)
 /// - Windows named pipes (`\\.\pipe\...`)
-/// - paths that already look absolute (`/`, `\`, or drive-letter prefixed)
+/// - paths that already look absolute (`/`, `\\`, or drive-letter prefixed)
 /// - empty strings
 pub fn absolutize(value: &str, config_dir: Option<&Path>) -> PathBuf {
     let trimmed = value.trim();
@@ -212,7 +246,10 @@ fn is_abs_like(s: &str) -> bool {
     if b.is_empty() {
         return false;
     }
-    if b[0] == b'/' || b[0] == b'\\' {
+    if b[0] == b'/' {
+        return true;
+    }
+    if b.starts_with(br"\\") {
         return true;
     }
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
@@ -320,7 +357,7 @@ mod tests {
             web["logs"]["stderr"],
             dir.join("logs/web.err").to_string_lossy().as_ref()
         );
-        // Command fields are expanded but never absolutized.
+        // Absolute command remains unchanged.
         assert_eq!(web["command"], json!("/usr/bin/python -m http.server"));
         let ev = &value["event_listeners"]["ev"];
         assert_eq!(
@@ -331,7 +368,11 @@ mod tests {
             ev["stderr_logfile"],
             dir.join("logs/ev.err").to_string_lossy().as_ref()
         );
-        assert_eq!(ev["command"], json!("bin/handler"));
+        // Relative command containing path separators is absolutized against config_dir.
+        assert_eq!(
+            ev["command"],
+            dir.join("bin/handler").to_string_lossy().as_ref()
+        );
     }
 
     #[test]
@@ -355,10 +396,14 @@ mod tests {
 
         assert_eq!(value["server"]["uds_path"], "/var/run/x.sock");
         let web = &value["programs"]["web"];
-        // A string mixing a defined macro (%(here)s) and an unknown program-scoped
-        // macro (%(program_name)s) fails eval wholesale, so the command stays literal;
-        // resolve_programs expands it later with the program context.
-        assert_eq!(web["command"], json!("%(here)s/bin/%(program_name)s"));
+        // Unknown program-scoped macro keeps the literal token: absolutization joins
+        // the (still literal) relative path with config_dir, leaving %(program_name)s for resolve_programs.
+        assert_eq!(
+            web["command"],
+            dir.join("%(here)s/bin/%(program_name)s")
+                .to_string_lossy()
+                .as_ref()
+        );
         // Pure config-scoped macro (here) expands via string concat before absolutization.
         assert_eq!(web["directory"], format!("{}/work", dir.display()));
         // Unknown program-scoped macro keeps the literal token: absolutization joins

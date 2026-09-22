@@ -329,8 +329,7 @@ impl EventListenerActor {
         let cmd_path = platform
             .resolve_executable(&self.config.command, self.config.directory.as_deref())
             .unwrap_or_else(|| PathBuf::from(&self.config.command));
-        let mut cmd = tokio::process::Command::new(&cmd_path);
-        cmd.args(&self.config.args);
+        let mut cmd = platform.build_command(&cmd_path, &self.config.args);
 
         if let Some(ref dir) = self.config.directory {
             cmd.current_dir(dir);

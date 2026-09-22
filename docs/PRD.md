@@ -34,6 +34,7 @@ In containerized environments, microservices architectures, edge devices, and Wi
 - **Resilient Scope-Guarded Lifecycle & Task Governance**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`. Core subordinate tasks (Manager, Process, StdinWriter, HealthProbe, LogPump) retain `JoinHandle` for deterministic draining; tasks without a direct subordinate relationship (IPC connection streams, async API dispatchers, external cancel bridges) may spawn without retaining `JoinHandle`, but **MUST be strictly governed by the parent object's `CancellationToken`** and bound to that object's lifecycle.
 - **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
 - **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance and multi-scheme auth (Bearer token & Basic Auth with plaintext or SHA-1); replaces XML-RPC with unified **IPC (UDS / Named Pipe) / TCP + JSON REST API**.
+- **Unified Parse-Boundary Path Translation & Cross-Platform Execution**: Virtual `chdir(config_dir)` simulated at the parse boundary via `server.path_translation` (default: `true`), projecting relative paths to absolute paths anchored at `config_dir` without global process mutation, while providing zero-diffusion decoupling to downstream modules. `PlatformBackend` abstracts Windows command line splitting, UNC prefix stripping (`real_path`), and `.bat`/`.cmd` script dispatch.
 - **Production-Grade System Service Architecture & Zero-CFG Isolation**: Full support for native service managers (Windows SCM via single-binary self-hosting with the `service install/uninstall/start/stop/restart` subcommand on both `supervisord` and `supervisorctl` plus internal `--service`, and Linux systemd unit generation). The entire service management capability is abstracted behind the `PlatformService` trait in `src/platform/traits.rs`. Core orchestration, CLI, daemon, and service facade contain zero `#[cfg]` branches. Windows SCM operation is hardened against abnormal exits with FFI panic catching (`catch_unwind`), SCM status checkpoints and wait hints, active stop heartbeats, automatic working directory correction, and `SC_ACTION_RESTART` crash recovery.
 - **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
 
@@ -359,6 +360,21 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
 
 ---
 
+### 3.5 Configuration Path Translation & Cross-Platform Execution Hardening
+
+#### 3.5.1 Virtual `chdir` at Parse Boundary (`server.path_translation`)
+- **Modern Default (`path_translation: true`)**: Relative paths in path fields (`uds_path`, `logging.file`, `directory`, `stdout`/`stderr`, `restart_directory_monitor`) and relative `command` executables (`argv[0]` containing `/` or `\`) are automatically anchored against `config_dir` at the parse boundary. Simulates running inside `config_dir` without mutating global process state (`chdir`).
+- **Python Compatibility Mode (`path_translation: false`)**: Preserves relative paths verbatim; paths resolve relative to the daemon's runtime working directory, reproducing Python Supervisor behavior.
+- **Zero Diffusion**: The feature switch and path modifications are strictly isolated within the transformation boundary (`src/config/transform.rs`). Downstream orchestration (`Manager`, `ProgramActor`, `WatchService`) contains zero conditional logic.
+
+#### 3.5.2 Platform Abstraction & OS Execution Parity (`PlatformBackend`)
+- **Windows Command Line Splitting (`split_command_line`)**: Standard Windows `CommandLineToArgvW` tokenizer preserving `\` directory separators while supporting quoted arguments containing whitespace. Eliminates fragile file-existence heuristics (`is_file()`) during configuration parsing.
+- **Real Path Canonicalization (`real_path`)**: Aligned with Python `os.path.realpath`, resolving symlinks while stripping the Windows extended-length `\\?\` prefix to prevent `cmd.exe` UNC rejections.
+- **Batch Script Dispatch (`build_command`)**: Transparently wraps `.bat` and `.cmd` files with `cmd.exe /C "<script>" <args>` on Windows, eliminating execution failures and CVE-2024-24576 security rejections.
+- **Child Working Directory Decoupling**: Child process CWD (`directory`) is decoupled from executable location. When `directory` is omitted, the child process inherits the daemon's CWD while relative commands remain reliably located via their absolutized path.
+
+---
+
 ## 4. Configuration Specification (`supervisord.yaml`)
 
 ```yaml
@@ -382,6 +398,8 @@ server:
   user: "admin"
   # Plaintext password or SHA-1 hash (supports {SHA}... or 40-char hex)
   password_sha1: "{SHA}d033e22ae348aeb5660fc2140aec35850c4da997" # "admin"
+  # Path translation boundary: when true (default), relative paths are absolutized against config_dir
+  path_translation: true
 
 # Daemon logging configuration
 logging:

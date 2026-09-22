@@ -122,6 +122,16 @@ pub trait PlatformBackend: Send + Sync {
     /// Resolves an executable binary path against the working directory and system PATH.
     fn resolve_executable(&self, command: &str, working_dir: Option<&Path>) -> Option<PathBuf>;
 
+    /// Splits a command line string into arguments according to platform rules.
+    fn split_command_line(&self, cmd: &str) -> Result<Vec<String>, String>;
+
+    /// Canonicalizes/normalizes a path to its real path according to platform rules,
+    /// equivalent to Python's os.path.realpath (e.g. resolving symlinks and stripping \\?\ on Windows).
+    fn real_path(&self, path: &Path) -> PathBuf;
+
+    /// Builds an executable process command, wrapping scripts (e.g. .bat/.cmd on Windows) when necessary.
+    fn build_command(&self, program: &Path, args: &[String]) -> tokio::process::Command;
+
     /// Returns the platform system service manager.
     fn service(&self) -> &dyn PlatformService;
 }

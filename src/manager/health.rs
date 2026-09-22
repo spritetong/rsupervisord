@@ -6,6 +6,7 @@
 
 use crate::program::config::{HealthCheckConfig, HealthCheckType};
 use crate::program::state::HealthStatus;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +22,7 @@ pub enum HealthEvent {
 pub struct HealthProbeRunner {
     name: String,
     config: HealthCheckConfig,
+    directory: Option<PathBuf>,
     event_tx: mpsc::Sender<HealthEvent>,
     cancel_token: CancellationToken,
 }
@@ -29,12 +31,14 @@ impl HealthProbeRunner {
     pub fn new(
         name: impl Into<String>,
         config: HealthCheckConfig,
+        directory: Option<PathBuf>,
         event_tx: mpsc::Sender<HealthEvent>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             name: name.into(),
             config,
+            directory,
             event_tx,
             cancel_token,
         }
@@ -69,7 +73,7 @@ impl HealthProbeRunner {
                             Self::check_tcp(endpoint, timeout_dur).await
                         }
                         HealthCheckType::Exec { command } => {
-                            Self::check_exec(command, timeout_dur).await
+                            Self::check_exec(command, self.directory.as_deref(), timeout_dur).await
                         }
                     };
 
@@ -163,8 +167,15 @@ impl HealthProbeRunner {
     }
 
     /// Shell execution probe verifying 0 exit code with strict timeout.
-    async fn check_exec(command: &str, timeout_dur: Duration) -> bool {
+    async fn check_exec(
+        command: &str,
+        directory: Option<&Path>,
+        timeout_dur: Duration,
+    ) -> bool {
         let mut cmd = crate::platform::native_platform().build_shell_command(command);
+        if let Some(dir) = directory {
+            cmd.current_dir(dir);
+        }
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 

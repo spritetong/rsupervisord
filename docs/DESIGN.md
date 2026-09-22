@@ -1049,4 +1049,58 @@ flowchart LR
    - **Non-Recursive Multicall**: Rejects nested `system.multicall` invocations with Fault 2 (`INCORRECT_PARAMETERS`).
    - **Integrated Basic Authentication**: Enforces HTTP Basic Auth credentials from `[inet_http_server]`, returning `401 Unauthorized` with `WWW-Authenticate` challenge headers.
 
+---
+
+## 20. Unified Configuration Path Translation Boundary & Cross-Platform Execution Architecture (`src/config/transform.rs` & `src/platform/`)
+
+### 20.1 Architectural Tenet: Virtual `chdir` at Parse Boundary
+In traditional supervisors (such as Python Supervisor), relative configuration paths are either resolved against the daemon's runtime working directory or rely on changing the process CWD. In modern multi-threaded asynchronous Rust (Tokio runtime), calling `std::env::set_current_dir(config_dir)` is strictly unacceptable:
+1. **Global Process Mutation & Race Conditions**: Mutating global CWD introduces data races with concurrent tasks, worker threads, and external subcommands.
+2. **CLI Option Contamination**: Global directory shifts silently invalidate relative paths provided via CLI flags (e.g. `--logfile ./daemon.log`).
+3. **Windows Service Instability**: Windows services started under SCM default to `C:\Windows\System32`; unchecked CWD changes destabilize service handles.
+
+**The Solution: Parse-Boundary Projection**:
+Rather than delegating path resolution to scattered downstream consumers or mutating OS state, `supervisord` establishes a **single, self-contained transformation boundary** (`src/config/transform.rs`). At the configuration boundary (immediately after deserializing YAML/INI and before validation), the typed configuration tree is projected into a JSON `Value` tree, walked by a pure transformation function, and deserialized back.
+- When `server.path_translation: true` (default), relative paths are deterministically anchored to `config_dir`, simulating the effect of `chdir(config_dir)` with zero global side effects.
+- **Zero Diffusion Principle**: Downstream modules (`schema.rs`, `process.rs`, `watch.rs`, `health.rs`) contain **zero `path_translation` conditional checks** and zero manual path concatenations. Downstream code consumes pure configuration instances directly.
+
+```mermaid
+flowchart TD
+    Raw["Raw YAML / INI File"] --> Parse["Serde Typed Config Object"]
+    Parse --> Check{"server.path_translation?"}
+    Check -->|true (default)| Transform["transform.rs Boundary Walk"]
+    Check -->|false (python-compat)| Skip["Preserve Raw Relative Paths"]
+    Transform --> Walk["Walk JSON Tree: Expand Macros & Absolutize Paths"]
+    Walk --> Typed["Deserialized Typed SupervisorConfig"]
+    Skip --> Typed
+    Typed --> Downstream["Downstream Orchestration (Manager, ProgramActor, WatchService)\n[Zero path_translation conditionals / Zero global chdir]"]
+```
+
+### 20.2 Category Rules & Field Classification Table
+Field categorization is strictly table-driven by schema position, avoiding error-prone heuristic guessing:
+
+| Category | Applicable Fields | Transformation Rule |
+| :--- | :--- | :--- |
+| **`Path`** | `server.uds_path`<br>`logging.file`<br>`programs.*.directory`<br>`programs.*.logs.stdout`<br>`programs.*.logs.stderr`<br>`programs.*.restart_directory_monitor`<br>`event_listeners.*.directory`<br>`event_listeners.*.stdout_logfile`<br>`event_listeners.*.stderr_logfile` | 1. Expand macros (`${VAR}`, `$(...)`, `%(...)s`).<br>2. When `path_translation: true`, anchor to `config_dir` via `absolutize()`.<br>3. Sentinel values (`AUTO`, `NONE`), Windows Named Pipes (`\\.\pipe\...`), and absolute paths (`/`, `\\`, `C:\`) are preserved verbatim. |
+| **`Command`** | `programs.*.command`<br>`event_listeners.*.command` | 1. Expand macros.<br>2. When `path_translation: true`, parse via `PlatformBackend::split_command_line` to inspect `argv[0]`.<br>3. If `argv[0]` contains path separators (`/` or `\`), anchor `argv[0]` to `config_dir` via `absolutize()` and safely recombine tokens. If `argv[0]` is a bare name (e.g. `python`, `node`), preserve it verbatim for runtime `PATH` lookup.<br>4. When `path_translation: false`, preserve verbatim. |
+| **`Default` (Plain)** | All other string fields (e.g. `environment.*`, `pre_start`, `pre_stop`, `restart_cmd_*`, `health_check.url`, glob patterns) | Expand macros only; never alter path strings. |
+
+### 20.3 Cross-Platform Execution Hardening & Platform Abstraction (`PlatformBackend`)
+To eliminate cross-platform behavioral discrepancies between Windows Win32 APIs and POSIX syscalls, three core capabilities are unified behind the `PlatformBackend` trait:
+
+1. **Platform Command Line Splitting (`split_command_line`)**:
+   - *Problem*: POSIX `shell_words::split` treats `\` as an escape character, corrupting Windows paths (e.g. `C:\tools\app.exe` becomes `C:toolsapp.exe`).
+   - *Solution*: Windows implements a standard `CommandLineToArgvW` parser that preserves `\` as literal path separators, splits on whitespace, and respects double-quoted tokens containing spaces. Unix uses `shell_words::split`.
+   - *AST Decoupling*: Completely eliminates fragile `is_file()` checks during parsing; tokenization is 100% grammar-driven.
+2. **Real Path Canonicalization (`real_path`)**:
+   - *Problem*: Rust's `std::fs::canonicalize()` on Windows prepends the extended-length UNC prefix `\\?\` (e.g. `\\?\C:\app.exe`), which causes Windows `cmd.exe` to fail with `CMD does not support UNC paths`.
+   - *Solution*: Aligned with Python's `os.path.realpath`, `PlatformBackend::real_path` resolves symlinks while stripping the `\\?\` prefix for standard drive paths and normalizing UNC shares.
+3. **Executable Wrapping & Script Dispatch (`build_command`)**:
+   - *Problem*: On Windows, `.bat` and `.cmd` files are not PE executables and cannot be invoked directly by `CreateProcessW` with arguments under modern Rust without triggering CVE-2024-24576 security rejections.
+   - *Solution*: `PlatformBackend::build_command` inspects file extensions: `.bat` and `.cmd` are automatically wrapped with `cmd.exe /C "<script>" <args>`, while native PE and ELF binaries are executed directly.
+4. **Decoupling Executable Search from Child Working Directory**:
+   - Win32 `CreateProcessW` uses `lpCurrentDirectory` purely to set the child process's CWD—it does **not** affect executable resolution for relative commands.
+   - By resolving `command`'s `argv[0]` to an absolute path at the `transform` boundary, both Windows and Unix pass an explicit, unambiguous absolute executable path to the OS, ensuring 100% identical cross-platform behavior regardless of whether `directory` is configured or omitted.
+
+
 

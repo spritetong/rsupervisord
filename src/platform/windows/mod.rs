@@ -438,7 +438,7 @@ impl PlatformBackend for WindowsPlatformBackend {
                     dir.join(format!("{}{}", command, ext))
                 };
                 if candidate.is_file() {
-                    return candidate.canonicalize().ok().or(Some(candidate));
+                    return Some(self.real_path(&candidate));
                 }
             }
             None
@@ -452,7 +452,7 @@ impl PlatformBackend for WindowsPlatformBackend {
                     PathBuf::from(format!("{}{}", command, ext))
                 };
                 if candidate.is_file() {
-                    return candidate.canonicalize().ok().or(Some(candidate));
+                    return Some(self.real_path(&candidate));
                 }
             }
             return None;
@@ -482,6 +482,87 @@ impl PlatformBackend for WindowsPlatformBackend {
         }
 
         None
+    }
+
+    fn split_command_line(&self, cmd: &str) -> Result<Vec<String>, String> {
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = cmd.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                ' ' | '\t' if !in_quotes => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                '"' => {
+                    in_quotes = !in_quotes;
+                }
+                '\\' => {
+                    let mut slash_count = 1;
+                    while let Some(&'\\') = chars.peek() {
+                        chars.next();
+                        slash_count += 1;
+                    }
+                    if let Some(&'"') = chars.peek() {
+                        chars.next();
+                        for _ in 0..(slash_count / 2) {
+                            current.push('\\');
+                        }
+                        if slash_count % 2 == 1 {
+                            current.push('"');
+                        } else {
+                            in_quotes = !in_quotes;
+                        }
+                    } else {
+                        for _ in 0..slash_count {
+                            current.push('\\');
+                        }
+                    }
+                }
+                _ => {
+                    current.push(c);
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            args.push(current);
+        }
+
+        Ok(args)
+    }
+
+    fn real_path(&self, path: &Path) -> PathBuf {
+        if let Ok(canon) = path.canonicalize() {
+            let s = canon.to_string_lossy();
+            if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                if stripped.len() >= 2 && stripped.as_bytes()[1] == b':' {
+                    return PathBuf::from(stripped);
+                }
+                if let Some(unc) = stripped.strip_prefix(r"UNC\") {
+                    return PathBuf::from(format!(r"\\{}", unc));
+                }
+            }
+            return canon;
+        }
+        path.to_path_buf()
+    }
+
+    fn build_command(&self, program: &Path, args: &[String]) -> TokioCommand {
+        let ext = program.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd") {
+            let mut cmd = TokioCommand::new("cmd");
+            cmd.arg("/C").arg(program);
+            cmd.args(args);
+            cmd
+        } else {
+            let mut cmd = TokioCommand::new(program);
+            cmd.args(args);
+            cmd
+        }
     }
 
     fn service(&self) -> &dyn PlatformService {
@@ -787,3 +868,66 @@ pub async fn wait_for_windows_shutdown_signal() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_windows_split_command_line_preserves_backslashes() {
+        let backend = WindowsPlatformBackend;
+
+        let parts = backend
+            .split_command_line(r"C:\tools\app.exe --port 8080")
+            .unwrap();
+        assert_eq!(parts, vec![r"C:\tools\app.exe", "--port", "8080"]);
+
+        let parts = backend
+            .split_command_line(r".\dist\worker.exe -d")
+            .unwrap();
+        assert_eq!(parts, vec![r".\dist\worker.exe", "-d"]);
+    }
+
+    #[test]
+    fn test_windows_split_command_line_handles_quotes_with_spaces() {
+        let backend = WindowsPlatformBackend;
+
+        let parts = backend
+            .split_command_line(r#""C:\Program Files\My App\server.exe" --flag "hello world""#)
+            .unwrap();
+        assert_eq!(
+            parts,
+            vec![
+                r"C:\Program Files\My App\server.exe",
+                "--flag",
+                "hello world"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_real_path_strips_unc_verbatim_prefix() {
+        let backend = WindowsPlatformBackend;
+        let p = Path::new(r"C:\Windows");
+        let real = backend.real_path(p);
+        assert!(!real.to_string_lossy().starts_with(r"\\?\"));
+        assert!(real.to_string_lossy().starts_with("C:"));
+    }
+
+    #[test]
+    fn test_windows_build_command_wraps_bat_and_cmd() {
+        let backend = WindowsPlatformBackend;
+        let bat = Path::new(r"C:\tools\build.bat");
+        let args = vec!["--all".to_string()];
+        let cmd = backend.build_command(bat, &args);
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_string_lossy();
+        assert_eq!(program, "cmd");
+
+        let exe = Path::new(r"C:\tools\app.exe");
+        let cmd_exe = backend.build_command(exe, &args);
+        let std_cmd_exe = cmd_exe.as_std();
+        assert_eq!(std_cmd_exe.get_program().to_string_lossy(), r"C:\tools\app.exe");
+    }
+}
+

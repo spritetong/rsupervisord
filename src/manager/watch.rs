@@ -38,6 +38,7 @@ pub enum WatchRule {
         program_name: String,
         target_path: PathBuf,
         parent_dir: PathBuf,
+        directory: Option<PathBuf>,
         debounce_duration: Duration,
         signal: Option<StopSignal>,
         cmd: Option<String>,
@@ -46,6 +47,7 @@ pub enum WatchRule {
         program_name: String,
         dir_path: PathBuf,
         pattern: Option<String>,
+        directory: Option<PathBuf>,
         debounce_duration: Duration,
         signal: Option<StopSignal>,
         cmd: Option<String>,
@@ -87,6 +89,15 @@ impl WatchRule {
             Self::Binary { cmd, .. } | Self::Directory { cmd, .. } => cmd.as_deref(),
         }
     }
+
+    #[inline]
+    pub fn directory(&self) -> Option<&Path> {
+        match self {
+            Self::Binary { directory, .. } | Self::Directory { directory, .. } => {
+                directory.as_deref()
+            }
+        }
+    }
 }
 
 /// Pending restart trigger awaiting debounce expiration.
@@ -95,6 +106,7 @@ struct PendingTrigger {
     program_name: String,
     target_path: PathBuf,
     is_binary: bool,
+    directory: Option<PathBuf>,
     signal: Option<StopSignal>,
     cmd: Option<String>,
     deadline: tokio::time::Instant,
@@ -249,6 +261,7 @@ impl WatchService {
                                             program_name: prog_name,
                                             target_path: path.clone(),
                                             is_binary: matches!(rule, WatchRule::Binary { .. }),
+                                            directory: rule.directory().map(|d| d.to_path_buf()),
                                             signal: rule.signal(),
                                             cmd: rule.cmd().map(String::from),
                                             deadline,
@@ -330,6 +343,7 @@ impl WatchService {
                             program_name: name.clone(),
                             target_path: target_path.clone(),
                             parent_dir: parent_dir.to_path_buf(),
+                            directory: cfg.directory.clone(),
                             debounce_duration: debounce,
                             signal: cfg.restart_signal_when_binary_changed,
                             cmd: cfg.restart_cmd_when_binary_changed.clone(),
@@ -356,12 +370,13 @@ impl WatchService {
                         .unwrap_or_else(|_| dir.clone())
                 };
 
-                let canonical_dir = abs_dir.canonicalize().unwrap_or(abs_dir);
+                let canonical_dir = platform.real_path(&abs_dir);
 
                 rules.push(WatchRule::Directory {
                     program_name: name.clone(),
                     dir_path: canonical_dir,
                     pattern: cfg.restart_file_pattern.clone(),
+                    directory: cfg.directory.clone(),
                     debounce_duration: debounce,
                     signal: cfg.restart_signal_when_file_changed,
                     cmd: cfg.restart_cmd_when_file_changed.clone(),
@@ -440,6 +455,9 @@ impl WatchService {
                 "Executing custom restart command"
             );
             let mut shell_cmd = crate::platform::native_platform().build_shell_command(cmd);
+            if let Some(ref dir) = trigger.directory {
+                shell_cmd.current_dir(dir);
+            }
             match shell_cmd.status().await {
                 Ok(status) => {
                     tracing::info!(
