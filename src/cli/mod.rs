@@ -7,7 +7,6 @@
 pub mod args;
 pub mod client;
 pub mod commands;
-pub mod security;
 pub mod transport;
 
 pub use args::{CliArgs, CliCommand};
@@ -61,9 +60,6 @@ where
 /// Executes the CLI with parsed arguments; `bin_name` is only forwarded to the
 /// `help` subcommand so it renders consistently with clap's `--help`.
 pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> {
-    // Check caller privileges
-    security::validate_caller_privileges(args.allow_unelevated)?;
-
     // Keep a copy of the explicit config: endpoint resolution below consumes
     // `args.config`, while local service operations need it too.
     let service_config = args.config.clone();

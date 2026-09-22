@@ -167,11 +167,7 @@ impl HealthProbeRunner {
     }
 
     /// Shell execution probe verifying 0 exit code with strict timeout.
-    async fn check_exec(
-        command: &str,
-        directory: Option<&Path>,
-        timeout_dur: Duration,
-    ) -> bool {
+    async fn check_exec(command: &str, directory: Option<&Path>, timeout_dur: Duration) -> bool {
         let mut cmd = crate::platform::native_platform().build_shell_command(command);
         if let Some(dir) = directory {
             cmd.current_dir(dir);

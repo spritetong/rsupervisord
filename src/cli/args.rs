@@ -37,10 +37,6 @@ pub struct CliArgs {
     #[arg(short = 'p', short_alias = 'P', long = "password", global = true)]
     pub password: Option<String>,
 
-    /// Bypass caller elevation verification
-    #[arg(long = "allow-unelevated", global = true)]
-    pub allow_unelevated: bool,
-
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 }

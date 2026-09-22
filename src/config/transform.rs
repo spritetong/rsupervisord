@@ -167,14 +167,10 @@ fn translate_string(
 ) -> String {
     let expanded = expander.expand_value_with_expr(s, expr);
     match kind {
-        Kind::Path if ctx.path_translation => {
-            absolutize(&expanded, ctx.config_dir)
-                .to_string_lossy()
-                .into_owned()
-        }
-        Kind::Command if ctx.path_translation => {
-            translate_command(&expanded, ctx.config_dir)
-        }
+        Kind::Path if ctx.path_translation => absolutize(&expanded, ctx.config_dir)
+            .to_string_lossy()
+            .into_owned(),
+        Kind::Command if ctx.path_translation => translate_command(&expanded, ctx.config_dir),
         _ => expanded,
     }
 }
@@ -201,14 +197,13 @@ fn join_command_tokens(tokens: &[String]) -> String {
 
 fn translate_command(cmd_str: &str, config_dir: Option<&Path>) -> String {
     let platform = crate::platform::native_platform();
-    if let Ok(mut tokens) = platform.split_command_line(cmd_str) {
-        if let Some(first) = tokens.first_mut() {
-            if first.contains('/') || first.contains('\\') {
-                let abs = absolutize(first, config_dir);
-                *first = abs.to_string_lossy().into_owned();
-                return join_command_tokens(&tokens);
-            }
-        }
+    if let Ok(mut tokens) = platform.split_command_line(cmd_str)
+        && let Some(first) = tokens.first_mut()
+        && (first.contains('/') || first.contains('\\'))
+    {
+        let abs = absolutize(first, config_dir);
+        *first = abs.to_string_lossy().into_owned();
+        return join_command_tokens(&tokens);
     }
     cmd_str.to_string()
 }

@@ -120,7 +120,6 @@ Every item in §3–§7 below is labeled along these two layers.
 | `-u/--username` | ✅ | ⚠️ `-u/--user` | ⚠️ `-u/--user` | **P0** (add alias) |
 | `-p/--password` | ✅ | ⚠️ `-P/--password` | ❌ `-P/--password` | **P0** (change to `-p`) |
 | `-k/--key` | ❌ | ❌ | ✅ | Extension kept |
-| `--allow-unelevated` | ❌ | ❌ | ✅ | Extension kept |
 | `-i/--interactive` | ✅ | ❌ | ❌ | **Not Supported** |
 | `-r/--history-file` | ✅ | ❌ | ❌ | **Not Supported** |
 
@@ -248,7 +247,7 @@ rsupervisorctl --configuration /etc/supervisord.conf status
 
 ### 5.2 Extensions kept
 
-`-k/--key` (Bearer token) and `--allow-unelevated` are rsupervisord-only and are kept; they do not conflict with Python.
+`-k/--key` (Bearer token) is rsupervisord-only and is kept; it does not conflict with Python. (Caller elevation verification is enforced daemon-side via `server.allow_unelevated`).
 
 ---
 

@@ -41,6 +41,10 @@ pub struct DaemonArgs {
     #[arg(long = "service")]
     pub service: bool,
 
+    /// Allow non-elevated callers to connect to daemon IPC when daemon is running elevated
+    #[arg(long = "allow-unelevated")]
+    pub allow_unelevated: bool,
+
     /// Service lifecycle management (e.g. 'service install')
     #[command(subcommand)]
     pub action: Option<DaemonAction>,
@@ -94,13 +98,17 @@ impl SupervisorDaemon {
             );
         }
 
-        let config = match SupervisorConfig::from_file(&config_path) {
+        let mut config = match SupervisorConfig::from_file(&config_path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to load configuration from {:?}: {}", config_path, e);
                 return Err(e.into());
             }
         };
+
+        if args.allow_unelevated {
+            config.server.allow_unelevated = true;
+        }
 
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;

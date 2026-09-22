@@ -223,13 +223,6 @@ impl PlatformBackend for UnixPlatformBackend {
         nix::unistd::getuid().is_root()
     }
 
-    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError> {
-        if !self.is_elevated() && !allow_unelevated {
-            tracing::debug!("Caller process is not running as root");
-        }
-        Ok(())
-    }
-
     fn default_stop_signal(&self) -> StopSignal {
         StopSignal::Term
     }
@@ -252,8 +245,12 @@ impl PlatformBackend for UnixPlatformBackend {
         ))
     }
 
-    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>> {
-        let listener = UnixIpcListener::bind(path)?;
+    fn bind_ipc_listener(
+        &self,
+        path: &Path,
+        allow_unelevated: bool,
+    ) -> io::Result<Box<dyn PlatformIpcListener>> {
+        let listener = UnixIpcListener::bind(path, allow_unelevated)?;
         Ok(Box::new(listener))
     }
 
@@ -349,10 +346,11 @@ fn cleanup_unix_ipc(p: PathBuf) {
 pub struct UnixIpcListener {
     listener: tokio::net::UnixListener,
     _cleanup: scopeguard::ScopeGuard<PathBuf, fn(PathBuf)>,
+    allow_unelevated: bool,
 }
 
 impl UnixIpcListener {
-    pub fn bind(path: &Path) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
@@ -365,12 +363,20 @@ impl UnixIpcListener {
         Ok(Self {
             listener,
             _cleanup: cleanup,
+            allow_unelevated,
         })
     }
 }
 
 /// Verifies caller peer credentials on Unix domain sockets.
-pub fn verify_caller_credentials(stream: &tokio::net::UnixStream) -> Result<(), ProgramError> {
+pub fn verify_caller_credentials(
+    stream: &tokio::net::UnixStream,
+    allow_unelevated: bool,
+) -> Result<(), ProgramError> {
+    if allow_unelevated {
+        return Ok(());
+    }
+
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -403,7 +409,7 @@ impl PlatformIpcListener for UnixIpcListener {
     async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
         loop {
             let (stream, _) = self.listener.accept().await?;
-            if let Err(e) = verify_caller_credentials(&stream) {
+            if let Err(e) = verify_caller_credentials(&stream, self.allow_unelevated) {
                 tracing::warn!("Rejecting unauthorized UDS connection: {}", e);
                 continue;
             }

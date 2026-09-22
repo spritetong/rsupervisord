@@ -37,6 +37,13 @@ server:
   username: "${SUPERVISOR_HTTP_USER:-}"
   password: "${SUPERVISOR_HTTP_PASSWORD:-}"
 
+  # When true (default), relative paths are absolutized against the config file directory.
+  path_translation: true
+
+  # When true, allows non-elevated (non-root on Unix, non-admin on Windows) callers to connect
+  # via local IPC when the daemon is running elevated. (default: false)
+  allow_unelevated: false
+
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings
 # ------------------------------------------------------------------------------

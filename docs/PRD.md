@@ -265,21 +265,25 @@ Built with the production-proven `file-rotate` crate:
 
 #### 3.3.2 Caller Security & Multi-Scheme Authentication
 
-`supervisorctl` and API endpoints enforce strict privilege and identity validation:
+The `supervisord` daemon enforces strict caller privilege and identity validation on incoming local IPC connections:
 
+- **Server-Side Enforcement**:
+  - Security checks are strictly enforced by the `supervisord` daemon during IPC connection handshake (not on the client).
+  - Can be relaxed via configuration `server.allow_unelevated: true` or daemon CLI flag `supervisord --allow-unelevated` (default: `false`).
 - **Unix / BSD (Peer Credentials Compatibility)**:
   - Extracts peer credentials via socket options (Linux `SO_PEERCRED`, BSD/macOS `getpeereid`).
   - **Rules**:
-    1. If `supervisord` runs as `root` (UID 0), only `root` or authorized callers can execute control operations.
-    2. If `supervisord` runs under non-root UID X, only UID X or `root` callers are authorized.
-    3. Unauthorized callers receive immediate `403 Forbidden` responses.
+    1. If `supervisord` runs as `root` (UID 0), only `root` callers can execute control operations unless `allow_unelevated` is enabled.
+    2. If `supervisord` runs under non-root UID X, UID X or `root` callers are authorized.
+    3. Unauthorized callers are rejected at the connection boundary.
 - **Windows (Token Elevation Checks)**:
-  - If `supervisord` runs as an elevated administrator (`is_admin = true`) or under `NT AUTHORITY\SYSTEM`;
-  - The calling `supervisorctl` process must also hold elevated privileges (`TokenElevation`).
-  - Unelevated callers are intercepted with clear actionable guidance.
+  - If `supervisord` runs as an elevated administrator or under `NT AUTHORITY\SYSTEM`:
+    - On Named Pipes: verifies caller token via `ImpersonateNamedPipeClient` and `TokenElevation`.
+    - On Windows AF_UNIX sockets: verifies peer process token via `SIO_AF_UNIX_GETPEERPID` and `TokenElevation`.
+    - Unelevated callers are rejected unless `server.allow_unelevated` is enabled.
 - **HTTP Authentication (Bearer Token & Basic Auth)**:
   - Bearer Token: Validated against `server.auth_token`.
-  - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.user` and either plaintext `server.password` or SHA-1 hashed `server.password_sha1` (supporting `{SHA}...` or raw 40-character hex strings).
+  - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.username` and either plaintext `server.password` or SHA-1 hashed password (supporting `{SHA}...`).
   - CLI Standalone Connectivity: `supervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
 
 #### 3.3.3 Core RESTful JSON API Specification
@@ -557,9 +561,10 @@ rsupervisord/
 │   │   └── supervisorctl.rs        # Standalone supervisorctl CLI binary
 │   ├── cli/                         # CLI client implementation
 │   │   ├── mod.rs
-│   │   ├── client.rs                # UDS / Named Pipe / HTTP client transport
-│   │   ├── security.rs              # Client privilege self-checks (Windows is_admin check)
-│   │   └── commands.rs              # status, start, stop, tail, events, group commands
+│   │   ├── args.rs                  # Clap command-line argument definitions
+│   │   ├── client.rs                # HTTP / REST API client implementation
+│   │   ├── commands.rs              # status, start, stop, tail, events, group commands
+│   │   └── transport.rs             # UDS / Named Pipe / HTTP client stream transport
 │   ├── config/                      # YAML configuration parsing and validation
 │   │   ├── mod.rs
 │   │   ├── schema.rs                # Serde schema, group resolution, and program_defaults

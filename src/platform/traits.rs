@@ -82,9 +82,6 @@ pub trait PlatformBackend: Send + Sync {
     /// Checks if the current process runs with elevated (administrator / root) privileges.
     fn is_elevated(&self) -> bool;
 
-    /// Validates caller privileges before accepting requests.
-    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError>;
-
     /// Returns the platform-appropriate default stop signal (e.g. SIGTERM on Unix, CTRL_BREAK on Windows).
     fn default_stop_signal(&self) -> StopSignal;
 
@@ -98,7 +95,11 @@ pub trait PlatformBackend: Send + Sync {
     async fn connect_named_pipe(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>>;
 
     /// Binds an OS-level IPC listener at the given path.
-    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>>;
+    fn bind_ipc_listener(
+        &self,
+        path: &Path,
+        allow_unelevated: bool,
+    ) -> io::Result<Box<dyn PlatformIpcListener>>;
 
     /// Returns the platform default daemon log path.
     fn default_daemon_log_path(&self, cmd_name: &str, config_dir: Option<&Path>) -> PathBuf;

@@ -11,18 +11,23 @@ use tokio_util::sync::CancellationToken;
 pub struct IpcServer<'a> {
     path: &'a Path,
     router: axum::Router,
+    allow_unelevated: bool,
 }
 
 impl<'a> IpcServer<'a> {
-    /// Creates a new IpcServer bound to the target IPC path and router.
-    pub fn new(path: &'a Path, router: axum::Router) -> Self {
-        Self { path, router }
+    /// Creates a new IpcServer bound to the target IPC path, router, and elevation policy.
+    pub fn new(path: &'a Path, router: axum::Router, allow_unelevated: bool) -> Self {
+        Self {
+            path,
+            router,
+            allow_unelevated,
+        }
     }
 
     /// Serves incoming IPC connections until the cancellation token is triggered.
     pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
         let mut listener = crate::platform::native_platform()
-            .bind_ipc_listener(self.path)
+            .bind_ipc_listener(self.path, self.allow_unelevated)
             .map_err(|e| {
                 anyhow::anyhow!("Failed to bind IPC listener at {:?}: {}", self.path, e)
             })?;
@@ -76,6 +81,9 @@ pub async fn run_ipc_listener(
     path: &Path,
     app: axum::Router,
     cancel_token: CancellationToken,
+    allow_unelevated: bool,
 ) -> anyhow::Result<()> {
-    IpcServer::new(path, app).run(cancel_token).await
+    IpcServer::new(path, app, allow_unelevated)
+        .run(cancel_token)
+        .await
 }

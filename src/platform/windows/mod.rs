@@ -359,13 +359,6 @@ impl PlatformBackend for WindowsPlatformBackend {
         }
     }
 
-    fn validate_caller_privileges(&self, allow_unelevated: bool) -> Result<(), ProgramError> {
-        if !self.is_elevated() && !allow_unelevated {
-            tracing::debug!("Caller process is not running as Administrator");
-        }
-        Ok(())
-    }
-
     fn default_stop_signal(&self) -> StopSignal {
         StopSignal::CtrlBreak
     }
@@ -392,12 +385,16 @@ impl PlatformBackend for WindowsPlatformBackend {
         Ok(Box::new(client))
     }
 
-    fn bind_ipc_listener(&self, path: &Path) -> io::Result<Box<dyn PlatformIpcListener>> {
+    fn bind_ipc_listener(
+        &self,
+        path: &Path,
+        allow_unelevated: bool,
+    ) -> io::Result<Box<dyn PlatformIpcListener>> {
         if path.to_string_lossy().starts_with(r"\\.\pipe\") {
-            let listener = WindowsNamedPipeListener::bind(path)?;
+            let listener = WindowsNamedPipeListener::bind(path, allow_unelevated)?;
             Ok(Box::new(listener))
         } else {
-            let listener = WindowsUdsListener::bind(path)?;
+            let listener = WindowsUdsListener::bind(path, allow_unelevated)?;
             Ok(Box::new(listener))
         }
     }
@@ -570,17 +567,75 @@ impl PlatformBackend for WindowsPlatformBackend {
     }
 }
 
+/// Verifies that the connected Named Pipe client is running with elevated privileges.
+fn verify_windows_named_pipe_caller(
+    server: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Result<(), ProgramError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, RevertToSelf, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+    let handle = server.as_raw_handle();
+    unsafe {
+        if ImpersonateNamedPipeClient(handle as windows_sys::Win32::Foundation::HANDLE) == 0 {
+            return Err(ProgramError::PlatformError(
+                "Failed to impersonate Named Pipe client".to_string(),
+            ));
+        }
+
+        let _revert_guard = scopeguard::guard((), |_| {
+            RevertToSelf();
+        });
+
+        let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+        if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) == 0 {
+            return Err(ProgramError::PlatformError(
+                "Failed to open client impersonation token".to_string(),
+            ));
+        }
+
+        let _token_guard = scopeguard::guard(token, |t| {
+            CloseHandle(t);
+        });
+
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+        let success = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            size,
+            &mut size,
+        );
+
+        if success == 0 || elevation.TokenIsElevated == 0 {
+            return Err(ProgramError::PlatformError(
+                "Access denied: Caller is not running with elevated Administrator privileges"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Windows named pipe IPC listener.
 pub struct WindowsNamedPipeListener {
     pipe_name: String,
     is_first: bool,
+    allow_unelevated: bool,
 }
 
 impl WindowsNamedPipeListener {
-    pub fn bind(path: &Path) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
         Ok(Self {
             pipe_name: path.to_string_lossy().to_string(),
             is_first: true,
+            allow_unelevated,
         })
     }
 }
@@ -588,12 +643,24 @@ impl WindowsNamedPipeListener {
 #[async_trait]
 impl PlatformIpcListener for WindowsNamedPipeListener {
     async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
-        let server = tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(self.is_first)
-            .create(&self.pipe_name)?;
-        self.is_first = false;
-        server.connect().await?;
-        Ok(Box::new(server))
+        loop {
+            let server = tokio::net::windows::named_pipe::ServerOptions::new()
+                .first_pipe_instance(self.is_first)
+                .create(&self.pipe_name)?;
+            self.is_first = false;
+            server.connect().await?;
+
+            if !self.allow_unelevated
+                && crate::platform::native_platform().is_elevated()
+                && let Err(e) = verify_windows_named_pipe_caller(&server)
+            {
+                tracing::warn!("Rejecting unauthorized Named Pipe connection: {}", e);
+                let _ = server.disconnect();
+                continue;
+            }
+
+            return Ok(Box::new(server));
+        }
     }
 }
 
@@ -602,14 +669,108 @@ fn cleanup_windows_uds(p: PathBuf) {
     let _ = std::fs::remove_file(&p);
 }
 
+/// Verifies that the connected Windows AF_UNIX client is running with elevated privileges.
+fn verify_windows_uds_caller(stream: &uds_windows::UnixStream) -> Result<(), ProgramError> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let raw_socket = stream.as_raw_socket();
+    let mut peer_pid: u32 = 0;
+    let mut bytes_returned: u32 = 0;
+
+    // SIO_AF_UNIX_GETPEERPID is 0x58000100
+    const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
+
+    unsafe extern "system" {
+        fn WSAIoctl(
+            s: usize,
+            dwIoControlCode: u32,
+            lpvInBuffer: *const std::ffi::c_void,
+            cbInBuffer: u32,
+            lpvOutBuffer: *mut std::ffi::c_void,
+            cbOutBuffer: u32,
+            lpcbBytesReturned: *mut u32,
+            lpOverlapped: *mut std::ffi::c_void,
+            lpCompletionRoutine: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+
+    unsafe {
+        let ret = WSAIoctl(
+            raw_socket as usize,
+            SIO_AF_UNIX_GETPEERPID,
+            std::ptr::null(),
+            0,
+            &mut peer_pid as *mut u32 as *mut std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+
+        if ret != 0 || peer_pid == 0 {
+            tracing::debug!("Could not query peer PID on Windows UDS, skipping token check");
+            return Ok(());
+        }
+
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, peer_pid);
+        if process.is_null() || process == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(ProgramError::PlatformError(format!(
+                "Access denied: cannot inspect process token of peer PID {}",
+                peer_pid
+            )));
+        }
+        let _proc_guard = scopeguard::guard(process, |h| {
+            CloseHandle(h);
+        });
+
+        let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return Err(ProgramError::PlatformError(format!(
+                "Access denied: cannot open token of peer PID {}",
+                peer_pid
+            )));
+        }
+        let _token_guard = scopeguard::guard(token, |h| {
+            CloseHandle(h);
+        });
+
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+        let success = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            size,
+            &mut size,
+        );
+
+        if success == 0 || elevation.TokenIsElevated == 0 {
+            return Err(ProgramError::PlatformError(format!(
+                "Access denied: Peer PID {} is not running with elevated Administrator privileges",
+                peer_pid
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Windows Unix Domain Socket (AF_UNIX) listener.
 pub struct WindowsUdsListener {
     listener: std::sync::Arc<uds_windows::UnixListener>,
     _cleanup: scopeguard::ScopeGuard<PathBuf, fn(PathBuf)>,
+    allow_unelevated: bool,
 }
 
 impl WindowsUdsListener {
-    pub fn bind(path: &Path) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
@@ -622,6 +783,7 @@ impl WindowsUdsListener {
         Ok(Self {
             listener: std::sync::Arc::new(listener),
             _cleanup: cleanup,
+            allow_unelevated,
         })
     }
 }
@@ -631,16 +793,26 @@ impl PlatformIpcListener for WindowsUdsListener {
     async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
         use std::os::windows::io::{FromRawSocket, IntoRawSocket};
 
-        let l = self.listener.clone();
-        let (std_stream, _) = tokio::task::spawn_blocking(move || l.accept())
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Interrupted, e))??;
+        loop {
+            let l = self.listener.clone();
+            let (std_stream, _) = tokio::task::spawn_blocking(move || l.accept())
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Interrupted, e))??;
 
-        let raw = std_stream.into_raw_socket();
-        let std_tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
-        std_tcp.set_nonblocking(true)?;
-        let async_stream = tokio::net::TcpStream::from_std(std_tcp)?;
-        Ok(Box::new(async_stream))
+            if !self.allow_unelevated
+                && crate::platform::native_platform().is_elevated()
+                && let Err(e) = verify_windows_uds_caller(&std_stream)
+            {
+                tracing::warn!("Rejecting unauthorized UDS connection: {}", e);
+                continue;
+            }
+
+            let raw = std_stream.into_raw_socket();
+            let std_tcp = unsafe { std::net::TcpStream::from_raw_socket(raw) };
+            std_tcp.set_nonblocking(true)?;
+            let async_stream = tokio::net::TcpStream::from_std(std_tcp)?;
+            return Ok(Box::new(async_stream));
+        }
     }
 }
 
@@ -882,9 +1054,7 @@ mod tests {
             .unwrap();
         assert_eq!(parts, vec![r"C:\tools\app.exe", "--port", "8080"]);
 
-        let parts = backend
-            .split_command_line(r".\dist\worker.exe -d")
-            .unwrap();
+        let parts = backend.split_command_line(r".\dist\worker.exe -d").unwrap();
         assert_eq!(parts, vec![r".\dist\worker.exe", "-d"]);
     }
 
@@ -927,7 +1097,9 @@ mod tests {
         let exe = Path::new(r"C:\tools\app.exe");
         let cmd_exe = backend.build_command(exe, &args);
         let std_cmd_exe = cmd_exe.as_std();
-        assert_eq!(std_cmd_exe.get_program().to_string_lossy(), r"C:\tools\app.exe");
+        assert_eq!(
+            std_cmd_exe.get_program().to_string_lossy(),
+            r"C:\tools\app.exe"
+        );
     }
 }
-

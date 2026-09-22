@@ -37,6 +37,10 @@ pub struct ServerConfig {
     /// python supervisor behavior.
     #[serde(default = "default_true")]
     pub path_translation: bool,
+    /// When true, allows non-elevated (non-root on Unix, non-admin on Windows) callers
+    /// to connect via local IPC when the daemon is running elevated. Default is false.
+    #[serde(default)]
+    pub allow_unelevated: bool,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -56,6 +60,7 @@ impl Default for ServerConfig {
             password: None,
             identifier: None,
             path_translation: true,
+            allow_unelevated: false,
         }
     }
 }
