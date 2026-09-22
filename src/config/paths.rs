@@ -51,11 +51,12 @@ impl<'a> PathResolver<'a> {
 
     /// Searches for the default configuration file location in strict priority order:
     /// 1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG`
-    /// 2. Executable path `<cmd_name>.conf`, `supervisord.conf`, `<cmd_name>.ini`, `<cmd_name>.yaml`
-    /// 3. `<executable path>/<cmd_name>/config.conf`, etc.
-    /// 4. OS-specific path:
-    ///    - Unix: `/etc/<cmd_name>/config.conf`, `/etc/supervisor/supervisord.conf`, `/etc/supervisord.conf`, etc.
+    /// 2. Current Working Directory (CWD): `./<cmd_name>.<ext>`, `./etc/<cmd_name>.<ext>`
+    /// 3. User XDG configuration directory (`$XDG_CONFIG_HOME/<cmd_name>/<cmd_name>.<ext>` or `~/.config/<cmd_name>/<cmd_name>.<ext>`)
+    /// 4. Executable directory & relative `etc`: `<exe_dir>/<cmd_name>.<ext>`, `<exe_dir>/<cmd_name>/<cmd_name>.<ext>`, `<exe_dir>/../etc/<cmd_name>.<ext>`
+    /// 5. OS-specific system path: `/etc/<cmd_name>/config.*`, `/etc/supervisor/supervisord.conf`, `/etc/supervisord.conf`
     pub fn find_default_config_path(&self) -> Option<PathBuf> {
+        // 1. Environment variable <UPPERCASE_CMD_NAME>_CONFIG
         let env_name = format!("{}_CONFIG", self.cmd_name.to_uppercase());
         if let Ok(val) = std::env::var(&env_name) {
             let p = PathBuf::from(val.trim());
@@ -64,19 +65,50 @@ impl<'a> PathResolver<'a> {
             }
         }
 
-        let exe_dir = get_executable_dir();
         let extensions = [".conf", ".ini", ".yaml", ".yml"];
 
-        // 2. Executable directory candidates
+        // 2. Current Working Directory (CWD) & ./etc/ (Python Supervisor compatibility)
+        if let Ok(cwd) = std::env::current_dir() {
+            for ext in &extensions {
+                let p = cwd.join(format!("{}{}", self.cmd_name, ext));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+            let cwd_etc = cwd.join("etc");
+            for ext in &extensions {
+                let p = cwd_etc.join(format!("{}{}", self.cmd_name, ext));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+
+        // 3. User configuration directory (~/.config/<cmd_name>/...)
+        if let Some(user_config_home) = get_user_config_dir() {
+            let user_dir = user_config_home.join(self.cmd_name.as_ref());
+            for ext in &extensions {
+                let p = user_dir.join(format!("{}{}", self.cmd_name, ext));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+
+        // 4. Executable directory & sub-directory candidates
+        let exe_dir = get_executable_dir();
         for ext in &extensions {
             let p = exe_dir.join(format!("{}{}", self.cmd_name, ext));
             if p.is_file() {
                 return Some(p);
             }
         }
-        let super_conf = exe_dir.join("supervisord.conf");
-        if super_conf.is_file() {
-            return Some(super_conf);
+        let exe_sub_dir = exe_dir.join(self.cmd_name.as_ref());
+        for ext in &extensions {
+            let p = exe_sub_dir.join(format!("{}{}", self.cmd_name, ext));
+            if p.is_file() {
+                return Some(p);
+            }
         }
 
         // Also check symlink parent if argv[0] directory differs from exe_dir
@@ -92,23 +124,21 @@ impl<'a> PathResolver<'a> {
                         return Some(p_sym);
                     }
                 }
-                let s_sym = parent.join("supervisord.conf");
-                if s_sym.is_file() {
-                    return Some(s_sym);
+            }
+        }
+
+        // Relative etc from executable directory
+        if let Some(parent) = exe_dir.parent() {
+            let exe_etc = parent.join("etc");
+            for ext in &extensions {
+                let p = exe_etc.join(format!("{}{}", self.cmd_name, ext));
+                if p.is_file() {
+                    return Some(p);
                 }
             }
         }
 
-        // 3. `<executable path>/<cmd_name>/config.*`
-        let sub_dir = exe_dir.join(self.cmd_name.as_ref());
-        for ext in &extensions {
-            let p = sub_dir.join(format!("config{}", ext));
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-
-        // 4. OS-specific system configuration paths
+        // 5. OS-specific system configuration paths
         if let Some(sys_dir) =
             crate::platform::native_platform().default_system_config_dir(&self.cmd_name)
         {
@@ -227,6 +257,35 @@ pub fn derive_cmd_name_from_stem(stem: &str) -> String {
 #[inline]
 pub fn get_cmd_name() -> String {
     derive_cmd_name(None)
+}
+
+/// Resolves the user-level configuration base directory (e.g. `$XDG_CONFIG_HOME`, `~/.config`, `%APPDATA%`).
+pub fn get_user_config_dir() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("XDG_CONFIG_HOME") {
+        let p = PathBuf::from(val.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(val) = std::env::var("HOME") {
+        let p = PathBuf::from(val.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p.join(".config"));
+        }
+    }
+    if let Ok(val) = std::env::var("APPDATA") {
+        let p = PathBuf::from(val.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(val) = std::env::var("USERPROFILE") {
+        let p = PathBuf::from(val.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p.join(".config"));
+        }
+    }
+    None
 }
 
 /// Returns the directory containing the executable binary.
@@ -419,6 +478,20 @@ mod tests {
             PathBuf::from("/etc/daemon.yaml")
         };
         assert_eq!(resolve_config_path("testcmd", Some(&abs)).unwrap(), abs);
+    }
+
+    #[test]
+    fn test_find_default_config_cwd_priority() {
+        let dir = tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        let cwd_cfg = dir.path().join("mycustomd.conf");
+        std::fs::write(&cwd_cfg, "test: true").unwrap();
+
+        std::env::set_current_dir(dir.path()).unwrap();
+        let found = find_default_config_path("mycustomd");
+        std::env::set_current_dir(&old_cwd).unwrap();
+
+        assert_eq!(found, Some(cwd_cfg));
     }
 
     #[test]
