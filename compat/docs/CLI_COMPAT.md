@@ -1,185 +1,185 @@
-# rsupervisord: CLI 兼容性分析 (rsupervisorctl vs. supervisorctl) (CLI_COMPAT.md)
+# rsupervisord: CLI Compatibility Analysis (rsupervisorctl vs. supervisorctl) (CLI_COMPAT.md)
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.1.0** | Draft / For Review | Rust (Edition 2024) | `rsupervisorctl` 客户端命令格式与 Python `supervisorctl` 的兼容性分析、逐项需求、示例与优先级分类;可执行基准见 §9 / [`../compat/README.md`](../compat/README.md) |
+| **v1.1.0** | Draft / For Review | Rust (Edition 2024) | Compatibility analysis, per-item requirements, examples and priority classification for `rsupervisorctl` client command format vs. Python `supervisorctl`; executable baseline in §9 / [`../compat/README.md`](../compat/README.md) |
 
 ---
 
-## 1. 目的与范围
+## 1. Purpose & Scope
 
-本文只回答一个问题:**`rsupervisorctl` 的命令行格式如何对齐 Python `supervisorctl`**。
+This document answers exactly one question: **how `rsupervisorctl`'s command-line format aligns with Python `supervisorctl`**.
 
-**基准与参考**
+**Baseline & References**
 
-- **权威基准**:Python Supervisor **4.2.5** 的 `supervisor/supervisorctl.py`(命令面以它为准)。
-- **参考实现**:Go `ochinchina/supervisord` 的 `ctl.go`(commit `7a73369`)。
-- **现状基线**:`rsupervisorctl`(`src/cli/args.rs`、`src/cli/commands.rs`、`src/cli/client.rs`)。
+- **Authoritative baseline**: Python Supervisor **4.2.5**'s `supervisor/supervisorctl.py` (the command surface is governed by it).
+- **Reference implementation**: Go `ochinchina/supervisord`'s `ctl.go` (commit `7a73369`).
+- **Current-state baseline**: `rsupervisorctl` (`src/cli/args.rs`, `src/cli/commands.rs`, `src/cli/client.rs`).
 
-**两个兼容目标(务必分清,避免重复劳动)**
+**Two compatibility goals (keep them distinct to avoid duplicated work)**
 
-| 目标 | 含义 | 契约落点 | 本文是否覆盖 |
+| Goal | Meaning | Contract placement | Covered by this document |
 | :--- | :--- | :--- | :--- |
-| **A — stock `supervisorctl` 直连** | 用户直接用 Python 的 `supervisorctl` 二进制连我们的 daemon | **XML-RPC 方法面 + `[supervisorctl]` 配置段**(见 `SUPERVISORD_COMPAT.md` #5) | 否(CLI 语法无关) |
-| **B — `rsupervisorctl` 语法对齐** | 写给 `supervisorctl` 的脚本/肌肉记忆可直接用于 `rsupervisorctl` | 本文的命令、参数、输出、退出码 | **是** |
+| **A — stock `supervisorctl` direct connection** | Users point the Python `supervisorctl` binary straight at our daemon | **XML-RPC method surface + `[supervisorctl]` config section** (see `SUPERVISORD_COMPAT.md` #5) | No (independent of CLI syntax) |
+| **B — `rsupervisorctl` syntax alignment** | Scripts/muscle memory written for `supervisorctl` work as-is with `rsupervisorctl` | This document's commands, options, output, exit codes | **Yes** |
 
-> A 才是真正的 drop-in 契约。B 成本低、值得做,但**不要借 B 去重造 A 已提供的能力**。
-
----
-
-## 2. 优先级定义
-
-| 级别 | 含义 | 判定标准 |
-| :--- | :--- | :--- |
-| **P0** | 兼容性破坏 / 脚本契约 | 不改则与 Python 语义冲突,或破坏已有脚本/自动化。必做。 |
-| **P1** | 重要但低风险 | Python 常用命令,实现成本低、无冲突。 |
-| **P2** | 次要 / 依赖搁置项 | 依赖 #3/#4 搁置项,或成本偏高、可降级。 |
-| **不支持** | 明确不做 | **成本过高且 Go 版也未实现**;或有更优替代。 |
+> A is the real drop-in contract. B is low-cost and worth doing, but do **not** use B to re-do what A already provides.
 
 ---
 
-## 2.1 兼容定位:契约 vs 体验(总纲)
+## 2. Priority Definitions
 
-一条判断规则:
-
-> **某个输出会不会被旧脚本用管道消费?** 会 → **契约面**,必须与 Python 逐字 / 逐字节 / 逐退出码对齐;
-> 不会 → **体验面**,自由设计,且应刻意做得比 Python 现代。
-
-立场:**兼容是为了迁就不愿意迁移的旧应用,只覆盖它们会踩的接口;不是为 Python 的 UX 当老好人。**
-下文 §3–§7 每项均按此拆成两层标注。
-
-### 契约面(旧脚本依赖,oracle 测试锁死)
-
-| 面 | 项 | 为什么是契约 |
+| Priority | Meaning | Criterion |
 | :--- | :--- | :--- |
-| 命令语法 + namespec | `stop mygroup:*`、`start all` | 脚本逐字调用 |
-| LSB 退出码 | `status >/dev/null; [ $? -eq 3 ]` | 这套 CLI 价值最高的兼容点 |
-| `status` 非 TTY 纯文本 | `status \| grep RUNNING` | 模板 `%(namespec)-33s%(state)-10s%(desc)s`(见 §4.2) |
-| `pid` 纯数字输出 | `pid=$(supervisorctl pid web)` | 数值直取 |
-| `tail` / `maintail` 字节上界 | `tail -100 web \| wc -c` | 字节语义 |
-| `reread` / `update` 行 | `reread \| grep available` | `name: available\|changed\|disappeared` |
-| `start` / `stop` / `restart` 结果行 | `\| grep -q started` | `namespec: started\|stopped` 与 `ERROR (...)`,在 stdout |
-| `avail` 非 TTY 列 | `avail \| awk '{print $1}'` | 列位固定 |
-| `-u/-p/-s/-c`(短 + 长名) | `supervisorctl -u a -p b status` | 脚本固定调用 |
-
-### 体验面(自由 → 刻意现代)
-
-| 面 | Python 现状 | rsupervisord 的做法 |
-| :--- | :--- | :--- |
-| `version` | 打印 daemon 版本 `4.2.5` | 打印自身身份 `rsupervisorctl <ver> (protocol supervisor 4.2.5)`;保留兼容标记,主体是"自己" |
-| `help` / `--help` | flat 命令列表 | clap 渲染:分组、示例、别名标注 |
-| 错误细节 | 混在 stdout 结果行里 | stdout 只走契约行;细节进 **stderr**,结构化、带上下文 |
-| `shutdown` / `reload` 文案 | `Shut down` / `Restarted supervisord` | 自己的口气(`Daemon restarted successfully` …);退出码仍是契约 |
-| TTY 下的表格 / 颜色 | 逐字固定 | 表格 + 状态着色 + 高亮(已有,保留) |
-
-### 落地机关
-
-1. **测试只钉契约面**:`test_cli.py`(stock `supervisorctl` 直连)与 §10 脚本化验收逐项断言
-   退出码 / stdout 文本形状 / 字节上界;**体验面绝不入测试**——`version`/`help` 的文案、
-   TTY 表格渲染、错误 prose 均不设断言,现代化有完全自由且不被测试冻结。
-2. **契约面交给 oracle**:`test_cli.py`(stock `supervisorctl` 直连)与 §9 验收逐项断言,
-   由 XML-RPC/#5 门控自动放行。
+| **P0** | Compatibility-breaking / script contract | Flunks unless changed — conflicts with Python semantics, or breaks existing scripts/automation. Must-do. |
+| **P1** | Important but low-risk | Commonly used Python commands, low implementation cost, no conflicts. |
+| **P2** | Minor / dependent-deferred item | Depends on deferred items in #3/#4, or high cost with acceptable degraded/fallback option. |
+| **Not Supported** | Explicitly out of scope | **Cost too high and the Go version also doesn't implement it**; or there's a better alternative. |
 
 ---
 
-## 3. 总览
+## 2.1 Compatibility positioning: contract vs. UX (master summary)
 
-### 3.1 命令面
+One decision rule:
 
-| 命令 | Python 4.2.5 | Go 参考 | rsupervisorctl 现状 | 优先级 | 定位 |
+> **Will that output be pipe-consumed by old scripts?** Yes → **contract surface**, must match Python character-for-character / byte-for-byte / exit-code-for-exit-code;
+> No → **UX surface**, free design, and deliberately made more modern than Python.
+
+Position: **compatibility exists to accommodate old applications that refuse to migrate, covering only the interfaces they actually step on; we are not a doormat for Python's UX.**
+Every item in §3–§7 below is labeled along these two layers.
+
+### [Contract Surface] (relied on by old scripts, locked down by oracle tests)
+
+| Surface | Item | Why it's a contract |
+| :--- | :--- | :--- |
+| Command syntax + namespec | `stop mygroup:*`, `start all` | Scripts invoke verbatim |
+| LSB exit codes | `status >/dev/null; [ $? -eq 3 ]` | The highest-value compatibility point of this CLI |
+| `status` non-TTY plain text | `status \| grep RUNNING` | Template `%(namespec)-33s%(state)-10s%(desc)s` (see §4.2) |
+| `pid` pure-numeric output | `pid=$(supervisorctl pid web)` | Numeric value taken directly |
+| `tail` / `maintail` byte upper bound | `tail -100 web \| wc -c` | Byte semantics |
+| `reread` / `update` lines | `reread \| grep available` | `name: available\|changed\|disappeared` |
+| `start` / `stop` / `restart` result lines | `\| grep -q started` | `namespec: started\|stopped` and `ERROR (...)`, on stdout |
+| `avail` non-TTY columns | `avail \| awk '{print $1}'` | Fixed column positions |
+| `-u/-p/-s/-c` (short + long names) | `supervisorctl -u a -p b status` | Fixed invocation from scripts |
+
+### [UX Surface] (free → deliberately modern)
+
+| Surface | Python current state | rsupervisord's approach |
+| :--- | :--- | :--- |
+| `version` | Prints daemon version `4.2.5` | Prints its own identity `rsupervisorctl <ver> (protocol supervisor 4.2.5)`; keeps a compatibility marker, but the subject is "itself" |
+| `help` / `--help` | Flat command list | clap rendering: grouping, examples, alias annotations |
+| Error detail | Mixed into the stdout result lines | stdout carries only contract lines; detail goes to **stderr**, structured and contextual |
+| `shutdown` / `reload` wording | `Shut down` / `Restarted supervisord` | Its own voice (`Daemon restarted successfully` …); exit codes remain the contract |
+| Tables / colors under TTY | Verbatim-fixed | Table + state coloring + highlighting (already present, kept) |
+
+### Enforcement mechanisms
+
+1. **Tests pin only the contract surface**: `test_cli.py` (stock `supervisorctl` direct connection) and the §10 scripted acceptance assert per item —
+   exit code / stdout text shape / byte upper bound; **the UX surface never enters tests** — no assertions on `version`/`help` wording,
+   TTY table rendering, or error prose, so modernization has full freedom and is not frozen by tests.
+2. **Contract surface is handed to the oracle**: `test_cli.py` (stock `supervisorctl` direct connection) and §9 acceptance assert per item,
+   gated for auto-release by XML-RPC/#5.
+
+---
+
+## 3. Overview
+
+### 3.1 Command surface
+
+| Command | Python 4.2.5 | Go reference | rsupervisorctl current state | Priority | Classification |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `status` | ✅ 支持 namespec/`all` | ✅ | ⚠️ 有,但表格输出、无退出码 | **P0** | 契约(TTY 表格=体验) |
-| `help` | ✅ | ❌ | ❌ | **P0** | 体验 |
-| `version` | ✅ | ⚠️ 顶层 `version` | ❌ | **P0** | 体验(语法需存在) |
-| `pid` | ✅ | ✅ | ❌ | **P0** | 契约 |
-| `shutdown` | ✅ | ✅ | ❌ | **P0** | 契约(退出码)/文案体验 |
-| `reload` | ✅(重启 daemon) | ✅(同 Python) | ✅ 重启 daemon(已实现) | **P0** | 契约(语义:重启 daemon) |
-| `reload-config` | ❌(扩展) | ❌ | ✅ 热重载(已实现) | 保留扩展 | 扩展(热重载) |
-| `reread` | ✅ | ✅ | ❌ | **P0** | 契约 |
-| `update` | ✅ | ✅ | ⚠️ 能力在 `reload` 里 | **P0** | 契约 |
-| `start` / `stop` / `restart` | ✅ namespec/`all` | ✅ | ⚠️ 有,namespec 语义待对齐 | **P0** | 契约 |
-| `tail` | ✅ `[-f\|-N] <name> [stdout\|stderr]` | ⚠️ 无 `-N` | ⚠️ 形态不同(`-n` 行、无 channel) | **P0** | 契约 |
-| `signal` | ✅ | ✅ | ❌ | **P1** | 契约 |
-| `avail` | ✅ | ❌ | ❌ | **P1** | 契约(非 TTY 列) |
-| `open` | ✅ | ❌ | ❌ | **P1** | 体验 |
-| `maintail` | ✅ | ❌ | ❌ | **P1** | 契约 |
-| `clear` | ✅ | ✅ | ❌ | **P2** | 契约 |
-| `add` / `remove` | ✅ | ✅ | ❌ | **P2**(依赖 #3/#4) | 契约 |
-| `fg` | ✅ | ✅(简化实现) | ❌ | **P2**(参考 Go) | 扩展(非真 PTY,Go 简化形态) |
-| `quit` / `exit` / `^D` | ✅ | ❌ | ❌ | **不支持**(随交互 shell) | 不支持 |
-| (交互 shell) | ✅ | ❌ | ❌ | **不支持** | 不支持 |
-| `events` | ❌(扩展) | ✅ | ✅ | 保留扩展 | 扩展 |
-| `stdin` | ❌(扩展) | ❌(仅 XML-RPC) | ✅ | 保留扩展 | 扩展 |
+| `status` | ✅ supports namespec/`all` | ✅ | ⚠️ present, but table output, no exit code | **P0** | Contract (TTY table = UX) |
+| `help` | ✅ | ❌ | ❌ | **P0** | UX |
+| `version` | ✅ | ⚠️ top-level `version` | ❌ | **P0** | UX (syntax must exist) |
+| `pid` | ✅ | ✅ | ❌ | **P0** | Contract |
+| `shutdown` | ✅ | ✅ | ❌ | **P0** | Contract (exit code) / wording UX |
+| `reload` | ✅ (restart the daemon) | ✅ (same as Python) | ✅ restarts the daemon (implemented) | **P0** | Contract (semantics: restart the daemon) |
+| `reload-config` | ❌ (extension) | ❌ | ✅ hot reload (implemented) | Extension kept | Extension (hot reload) |
+| `reread` | ✅ | ✅ | ❌ | **P0** | Contract |
+| `update` | ✅ | ✅ | ⚠️ capability inside `reload` | **P0** | Contract |
+| `start` / `stop` / `restart` | ✅ namespec/`all` | ✅ | ⚠️ present, namespec semantics to be aligned | **P0** | Contract |
+| `tail` | ✅ `[-f\|-N] <name> [stdout\|stderr]` | ⚠️ no `-N` | ⚠️ different shape (`-n` lines, no channel) | **P0** | Contract |
+| `signal` | ✅ | ✅ | ❌ | **P1** | Contract |
+| `avail` | ✅ | ❌ | ❌ | **P1** | Contract (non-TTY columns) |
+| `open` | ✅ | ❌ | ❌ | **P1** | UX |
+| `maintail` | ✅ | ❌ | ❌ | **P1** | Contract |
+| `clear` | ✅ | ✅ | ❌ | **P2** | Contract |
+| `add` / `remove` | ✅ | ✅ | ❌ | **P2** (depends on #3/#4) | Contract |
+| `fg` | ✅ | ✅ (simplified implementation) | ❌ | **P2** (reference Go) | Extension (not a real PTY, Go-simplified shape) |
+| `quit` / `exit` / `^D` | ✅ | ❌ | ❌ | **Not Supported** (goes with the interactive shell) | Not Supported |
+| (interactive shell) | ✅ | ❌ | ❌ | **Not Supported** | Not Supported |
+| `events` | ❌ (extension) | ✅ | ✅ | Extension kept | Extension |
+| `stdin` | ❌ (extension) | ❌ (XML-RPC only) | ✅ | Extension kept | Extension |
 
-### 3.2 客户端参数
+### 3.2 Client options
 
-| 参数 | Python 4.2.5 | Go 参考 | rsupervisorctl 现状 | 优先级 |
+| Option | Python 4.2.5 | Go reference | rsupervisorctl current state | Priority |
 | :--- | :--- | :--- | :--- | :--- |
-| `-c/--configuration` | ✅ | ❌(自动探测) | ⚠️ `-c/--config` | **P0**(加别名) |
-| `-s/--serverurl` | ✅ | ✅ | ⚠️ `-s/--server` | **P0**(加别名) |
-| `-u/--username` | ✅ | ⚠️ `-u/--user` | ⚠️ `-u/--user` | **P0**(加别名) |
-| `-p/--password` | ✅ | ⚠️ `-P/--password` | ❌ `-P/--password` | **P0**(改 `-p`) |
-| `-k/--key` | ❌ | ❌ | ✅ | 保留扩展 |
-| `--allow-unelevated` | ❌ | ❌ | ✅ | 保留扩展 |
-| `-i/--interactive` | ✅ | ❌ | ❌ | **不支持** |
-| `-r/--history-file` | ✅ | ❌ | ❌ | **不支持** |
+| `-c/--configuration` | ✅ | ❌ (auto-detect) | ⚠️ `-c/--config` | **P0** (add alias) |
+| `-s/--serverurl` | ✅ | ✅ | ⚠️ `-s/--server` | **P0** (add alias) |
+| `-u/--username` | ✅ | ⚠️ `-u/--user` | ⚠️ `-u/--user` | **P0** (add alias) |
+| `-p/--password` | ✅ | ⚠️ `-P/--password` | ❌ `-P/--password` | **P0** (change to `-p`) |
+| `-k/--key` | ❌ | ❌ | ✅ | Extension kept |
+| `--allow-unelevated` | ❌ | ❌ | ✅ | Extension kept |
+| `-i/--interactive` | ✅ | ❌ | ❌ | **Not Supported** |
+| `-r/--history-file` | ✅ | ❌ | ❌ | **Not Supported** |
 
 ---
 
-## 4. 全局行为(跨命令)
+## 4. Global Behavior (cross-command)
 
-### 4.1 退出码(P0)
+### 4.1 Exit codes (P0)
 
-**需求**:采用 Python 的 LSB 退出码,使 shell 脚本可用 `$?` 判定。
+**Requirement**: adopt Python's LSB exit codes so shell scripts can decide via `$?`.
 
-| 码 | 含义 | 触发示例 |
+| Code | Meaning | Trigger example |
 | :--- | :--- | :--- |
-| 0 | SUCCESS | 命令成功 |
-| 1 | GENERIC | 一般错误、缺参(stop/restart/signal/clear/tail) |
-| 2 | INVALID_ARGS | `start` 缺进程名;未知命令 |
-| 3 | NOT_RUNNING(init 层为 UNIMPLEMENTED_FEATURE) | `status` 有任一进程处于 STOPPED 态 |
-| 4 | UNKNOWN(init 层为 INSUFFICIENT_PRIVILEGES) | `status` 指定了不存在的进程;upcheck 失败 |
-| 5 | NOT_INSTALLED | API 版本不匹配 |
-| 7 | NOT_RUNNING | 对已停止/死进程执行 start/stop/pid |
+| 0 | SUCCESS | command succeeded |
+| 1 | GENERIC | generic error, missing argument (stop/restart/signal/clear/tail) |
+| 2 | INVALID_ARGS | `start` missing process name; unknown command |
+| 3 | NOT_RUNNING (at the init layer: UNIMPLEMENTED_FEATURE) | `status` finds any process in STOPPED state |
+| 4 | UNKNOWN (at the init layer: INSUFFICIENT_PRIVILEGES) | `status` names a nonexistent process; upcheck failed |
+| 5 | NOT_INSTALLED | API version mismatch |
+| 7 | NOT_RUNNING | start/stop/pid on an already-stopped/dead process |
 
-**示例**
+**Example**
 
 ```bash
-rsupervisorctl status web >/dev/null; echo $?   # web 未运行 -> 3
-rsupervisorctl status nosuch; echo $?           # 不存在   -> 4
-rsupervisorctl start nosuch; echo $?            # 不存在   -> 7 (死进程类)
-rsupervisorctl start; echo $?                   # 缺参     -> 2
+rsupervisorctl status web >/dev/null; echo $?   # web not running -> 3
+rsupervisorctl status nosuch; echo $?           # nonexistent     -> 4
+rsupervisorctl start nosuch; echo $?            # nonexistent     -> 7 (dead-process class)
+rsupervisorctl start; echo $?                   # missing arg     -> 2
 ```
 
-> 现状:`rsupervisorctl` 仅返回 0/1(anyhow 错误)。需在 `src/cli/commands.rs` 统一映射退出码。
+> Current state: `rsupervisorctl` only returns 0/1 (anyhow errors). Exit codes must be uniformly mapped in `src/cli/commands.rs`.
 
-### 4.2 输出格式(P0)
+### 4.2 Output format (P0)
 
-**需求**:`status` 在**非 TTY**(管道/重定向)时输出 Python 兼容的纯文本,便于脚本解析;TTY 下可保留现有彩色表格。
+**Requirement**: `status` outputs Python-compatible plain text on **non-TTY** (pipe/redirect) for script parsing; the existing colored table may be kept on TTY.
 
-Python 模板:`'%(namespec)-33s%(state)-10s%(desc)s'`
+Python template: `'%(namespec)-33s%(state)-10s%(desc)s'`
 
-**示例**
+**Example**
 
 ```
 web                          RUNNING   pid 1234, uptime 0:00:10
 db                           STOPPED   Not started
 ```
 
-> 现状:`src/cli/commands.rs:60` 使用 `tabled` 圆角表格。建议:`std::io::stdout().is_terminal()` 为 false 时走纯文本分支。
+> Current state: `src/cli/commands.rs:60` uses the `tabled` rounded-corner table. Suggestion: when `std::io::stdout().is_terminal()` is false, take the plain-text branch.
 
-### 4.3 namespec 与 `all`(P0)
+### 4.3 namespec and `all` (P0)
 
-**需求**:统一支持 Python 的三种名字形式:
+**Requirement**: uniformly support Python's three name forms:
 
-| 形式 | 语义 | 示例 |
+| Form | Semantics | Example |
 | :--- | :--- | :--- |
-| `name` | 单进程(无冒号时 group==name) | `start web` |
-| `group:process` | 组内指定进程 | `start mygroup:worker` |
-| `group:*` | 组内全部进程 | `stop mygroup:*` |
-| `all` | 全部进程 | `restart all` |
+| `name` | single process (group == name when no colon) | `start web` |
+| `group:process` | specific process within a group | `start mygroup:worker` |
+| `group:*` | all processes within a group | `stop mygroup:*` |
+| `all` | all processes | `restart all` |
 
-**示例**
+**Example**
 
 ```bash
 rsupervisorctl status mygroup:*
@@ -187,41 +187,41 @@ rsupervisorctl stop mygroup:*
 rsupervisorctl start all
 ```
 
-> 现状:`client.rs` 已处理 `all` 与 `group:*`(client.rs:120/148/150),但 **bare `name` 当 group 的语义、`status` 的 `group:*` 过滤、不存在名字的错误文本/退出码**未对齐。
+> Current state: `client.rs` already handles `all` and `group:*` (client.rs:120/148/150), but the **bare `name`-as-group semantics, `status`'s `group:*` filtering, and the error text/exit code for nonexistent names** are not aligned.
 
-### 4.4 交互 shell(不支持)
+### 4.4 Interactive shell (Not Supported)
 
-**需求**:Python 无参数或 `-i` 时进入 REPL(`supervisor> ` 提示符、启动即 `status`、tab 补全、`quit`/`exit`/`^D`、交互模式恒返回 0)。
+**Requirement**: Python enters a REPL with no arguments or with `-i` (`supervisor> ` prompt, auto-runs `status` at startup, tab completion, `quit`/`exit`/`^D`, interactive mode always returns 0).
 
-**决策**:**不支持**。理由:
+**Decision**: **Not Supported**. Reasons:
 
-- Go 版(`ctl.go`)为子命令式,**同样未实现**交互 shell。
-- 成本高(需引入 `rustyline`、补全、历史、命令分发),而一次性子命令已覆盖全部自动化/脚本场景。
+- The Go version (`ctl.go`) is subcommand-style and **also does not implement** an interactive shell.
+- High cost (need to bring in `rustyline`, completion, history, command dispatch), while one-shot subcommands already cover all automation/script scenarios.
 
-**替代**:所有操作以一次性子命令提供;`quit`/`exit`/`-i`/`-r` 一并归入本项不支持。
+**Alternative**: everything is provided as one-shot subcommands; `quit`/`exit`/`-i`/`-r` are likewise folded into this Not-Supported item.
 
 ---
 
-## 5. 客户端参数需求〔契约面〕
+## 5. Client Option Requirements [Contract Surface]
 
-> 参数是旧脚本的固定调用点,均属**契约面**;`§5.2` 的 rsupervisord 独有扩展除外。
+> Options are fixed invocation points for old scripts and all belong to the **contract surface**; except the rsupervisord-only extensions in `§5.2`.
 
 ### 5.1 P0
 
-#### 5.1.1 `-p/--password`(短选项修正)
+#### 5.1.1 `-p/--password` (short-option correction)
 
-**需求**:密码短选项改为 `-p`(Python 约定);`-P` 保留为兼容别名。当前 `-P` 与 Python 冲突。
+**Requirement**: change the password short option to `-p` (Python convention); keep `-P` as a compatibility alias. The current `-P` conflicts with Python.
 
 ```bash
-# Python 写法(必须可用)
+# Python-style (must work)
 rsupervisorctl -u admin -p secret status
-# 旧写法仍可用(别名)
+# legacy style still works (alias)
 rsupervisorctl -u admin -P secret status
 ```
 
 #### 5.1.2 `-s/--serverurl`
 
-**需求**:新增长名 `--serverurl`(保留 `-s`/`--server`)。值支持 `http://` 与 `unix://`;缺省 `http://localhost:9001`。
+**Requirement**: add the long name `--serverurl` (keep `-s`/`--server`). The value supports `http://` and `unix://`; default `http://localhost:9001`.
 
 ```bash
 rsupervisorctl --serverurl http://127.0.0.1:9001 status
@@ -230,7 +230,7 @@ rsupervisorctl --serverurl unix:///run/rsupervisord.sock status
 
 #### 5.1.3 `-u/--username`
 
-**需求**:新增长名 `--username`(保留 `-u`/`--user`)。
+**Requirement**: add the long name `--username` (keep `-u`/`--user`).
 
 ```bash
 rsupervisorctl -u admin -p secret status
@@ -239,59 +239,59 @@ rsupervisorctl --username admin --password secret status
 
 #### 5.1.4 `-c/--configuration`
 
-**需求**:新增长名 `--configuration`(保留 `-c`/`--config`)。当 #2(INI)落地后,应能从 `[supervisorctl]` 段读取 `serverurl`/`username`/`password` 作为缺省。
+**Requirement**: add the long name `--configuration` (keep `-c`/`--config`). Once #2 (INI) lands, `serverurl`/`username`/`password` should be readable from the `[supervisorctl]` section as defaults.
 
 ```bash
 rsupervisorctl -c /etc/supervisord.conf status
 rsupervisorctl --configuration /etc/supervisord.conf status
 ```
 
-### 5.2 保留扩展
+### 5.2 Extensions kept
 
-`-k/--key`(Bearer token)与 `--allow-unelevated` 为 rsupervisord 独有,保留,不与 Python 冲突。
+`-k/--key` (Bearer token) and `--allow-unelevated` are rsupervisord-only and are kept; they do not conflict with Python.
 
 ---
 
-## 6. 命令需求(逐项)
+## 6. Command Requirements (per-command)
 
-> 约定:每条给出 **语法 / 语义需求 / 示例 / 现状差距**。
+> Convention: each item gives **syntax / semantic requirements / example / current-state gap**.
 
 ### 6.1 P0
 
-#### 6.1.1 `help`〔体验面〕
+#### 6.1.1 `help` [UX Surface]
 
-**语法**:`help [action]`
-**语义**:无参列出全部动作;带参打印该动作帮助。
-**示例**
+**Syntax**: `help [action]`
+**Semantics**: with no arguments, list all actions; with an argument, print that action's help.
+**Example**
 
 ```bash
 rsupervisorctl help
 rsupervisorctl help start
 ```
 
-**定位**:体验面(见 §2.1)。**不逐字对齐** Python 的 flat 列表,用 `clap` 现代渲染:分组、示例、别名标注。
-**现状**:无。可用 `clap` 帮助文本转接实现。
+**Classification**: UX surface (see §2.1). **Not verbatim-aligned** with Python's flat list; use `clap`'s modern rendering: grouping, examples, alias annotations.
+**Current state**: none. Can be implemented by wiring through clap's help text.
 
-#### 6.1.2 `version`〔体验面〕
+#### 6.1.2 `version` [UX Surface]
 
-**语法**:`version`
-**语义**(**不对齐 Python 输出**):打印 rsupervisord 自身身份;附一行兼容协议标记。不再复读 `4.2.5`。
-**示例**
+**Syntax**: `version`
+**Semantics** (**not aligned with Python output**): print rsupervisord's own identity, plus one line of compatibility protocol marker. No longer parrots `4.2.5`.
+**Example**
 
 ```bash
 rsupervisorctl version
 # rsupervisorctl 0.6.0 (protocol supervisor 4.2.5)
 ```
 
-**定位**:体验面(语法需要存在即可,格式自由;见 §2.1)。
-**现状**:无(有 `--version` 但那是客户端自身版本,语义不同——本次把 `version` 的语义修正为"打印自身身份",`--version` 归并/保持)。
+**Classification**: UX surface (the syntax just needs to exist; format is free; see §2.1).
+**Current state**: none (there is `--version`, but that is the client's own version with different semantics — this time the semantics of `version` are corrected to "print its own identity", and `--version` is merged/kept).
 
-#### 6.1.3 `pid`〔契约面〕
+#### 6.1.3 `pid` [Contract Surface]
 
-**语法**:`pid [name…]` / `pid all`
-**语义**:无参=daemon PID;`all`=每个子进程一行;指定名=该进程 PID;PID==0 时退出码 7。输出**仅数字/行**,可被 `pid=$(...)` 消费。
-**定位**:契约面。
-**示例**
+**Syntax**: `pid [name…]` / `pid all`
+**Semantics**: no argument = daemon PID; `all` = one line per child process; named = that process's PID; exit code 7 when PID == 0. Output is **numbers/lines only**, consumable by `pid=$(...)`.
+**Classification**: contract surface.
+**Example**
 
 ```bash
 rsupervisorctl pid          # -> 4321
@@ -299,50 +299,50 @@ rsupervisorctl pid web      # -> 4567
 rsupervisorctl pid all
 ```
 
-**现状**:无。
+**Current state**: none.
 
-#### 6.1.4 `shutdown`〔契约面·文案体验〕
+#### 6.1.4 `shutdown` [Contract Surface · wording UX]
 
-**语法**:`shutdown`
-**语义**:关闭远端 daemon。接受参数时报错(退出码 1)。交互模式需确认;非交互直接执行。
-**定位**:退出码为契约;输出文案 `Shut down` 属体验面,可按自己的口气(C中一致即可)。
-**示例**
+**Syntax**: `shutdown`
+**Semantics**: shut down the remote daemon. Errors when given arguments (exit code 1). Confirmation required in interactive mode; non-interactive executes directly.
+**Classification**: exit code is the contract; the output wording `Shut down` is UX surface and may be in its own voice (consistent within C is enough).
+**Example**
 
 ```bash
 rsupervisorctl shutdown
 ```
 
-**现状**:无。
+**Current state**: none.
 
-#### 6.1.5 `reload`(语义裁决)〔契约面〕
+#### 6.1.5 `reload` (semantic ruling) [Contract Surface]
 
-**语法**:`reload`
-**语义(对齐 Python)**:重启远端 daemon(停全部→重读配置→再启动);接受参数报错。
-**定位**:契约面——`reload` 的**语义**必须与 Python 一致(重启 daemon);输出文案属体验面(现为 `Daemon restarted successfully`,不设契约断言,仅要求退出码 0 + daemon 存活)。
+**Syntax**: `reload`
+**Semantics (aligned with Python)**: restart the remote daemon (stop all → re-read config → restart); errors when given arguments.
+**Classification**: contract surface — `reload`'s **semantics** must match Python's (restart the daemon); the output wording is UX surface (currently `Daemon restarted successfully`; no contract assertion, only exit code 0 + daemon alive).
 
-> **Python 参照**:
-> - `reread` = 仅重读配置、**不增删**
-> - `update` = 重读 + 增删 + 重启受影响组
-> - `reload` = **重启 daemon**
-> - `reload-config`(rsupervisord 扩展)= 零停机**热重载**,与 `reload` 严格区分
+> **Python reference**:
+> - `reread` = re-read config only, **no add/remove**
+> - `update` = re-read + add/remove + restart affected groups
+> - `reload` = **restart the daemon**
+> - `reload-config` (rsupervisord extension) = zero-downtime **hot reload**, strictly distinct from `reload`
 
-**示例**
+**Example**
 
 ```bash
-rsupervisorctl reload        # 重启 daemon
+rsupervisorctl reload        # restart the daemon
 ```
 
-**实现(已落地)**:
-- 客户端:`rsupervisorctl reload` → daemon 重启(`handle_daemon_reload`,daemon 停全部→重读配置→再启动,见 `manager/supervisor.rs::execute_restart_daemon`);输出 prose 属体验面,不设契约断言。
-- 协议:HTTP `POST /api/v1/reload`;XML-RPC `supervisor.restart`(均已实现)。
-- **hot-reload 与 reload 在 daemon 侧是两条路**:热重载走 `POST /api/v1/config/reload` 与 `supervisor.reloadConfig`;`reload` 走 `/api/v1/reload` 与 `supervisor.restart`。
+**Implementation (already landed)**:
+- Client: `rsupervisorctl reload` → daemon restart (`handle_daemon_reload`; daemon stops all → re-reads config → restarts; see `manager/supervisor.rs::execute_restart_daemon`); the output prose is UX surface, no contract assertion.
+- Protocol: HTTP `POST /api/v1/reload`; XML-RPC `supervisor.restart` (both implemented).
+- **hot-reload and reload are two separate paths on the daemon side**: hot reload goes via `POST /api/v1/config/reload` and `supervisor.reloadConfig`; `reload` goes via `/api/v1/reload` and `supervisor.restart`.
 
-#### 6.1.6 `reread`〔契约面〕
+#### 6.1.6 `reread` [Contract Surface]
 
-**语法**:`reread`
-**语义**:重读配置,**不增删进程**。输出变更清单:每行 `name: available|changed|disappeared`,无变更输出 `No config updates to processes`。
-**定位**:契约面(行可被 `reread \| grep available` 消费)。
-**示例**
+**Syntax**: `reread`
+**Semantics**: re-read the config, **no process add/remove**. Outputs the change list: each line `name: available|changed|disappeared`; outputs `No config updates to processes` when nothing changed.
+**Classification**: contract surface (lines consumable by `reread \| grep available`).
+**Example**
 
 ```
 $ rsupervisorctl reread
@@ -350,14 +350,14 @@ web: changed
 api: available
 ```
 
-**现状**:无(其"读配置出 diff"能力可复用 `reloadConfig`/`config reload` 的解析路径)。
+**Current state**: none (its "read config and produce diff" capability can reuse the parsing path of `reloadConfig`/`config reload`).
 
-#### 6.1.7 `update`〔契约面〕
+#### 6.1.7 `update` [Contract Surface]
 
-**语法**:`update [gname…]` / `update all`
-**语义**:重读配置 + 增删 + 重启受影响组。输出:`gname: stopped` / `gname: removed process group` / `gname: updated process group` / `gname: added process group`。
-**定位**:契约面(行可被脚本消费)。
-**示例**
+**Syntax**: `update [gname…]` / `update all`
+**Semantics**: re-read config + add/remove + restart affected groups. Output: `gname: stopped` / `gname: removed process group` / `gname: updated process group` / `gname: added process group`.
+**Classification**: contract surface (lines consumable by scripts).
+**Example**
 
 ```bash
 rsupervisorctl update
@@ -365,14 +365,14 @@ rsupervisorctl update mygroup
 rsupervisorctl update all
 ```
 
-**现状**:无(`reload-config`/`config reload` 已具备"读 + 应用"热重载路径,可在此复用;但缺 Python 输出行格式)。
+**Current state**: none (`reload-config`/`config reload` already have a "read + apply" hot-reload path that can be reused here; but Python's output line format is missing).
 
-#### 6.1.8 `status`(改造)〔契约面〕
+#### 6.1.8 `status` (rework) [Contract Surface]
 
-**语法**:`status [name…|gname:*|all]`
-**语义**:无参或 `all`=全部;支持 `group:*` 与多名字;不存在名字输出 `X: ERROR (no such group|process)` 并置退出码 4;任一进程 STOPPED 置退出码 3。
-**定位**:契约面——**非 TTY** 下必须输出 Python 模板 `%(namespec)-33s %(state)-10s %(desc)s` 纯文本并可被 `grep`/`awk` 消费;**TTY** 输出现有表格+着色属体验面,自由。
-**示例**
+**Syntax**: `status [name…|gname:*|all]`
+**Semantics**: no argument or `all` = everything; supports `group:*` and multiple names; a nonexistent name outputs `X: ERROR (no such group|process)` and sets exit code 4; any process STOPPED sets exit code 3.
+**Classification**: contract surface — on **non-TTY** it must output the Python template `%(namespec)-33s %(state)-10s %(desc)s` as plain text consumable by `grep`/`awk`; the **TTY** table + coloring is UX surface, free.
+**Example**
 
 ```bash
 rsupervisorctl status
@@ -380,20 +380,20 @@ rsupervisorctl status web api
 rsupervisorctl status mygroup:*
 ```
 
-**现状差距**:输出为表格(见 §4.2);缺退出码;`group:*` 过滤待核对。
+**Current-state gap**: output is a table (see §4.2); exit codes missing; `group:*` filtering to be verified.
 
-#### 6.1.9 `start` / `stop` / `restart`(对齐)〔契约面〕
+#### 6.1.9 `start` / `stop` / `restart` (align) [Contract Surface]
 
-**语法**
+**Syntax**
 
 - `start <name…>` / `start all` / `start gname:*`
 - `stop <name…>` / `stop all` / `stop gname:*`
 - `restart <name…>` / `restart all` / `restart gname:*`
 
-**定位**:契约面——结果行 `namespec: started|stopped` 与错误行 `namespec: ERROR (…)` **在 stdout**,可被 `\| grep -q started` 消费。
-**语义**:支持 namespec 与 `all`;`restart` = stop+start,**不重读配置**;`start` 缺参退出码 2,其余缺参退出码 1;死进程类错误退出码 7;输出 `namespec: started|stopped`,错误 `namespec: ERROR (…)`。
+**Classification**: contract surface — result lines `namespec: started|stopped` and error lines `namespec: ERROR (…)` **on stdout**, consumable by `\| grep -q started`.
+**Semantics**: support namespec and `all`; `restart` = stop+start, **does not re-read config**; `start` with missing arguments exits 2, other missing-argument cases exit 1; dead-process-class errors exit 7; outputs `namespec: started|stopped`, errors `namespec: ERROR (…)`.
 
-**示例**
+**Example**
 
 ```bash
 rsupervisorctl start web api
@@ -401,209 +401,209 @@ rsupervisorctl stop mygroup:*
 rsupervisorctl restart all
 ```
 
-**现状差距**:已有 `-a/--async`、`-t/--timeout`(**Python 无此参数,保留为扩展**);需对齐 namespec/`all`/退出码/输出文本。
+**Current-state gap**: already has `-a/--async`, `-t/--timeout` (**Python has no such options; kept as extensions**); namespec/`all`/exit codes/output text need aligning.
 
-#### 6.1.10 `tail`(改造)〔契约面〕
+#### 6.1.10 `tail` (rework) [Contract Surface]
 
-**语法**:`tail [-f|-N] <name> [stdout|stderr]`
-**语义**:默认 `stdout`;默认取末尾 **1600 字节**;`-f` 持续跟随;`-N` 取末尾 N 字节。
-**定位**:契约面——字节上界可被 `tail -100 web \| wc -c` 校验。
+**Syntax**: `tail [-f|-N] <name> [stdout|stderr]`
+**Semantics**: defaults to `stdout`; defaults to the last **1600 bytes**; `-f` follows continuously; `-N` takes the last N bytes.
+**Classification**: contract surface — the byte upper bound can be verified by `tail -100 web \| wc -c`.
 
-**示例**
+**Example**
 
 ```bash
-rsupervisorctl tail web            # 末尾 1600 字节 stdout
+rsupervisorctl tail web            # last 1600 bytes of stdout
 rsupervisorctl tail web stderr
-rsupervisorctl tail -100 web       # 末尾 100 字节
-rsupervisorctl tail -f web         # 持续跟随
+rsupervisorctl tail -100 web       # last 100 bytes
+rsupervisorctl tail -f web         # follow continuously
 ```
 
-**现状差距**:现为 `tail <name> [-f] [-n lines]`(行数、无 channel)。需:
+**Current-state gap**: currently `tail <name> [-f] [-n lines]` (line count, no channel). Needed:
 
-- 新增 `stdout|stderr` 位置参数;
-- 支持 `-N` 字节修饰;
-- 字节语义按 `SUPERVISORD_COMPAT.md` #8 的**降级实现**(行级 ring buffer 近似);
-- `-n` 保留为扩展别名。
+- add the `stdout|stderr` positional argument;
+- support the `-N` byte modifier;
+- byte semantics via the **degraded/fallback implementation** of `SUPERVISORD_COMPAT.md` #8 (line-level ring-buffer approximation);
+- keep `-n` as an extension alias.
 
 ### 6.2 P1
 
-#### 6.2.1 `signal`〔契约面〕
+#### 6.2.1 `signal` [Contract Surface]
 
-**语法**:`signal <sig> <name…>` / `signal <sig> all` / `signal <sig> gname:*`
-**语义**:发送信号;需 ≥2 参;输出 `namespec: signalled`。
-**定位**:契约面(结果行随 start/stop/restart 规则)。
-**示例**
+**Syntax**: `signal <sig> <name…>` / `signal <sig> all` / `signal <sig> gname:*`
+**Semantics**: send a signal; requires ≥2 arguments; outputs `namespec: signalled`.
+**Classification**: contract surface (result lines follow the start/stop/restart rules).
+**Example**
 
 ```bash
 rsupervisorctl signal HUP nginx
 rsupervisorctl signal TERM all
 ```
 
-**现状**:无。依赖 daemon 的信号能力。
+**Current state**: none. Depends on daemon signal capability.
 
-#### 6.2.2 `avail`〔契约面〕
+#### 6.2.2 `avail` [Contract Surface]
 
-**语法**:`avail`
-**语义**:列出全部已配置进程;模板 `'%(name)-32s %(inuse)-9s %(autostart)-9s %(priority)s'`,`inuse`=in use/avail,`autostart`=auto/manual,`priority`=`group_prio:process_prio`。
-**定位**:契约面——**非 TTY** 列位固定,可被 `awk '{print $1}'` 消费;TTY 高亮属体验面。
-**示例**
+**Syntax**: `avail`
+**Semantics**: list all configured processes; template `'%(name)-32s %(inuse)-9s %(autostart)-9s %(priority)s'`, `inuse` = in use/avail, `autostart` = auto/manual, `priority` = `group_prio:process_prio`.
+**Classification**: contract surface — column positions fixed on **non-TTY**, consumable by `awk '{print $1}'`; TTY highlighting is UX surface.
+**Example**
 
 ```
 web                              in use    auto      999:999
 api                              avail     manual    999:999
 ```
 
-**现状**:无(有 `/api/v1/status` 可复用)。
+**Current state**: none (`/api/v1/status` exists and can be reused).
 
-#### 6.2.3 `open`〔体验面〕
+#### 6.2.3 `open` [UX Surface]
 
-**语法**:`open <url>`
-**语义**:切换当前会话的 serverurl,仅接受 `http://` 或 `unix://`。
-**定位**:体验面(会话级操作,无脚本消费场景;语法对齐即可)。
-**示例**
+**Syntax**: `open <url>`
+**Semantics**: switch the current session's serverurl; accepts only `http://` or `unix://`.
+**Classification**: UX surface (session-level operation, no script consumption scenario; syntax alignment is enough).
+**Example**
 
 ```bash
 rsupervisorctl open unix:///run/rsupervisord.sock
 ```
 
-**现状**:无(廉价)。
+**Current state**: none (cheap).
 
-#### 6.2.4 `maintail`〔契约面〕
+#### 6.2.4 `maintail` [Contract Surface]
 
-**语法**:`maintail [-f|-N]`
-**语义**:tail **daemon 自身**日志;默认 1600 字节。
-**定位**:契约面——字节上界与 `tail` 同规则。
-**示例**
+**Syntax**: `maintail [-f|-N]`
+**Semantics**: tail the **daemon's own** log; default 1600 bytes.
+**Classification**: contract surface — byte upper bound follows the same rule as `tail`.
+**Example**
 
 ```bash
 rsupervisorctl maintail
 rsupervisorctl maintail -f
 ```
 
-**现状**:无。依赖 daemon 主日志可读(挂 `SUPERVISORD_COMPAT.md` #8/#12)。
+**Current state**: none. Depends on daemon main log readability (filed under `SUPERVISORD_COMPAT.md` #8/#12).
 
 ### 6.3 P2
 
-#### 6.3.1 `clear`〔契约面〕
+#### 6.3.1 `clear` [Contract Surface]
 
-**语法**:`clear <name…>` / `clear all`
-**语义**:清空进程日志;输出 `namespec: cleared`。
-**定位**:契约面(结果行随 start/stop/restart 规则)。
-**示例**
+**Syntax**: `clear <name…>` / `clear all`
+**Semantics**: clear the process log; outputs `namespec: cleared`.
+**Classification**: contract surface (result lines follow the start/stop/restart rules).
+**Example**
 
 ```bash
 rsupervisorctl clear web
 rsupervisorctl clear all
 ```
 
-**现状**:无。需日志清理能力(截断文件 + 清空 ring buffer)。
+**Current state**: none. Needs log-clearing capability (truncate file + flush ring buffer).
 
-#### 6.3.2 `add` / `remove`〔契约面〕
+#### 6.3.2 `add` / `remove` [Contract Surface]
 
-**语法**:`add <name…>` / `remove <name…>`
-**语义**:运行时激活/移除配置中的组;`remove` 对仍在运行的组报错。
-**定位**:契约面(命令语法/退出码;结果行随通用规则)。
-**示例**
+**Syntax**: `add <name…>` / `remove <name…>`
+**Semantics**: activate/remove config groups at runtime; `remove` errors for groups still running.
+**Classification**: contract surface (command syntax/exit codes; result lines follow the generic rules).
+**Example**
 
 ```bash
 rsupervisorctl add newgroup
 rsupervisorctl remove oldgroup
 ```
 
-**现状**:无。**依赖 #3/#4(已落地)**,转为 N/A——daemon 侧 `addProcessGroup`/`removeProcessGroup` 与 XML-RPC 已实现(见 `XMLRPC_COMPAT.md`),剩 CLI 接线。
+**Current state**: none. **Depends on #3/#4 (already landed)**, now N/A — the daemon-side `addProcessGroup`/`removeProcessGroup` and XML-RPC are already implemented (see `XMLRPC_COMPAT.md`); only the CLI wiring remains.
 
-#### 6.3.3 `fg`〔扩展〕
+#### 6.3.3 `fg` [Extension]
 
-**语法**:`fg <name>`
-**语义**:前台接管:跟随 stdout+stderr,并把终端输入转发到进程 stdin。
-**示例**
+**Syntax**: `fg <name>`
+**Semantics**: foreground adopts: follows stdout+stderr and forwards terminal input to the process's stdin.
+**Example**
 
 ```bash
 rsupervisorctl fg web
 ```
 
-**现状**:无。Go 版以"双 logtail + stdin 循环"简化实现(非真 PTY)。建议对齐 Go 的简化版,不做终端原始模式。依赖 `sendProcessStdin`(#7)。
+**Current state**: none. The Go version uses a "double logtail + stdin loop" simplified implementation (not a real PTY). Suggestion: align with Go's simplified version, no terminal raw mode. Depends on `sendProcessStdin` (#7).
 
-### 6.4 扩展命令(非 Python,保留)
+### 6.4 Extension commands (non-Python, kept)
 
-| 命令 | 说明 |
+| Command | Description |
 | :--- | :--- |
-| `events` | SSE 实时系统事件流(rsupervisord 独有) |
-| `stdin <name> <chars>` | 向进程 stdin 注入(Python 仅 XML-RPC 暴露,无 CLI) |
-| `reload-config`(别名 `config reload`) | 零停机热重载(已实现);`reload` 归位为"重启 daemon"的 Python 语义 |
+| `events` | SSE real-time system event stream (rsupervisord-only) |
+| `stdin <name> <chars>` | inject into a process's stdin (Python only exposes it via XML-RPC, no CLI) |
+| `reload-config` (alias `config reload`) | zero-downtime hot reload (implemented); `reload` is restored to Python's "restart the daemon" semantics |
 
-### 6.5 不支持
+### 6.5 Not Supported
 
-| 项 | 原因 |
+| Item | Reason |
 | :--- | :--- |
-| 交互 shell(REPL) | 成本高且 Go 版未实现;一次性子命令已覆盖脚本场景 |
-| `-i/--interactive` | 同上 |
-| `-r/--history-file` | 同上(readline 历史,仅交互 shell 有意义) |
-| `quit` / `exit` / `^D` | 同上(仅交互 shell 有意义) |
+| Interactive shell (REPL) | High cost and the Go version doesn't implement it; one-shot subcommands already cover script scenarios |
+| `-i/--interactive` | Same as above |
+| `-r/--history-file` | Same as above (readline history, only meaningful for the interactive shell) |
+| `quit` / `exit` / `^D` | Same as above (only meaningful for the interactive shell) |
 
 ---
 
-## 7. 验收
+## 7. Acceptance
 
-**脚本化验收(退出码 + 纯文本)**
+**Scripted acceptance (exit codes + plain text)**
 
 ```bash
 set -e
-rsupervisorctl status >/dev/null || [ $? -eq 3 ]     # 有停止进程
+rsupervisorctl status >/dev/null || [ $? -eq 3 ]     # stopped process present
 rsupervisorctl start all
 rsupervisorctl status | grep -q RUNNING
-rsupervisorctl tail -100 web | wc -c                  # 不超过 100 字节
+rsupervisorctl tail -100 web | wc -c                  # no more than 100 bytes
 rsupervisorctl signal HUP web
 rsupervisorctl pid web
 rsupervisorctl update
 rsupervisorctl reread
-rsupervisorctl reload                                  # 重启 daemon
+rsupervisorctl reload                                  # restart the daemon
 rsupervisorctl shutdown
 ```
 
-**参数兼容验收**
+**Option-compatibility acceptance**
 
 ```bash
-rsupervisorctl -u admin -p secret status              # -p 可用
+rsupervisorctl -u admin -p secret status              # -p works
 rsupervisorctl --serverurl http://127.0.0.1:9001 status
 rsupervisorctl --configuration /etc/supervisord.conf status
 ```
 
 ---
 
-## 8. 与其它文档的关系
+## 8. Relationship to Other Documents
 
-- 服务端 XML-RPC 方法面(目标 A 的真契约):见 `SUPERVISORD_COMPAT.md` §7 #5。
-- `tail` 字节偏移的降级实现:见 `SUPERVISORD_COMPAT.md` §7 #8。
-- `sendProcessStdin`(数据面,`fg`/`stdin` 依赖):见 `SUPERVISORD_COMPAT.md` §7 #7。
-
----
-
-## 9. 兼容测试基线
-
-两个兼容目标分别对应两套可执行基准(见 [`../compat/README.md`](../compat/README.md)):
-
-- **目标 B(native 语法对齐)**:[`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) 对编译出的 `rsupervisorctl` 做**契约面**冒烟验证(`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload-config`;退出码 + 状态断言,**不断言 UX 文案**),默认靶标下 **5 passed**。
-- **目标 A(未改动的 stock `supervisorctl` 直连)**:[`../compat/tests/test_cli.py`](../compat/tests/test_cli.py) 的 27 例为 oracle,先在 Python 4.2.5 上 **27 passed**;对编译 bin 因 `/RPC2` 未实现而统一 `xfail`(同 [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §12)。
-
-即:§6/§7 列出的 P0/P1 需求,一旦服务端具备 XML-RPC(§7 #5),上述 oracle 会**自动**由 `xfail` 转为逐项断言。
+- Server-side XML-RPC method surface (the real contract for Goal A): see `SUPERVISORD_COMPAT.md` §7 #5.
+- Degraded/fallback implementation for `tail` byte offsets: see `SUPERVISORD_COMPAT.md` §7 #8.
+- `sendProcessStdin` (data plane, dependency of `fg`/`stdin`): see `SUPERVISORD_COMPAT.md` §7 #7.
 
 ---
 
-## 10. 契约 vs 体验 — 测试分工
+## 9. Compatibility Test Baseline
 
-契约面与体验面在测试中的待遇**截然不同**:
+The two compatibility goals map to two executable baselines respectively (see [`../compat/README.md`](../compat/README.md)):
 
-| 层 | 测试策略 | 断言点 |
+- **Goal B (native syntax alignment)**: [`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) runs a **contract-surface** smoke check against the compiled `rsupervisorctl` (`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload-config`; exit-code + state assertions, **no UX-wording assertions**), **5 passed** on the default target.
+- **Goal A (unmodified stock `supervisorctl` direct connection)**: the 27 cases in [`../compat/tests/test_cli.py`](../compat/tests/test_cli.py) are the oracle; first **27 passed** on Python 4.2.5; they uniformly `xfail` against the compiled bin because `/RPC2` is not implemented (same as `XMLRPC_COMPAT.md` §12).
+
+That is: once the server side has XML-RPC (§7 #5), the P0/P1 requirements listed in §6/§7 will **automatically** turn the above oracle from `xfail` into per-item assertions.
+
+---
+
+## 10. Contract vs. UX — Test Division of Labor
+
+The contract surface and the UX surface receive **completely different** treatment in tests:
+
+| Layer | Test strategy | Assertion points |
 | :--- | :--- | :--- |
-| **契约面** | **严格硬化**(oracle/§7 脚本化验收) | 退出码、stdout 文本形状、字节上界、命令语法 |
-| **体验面** | **不设断言、也设防"被测试"** | `version`/`help` 文案、TTY 表格、错误 prose、stderr 细节——**严禁进入验证脚本** |
+| **Contract surface** | **Strict hardening** (oracle/§7 scripted acceptance) | Exit code, stdout text shape, byte upper bound, command syntax |
+| **UX surface** | **No assertions, and guarded against "being tested"** | `version`/`help` wording, TTY table, error prose, stderr detail — **strictly forbidden from entering validation scripts** |
 
-要点:
+Key points:
 
-- `test_cli.py`(stock `supervisorctl` 直连)是契约面的权威 oracle;`test_native_cli.py` 只做
-  **契约面**的 native 冒烟(`status`/`start`/`stop`/`restart`/`tail`/`stdin`/`reload-config`…),
-  且每条只断言退出码与 stdout 可机器消费的形式,**不断言任何 UX 文案**。
-- 现代化是自由选择:**不许用测试把"现代"钉死**(例如不写"`version` 不得含 `4.2.5`"),
-  也不许用测试把"Python 原样"钉死。契约不倒退、现代化不冻结。
-- 契约面的每一条断言都源自 §2.1 / §6 / §7;体验面在验证脚本中**没有**对应条目。
+- `test_cli.py` (stock `supervisorctl` direct connection) is the authoritative oracle for the contract surface; `test_native_cli.py` only runs
+  the **contract-surface** native smoke test (`status`/`start`/`stop`/`restart`/`tail`/`stdin`/`reload-config`…),
+  and each case asserts only the exit code and a machine-consumable stdout shape, **never any UX wording**.
+- Modernization is a free choice: **tests must not freeze "modern"** (e.g. don't assert "`version` must not contain `4.2.5`"),
+  and must not freeze "Python verbatim" either. Contracts don't regress, modernization isn't frozen.
+- Every contract-surface assertion traces to §2.1 / §6 / §7; the UX surface has **no** corresponding entries in the validation scripts.

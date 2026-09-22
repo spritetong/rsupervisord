@@ -27,7 +27,8 @@ def _out(result) -> str:
 
 def test_native_status_lists_programs(instance):
     res = instance.rctl("status")
-    assert res.returncode == 0
+    # LSB status exit 3 == NOT_RUNNING: some configured programs are stopped.
+    assert res.returncode == 3
     out = _out(res)
     assert "ticker" in out
     assert "catx" in out

@@ -1,67 +1,67 @@
-# rsupervisord: INI 配置适配分析 (INI_COMPAT.md)
+# rsupervisord: INI Configuration Compatibility Analysis (INI_COMPAT.md)
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.0.0** | Draft / For Review | Rust (Edition 2024) | Python `supervisord.conf`(INI)到 rsupervisord 配置模型的 section/字段映射、差异、示例与优先级 |
+| **v1.0.0** | Draft / For Review | Rust (Edition 2024) | Section/field mapping, differences, examples, and priorities from Python `supervisord.conf`(INI) into the rsupervisord configuration model |
 
 ---
 
-## 1. 目的与范围
+## 1. Purpose & Scope
 
-回答:**要让标准 Python `supervisord.conf`(INI)被 rsupervisord 直接加载,需要实现什么。**
+Question answered: **what must be implemented for a standard Python `supervisord.conf`(INI) to be loaded directly by rsupervisord.**
 
-- **权威基准**:Python Supervisor **4.2.5**(`supervisor/skel/sample.conf` + `options.py`)。
-- **参考实现**:Go `ochinchina/supervisord` 的 `config/config.go`(commit `7a73369`)。
-- **现状基线**:`src/config/schema.rs`(YAML schema)、`src/config/expand.rs`(宏展开)、`src/program/config.rs`(运行期配置)。
-- **关联**:section `[supervisorctl]` 的客户端语义见 `CLI_COMPAT.md`;`[eventlistener:x]` 见 `SUPERVISORD_COMPAT.md` #6;`[rpcinterface]` 见 #5。
+- **Authoritative baseline**: Python Supervisor **4.2.5**(`supervisor/skel/sample.conf` + `options.py`).
+- **Reference implementation**: Go `ochinchina/supervisord` `config/config.go`(commit `7a73369`).
+- **Current-state baseline**: `src/config/schema.rs`(YAML schema)、`src/config/expand.rs`(macro expansion)、`src/program/config.rs`(runtime configuration).
+- **Related**: the client-side semantics of section `[supervisorctl]` are covered in `CLI_COMPAT.md`; `[eventlistener:x]` in `SUPERVISORD_COMPAT.md` §7 #6; `[rpcinterface]` in §7 #5.
 
-**核心结论(预览)**:执行骨架无需改动。INI 只是一个**前端解析器**,把 section/字段翻译成现有的 `SupervisorConfig`(raw)→ 复用现有 `validate()` 与 `resolve_programs()`。**宏展开器、numprocs 展开、group 解析、program_defaults 均已存在**。
+**Core conclusion (preview)**: the execution skeleton needs no changes. INI is only a **front-end parser** that translates sections/fields into the existing `SupervisorConfig`(raw)→ reuse the existing `validate()` and `resolve_programs()`. **The macro expander, numprocs expansion, group parsing, and program_defaults already exist.**
 
 ---
 
-## 2. 优先级定义
+## 2. Priority Definitions
 
-| 级别 | 含义 |
+| Level | Meaning |
 | :--- | :--- |
-| **P0** | INI 可用性的基础设施(解析器 + 后缀识别 + 值规范化 + 核心 section 映射)。必做。 |
-| **P1** | 常用且低成本(`[include]`、`[rpcinterface]` 容忍、`[supervisorctl]`、priority 范围裁决)。 |
-| **P2** | 依赖搁置项或成本偏高(daemon 运行面字段、socket 权限、stdout/stderr 独立轮转)。 |
-| **不支持** | 成本过高且 Go 版也未实现,或语义已由其它机制覆盖。 |
+| **P0** | Infrastructure for INI usability (parser + suffix detection + value normalization + core section mapping). Mandatory. |
+| **P1** | Common and low cost (`[include]`, `[rpcinterface]` tolerance, `[supervisorctl]`, priority range arbitration). |
+| **P2** | Depends on deferred items or higher cost (daemon runtime fields, socket permissions, independent stdout/stderr rotation). |
+| **Not Supported** | Cost too high and not implemented in the Go version either, or the semantics are already covered by other mechanisms. |
 
 ---
 
-## 3. Python INI 的 section 分类(共 10 类)
+## 3. Python INI Section Taxonomy (10 categories in total)
 
-| # | Section | 作用域 | rsupervisord 目标 | 优先级 |
+| # | Section | Scope | rsupervisord Target | Priority |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | `[unix_http_server]` | daemon UDS 监听 | `server` | **P0** |
-| 2 | `[inet_http_server]` | daemon TCP 监听 | `server` | **P0** |
-| 3 | `[supervisord]` | daemon 全局 | `logging` + (运行面, #12) | **P0**(日志部分) |
-| 4 | `[program:x]` | 被监管程序 | `programs.x` | **P0** |
-| 5 | `[group:x]` | 异构进程组 | `groups.x` | **P0** |
-| 6 | `[supervisorctl]` | **客户端**连接配置 | CLI 缺省(非 daemon) | **P1** |
-| 7 | `[include]` | 配置包含 | 文件合并 | **P1** |
-| 8 | `[rpcinterface:supervisor]` | RPC 接口注册 | 容忍/忽略(#5) | **P1** |
-| 9 | `[eventlistener:x]` | 事件监听程序 | 条件性(#6) | **不支持**(暂) |
-| 10 | `[fcgi-program:x]` | FastCGI 程序 | — | **不支持** |
+| 1 | `[unix_http_server]` | daemon UDS listener | `server` | **P0** |
+| 2 | `[inet_http_server]` | daemon TCP listener | `server` | **P0** |
+| 3 | `[supervisord]` | daemon global | `logging` + (runtime surface, §7 #12) | **P0**(logging part) |
+| 4 | `[program:x]` | supervised programs | `programs.x` | **P0** |
+| 5 | `[group:x]` | heterogeneous process groups | `groups.x` | **P0** |
+| 6 | `[supervisorctl]` | **client** connection config | CLI defaults (not daemon) | **P1** |
+| 7 | `[include]` | configuration inclusion | file merging | **P1** |
+| 8 | `[rpcinterface:supervisor]` | RPC interface registration | tolerated/ignored (§7 #5) | **P1** |
+| 9 | `[eventlistener:x]` | event listener programs | conditional (§7 #6) | **Not Supported**(for now) |
+| 10 | `[fcgi-program:x]` | FastCGI programs | — | **Not Supported** |
 
-> 另:Go 版扩展了 `[program-default]`(Python 无此段),rsupervisord 对应 `program_defaults`。可作为扩展一并支持。
+> Additionally: the Go version extends with `[program-default]`(this section does not exist in Python), to which rsupervisord's `program_defaults` corresponds. It can be supported as an extension as well.
 
 ---
 
-## 4. 逐 section 字段映射与差异
+## 4. Per-Section Field Mapping & Differences
 
 ### 4.1 `[unix_http_server]` → `server`
 
-| INI 字段 | 当前 YAML | 差异 / 动作 |
+| INI Field | Current YAML | Difference / Action |
 | :--- | :--- | :--- |
-| `file` | `server.uds_path` | 直接映射 |
-| `username` | `server.username` | 直接;**注意**:与 `[inet_http_server]` 共享同一字段,Python 允许两段独立凭据 → 差异 |
-| `password` | `server.password` | 同上 |
-| `chmod` | — | **P2**(Unix socket 权限,Windows 不适用) |
+| `file` | `server.uds_path` | direct mapping |
+| `username` | `server.username` | direct; **note**: shares the same field with `[inet_http_server]`, Python allows independent credentials per section → inconsistent |
+| `password` | `server.password` | same as above |
+| `chmod` | — | **P2**(Unix socket permissions, not applicable on Windows) |
 | `chown` | — | **P2** |
 
-**示例**
+**Example**
 
 ```ini
 [unix_http_server]
@@ -79,13 +79,13 @@ server:
 
 ### 4.2 `[inet_http_server]` → `server`
 
-| INI 字段 | 当前 YAML | 差异 / 动作 |
+| INI Field | Current YAML | Difference / Action |
 | :--- | :--- | :--- |
-| `port` | `server.http_bind` | 直接;`normalize_http_bind` 已支持 `:9001` / `*:9001` / `9001` |
-| `username` | `server.username` | 与 UDS 共享 → 差异 |
-| `password` | `server.password` | 同上 |
+| `port` | `server.http_bind` | direct; `normalize_http_bind` already supports `:9001` / `*:9001` / `9001` |
+| `username` | `server.username` | shared with UDS → inconsistent |
+| `password` | `server.password` | same as above |
 
-**示例**
+**Example**
 
 ```ini
 [inet_http_server]
@@ -101,29 +101,29 @@ server:
   password: secret
 ```
 
-### 4.3 `[supervisord]` → `logging` + 运行面
+### 4.3 `[supervisord]` → `logging` + runtime surface
 
-| INI 字段 | 当前 YAML | 差异 / 动作 |
+| INI Field | Current YAML | Difference / Action |
 | :--- | :--- | :--- |
-| `logfile` | `logging.file` | 直接 |
-| `logfile_maxbytes` | `logging.max_bytes` | 直接;默认 50MB(Python) vs 20MB(ours) |
-| `logfile_backups` | `logging.backups` | 直接;默认 10 vs 3 |
-| `loglevel` | `logging.level` | 直接 |
-| `pidfile` | — | **P2**(#12) |
-| `nodaemon` | — | **P2**(#12) |
+| `logfile` | `logging.file` | direct |
+| `logfile_maxbytes` | `logging.max_bytes` | direct; default 50MB (Python) vs 20MB (ours) |
+| `logfile_backups` | `logging.backups` | direct; default 10 vs 3 |
+| `loglevel` | `logging.level` | direct |
+| `pidfile` | — | **P2**(§7 #12) |
+| `nodaemon` | — | **P2**(§7 #12) |
 | `silent` | — | **P2** |
-| `minfds` | — | **P2**(#12 rlimit) |
-| `minprocs` | — | **P2**(#12 rlimit) |
+| `minfds` | — | **P2**(§7 #12 rlimit) |
+| `minprocs` | — | **P2**(§7 #12 rlimit) |
 | `umask` | — | **P2** |
-| `user` | — | 不支持/部分(setuid) |
+| `user` | — | not supported/partial (setuid) |
 | `identifier` | — | **P2** |
 | `directory` | — | **P2** |
-| `nocleanup` | — | **不支持** |
-| `childlogdir` | — | **P2**(AUTO 子日志目录) |
-| `environment` | — | **P2**(daemon 级环境) |
-| `strip_ansi` | — | **不支持** |
+| `nocleanup` | — | **Not Supported** |
+| `childlogdir` | — | **P2**(AUTO child log directory) |
+| `environment` | — | **P2**(daemon-level environment) |
+| `strip_ansi` | — | **Not Supported** |
 
-**示例**
+**Example**
 
 ```ini
 [supervisord]
@@ -143,46 +143,46 @@ logging:
   level: info
 ```
 
-### 4.4 `[program:x]` → `programs.x`(核心)
+### 4.4 `[program:x]` → `programs.x`(core)
 
-| INI 字段 | 当前 YAML | 差异 / 动作 |
+| INI Field | Current YAML | Difference / Action |
 | :--- | :--- | :--- |
-| `command` | `command`(+`args`) | 直接;ours 在 `args` 空时自动 shell-split |
-| `process_name` | `process_name` | 直接 |
-| `numprocs` | `numprocs` | 直接(**展开已实现**) |
-| `numprocs_start` | `numprocs_start` | 直接 |
-| `directory` | `directory` | 直接 |
-| `umask` | `umask` | 直接 |
-| `priority` | `priority` | **范围冲突**:Python 允许 `999`,ours 校验 `[0,99]` → 见 §6 |
-| `autostart` | `autostart` | 布尔解析差异(见 §5) |
-| `startsecs` | `start_secs` | 命名;默认 1 (与 Python 一致) |
-| `startretries` | `start_retries` | 命名 |
-| `autorestart` | `autorestart` | **值映射**:`false→never`,`true→always`,`unexpected→unexpected` |
-| `exitcodes` | `exit_codes` | 列表解析(`0,2` → `[0,2]`) |
-| `stopsignal` | `stop_signal` | 别名 `SIGTERM` 已支持 |
-| `stopwaitsecs` | `stop_wait_secs` | 命名 |
-| `stopasgroup` | — | **不支持/部分**(Unix 进程组语义) |
-| `killasgroup` | — | **不支持/部分** |
-| `user` | `user` | 直接 |
-| `redirect_stderr` | `logs.redirect_stderr` | 直接 |
-| `stdout_logfile` | `logs.stdout` | **`AUTO`/`NONE` 语义**(见 §5) |
-| `stdout_logfile_maxbytes` | `logs.max_bytes` | 命名;**ours 单值共享 stdout/stderr → 差异** |
-| `stdout_logfile_backups` | `logs.backups` | 同上 |
+| `command` | `command`(+`args`) | direct; ours auto shell-splits when `args` is empty |
+| `process_name` | `process_name` | direct |
+| `numprocs` | `numprocs` | direct(**expansion implemented**) |
+| `numprocs_start` | `numprocs_start` | direct |
+| `directory` | `directory` | direct |
+| `umask` | `umask` | direct |
+| `priority` | `priority` | **range conflict**: Python allows `999`, ours validates `[0,99]` → see §6 |
+| `autostart` | `autostart` | boolean parsing difference (see §5) |
+| `startsecs` | `start_secs` | naming; default 1 (same as Python) |
+| `startretries` | `start_retries` | naming |
+| `autorestart` | `autorestart` | **value mapping**: `false→never`,`true→always`,`unexpected→unexpected` |
+| `exitcodes` | `exit_codes` | list parsing (`0,2` → `[0,2]`) |
+| `stopsignal` | `stop_signal` | alias `SIGTERM` already supported |
+| `stopwaitsecs` | `stop_wait_secs` | naming |
+| `stopasgroup` | — | **Not Supported/partial**(Unix process-group semantics) |
+| `killasgroup` | — | **Not Supported/partial** |
+| `user` | `user` | direct |
+| `redirect_stderr` | `logs.redirect_stderr` | direct |
+| `stdout_logfile` | `logs.stdout` | **`AUTO`/`NONE` semantics**(see §5) |
+| `stdout_logfile_maxbytes` | `logs.max_bytes` | naming; **ours uses a single value shared by stdout/stderr → inconsistent** |
+| `stdout_logfile_backups` | `logs.backups` | same as above |
 | `stderr_logfile` | `logs.stderr` | `AUTO`/`NONE` |
-| `stderr_logfile_maxbytes` | `logs.max_bytes` | 共享差异 |
-| `stderr_logfile_backups` | `logs.backups` | 共享差异 |
-| `environment` | `environment` | **格式**:`A="1",B="2"` → map(见 §5) |
-| `stdout_capture_maxbytes` | — | **不支持**(capturemode/event) |
-| `stdout_events_enabled` | — | **不支持**(依赖 #6) |
-| `stdout_syslog` | — | **不支持** |
-| `stderr_capture_maxbytes` | — | **不支持** |
-| `stderr_events_enabled` | — | **不支持** |
-| `stderr_syslog` | — | **不支持** |
-| `serverurl` | — | **不支持**(childutils) |
+| `stderr_logfile_maxbytes` | `logs.max_bytes` | shared inconsistency |
+| `stderr_logfile_backups` | `logs.backups` | shared inconsistency |
+| `environment` | `environment` | **format**: `A="1",B="2"` → map (see §5) |
+| `stdout_capture_maxbytes` | — | **Not Supported**(capture mode/event) |
+| `stdout_events_enabled` | — | **Not Supported**(depends on §7 #6) |
+| `stdout_syslog` | — | **Not Supported** |
+| `stderr_capture_maxbytes` | — | **Not Supported** |
+| `stderr_events_enabled` | — | **Not Supported** |
+| `stderr_syslog` | — | **Not Supported** |
+| `serverurl` | — | **Not Supported**(childutils) |
 
-> ours/Go 扩展字段(Python 无):`depends_on`、`cron`、`pre_start`/`pre_stop`、`health_check`、`restart_*`。INI 中若出现,按扩展接受。
+> ours/Go extension fields (not in Python): `depends_on`, `cron`, `pre_start`/`pre_stop`, `health_check`, `restart_*`. If they appear in INI, accept them as extensions.
 
-**示例**
+**Example**
 
 ```ini
 [program:web]
@@ -232,12 +232,12 @@ programs:
 
 ### 4.5 `[group:x]` → `groups.x`
 
-| INI 字段 | 当前 YAML | 差异 / 动作 |
+| INI Field | Current YAML | Difference / Action |
 | :--- | :--- | :--- |
-| `programs` | `groups.x.programs` | 直接(逗号/空白分隔列表) |
-| `priority` | `groups.x.priority` | 直接 |
+| `programs` | `groups.x.programs` | direct (comma/whitespace-delimited list) |
+| `priority` | `groups.x.priority` | direct |
 
-**示例**
+**Example**
 
 ```ini
 [group:web]
@@ -252,138 +252,138 @@ groups:
     priority: 80
 ```
 
-### 4.6 `[supervisorctl]` → CLI 缺省(P1)
+### 4.6 `[supervisorctl]` → CLI defaults (P1)
 
-| INI 字段 | 目标 | 动作 |
+| INI Field | Target | Action |
 | :--- | :--- | :--- |
-| `serverurl` | `rsupervisorctl -s` 缺省 | 由客户端读取 `-c` 文件时解析 |
-| `username` | `-u` 缺省 | 同上 |
-| `password` | `-p` 缺省 | 同上 |
-| `prompt` | — | **不支持**(交互 shell) |
-| `history_file` | — | **不支持** |
+| `serverurl` | `rsupervisorctl -s` default | parsed when the client reads the `-c` file |
+| `username` | `-u` default | same as above |
+| `password` | `-p` default | same as above |
+| `prompt` | — | **Not Supported**(interactive shell) |
+| `history_file` | — | **Not Supported** |
 
-> 注意:daemon 本身**不消费** `[supervisorctl]`;它只影响客户端。见 `CLI_COMPAT.md` §5.1.4。
+> Note: the daemon itself does **not consume** `[supervisorctl]`; it only affects the client. See `CLI_COMPAT.md` §5.1.4.
 
-### 4.7 `[include]` → 文件合并(P1)
+### 4.7 `[include]` → file merging (P1)
 
-| INI 字段 | 动作 |
+| INI Field | Action |
 | :--- | :--- |
-| `files` | 相对本文件解析;空白/换行分隔;支持通配符;被包含文件不可再 include |
+| `files` | resolved relative to this file; whitespace/newline-delimited; globs supported; an included file cannot include again |
 
-**示例**
+**Example**
 
 ```ini
 [include]
 files = conf.d/*.ini
 ```
 
-### 4.8 `[rpcinterface:supervisor]` → 容忍(P1)
+### 4.8 `[rpcinterface:supervisor]` → tolerated (P1)
 
-| INI 字段 | 动作 |
+| INI Field | Action |
 | :--- | :--- |
-| `supervisor.rpcinterface_factory` | **忽略**(可解析但丢弃);#5 落地后可据此启用 XML-RPC |
+| `supervisor.rpcinterface_factory` | **ignored**(parsed but discarded); once §7 #5 lands, XML-RPC can be enabled based on it |
 
-> 生产配置**必含**此段,解析器必须接受而非报错。
+> Production configs **always include** this section, so the parser must accept rather than error on it.
 
-### 4.9 `[eventlistener:x]` → 不支持(条件性,#6)
+### 4.9 `[eventlistener:x]` → Not Supported (conditional, §7 #6)
 
-字段与 `[program:x]` 基本一致,另加 `events`(必填)、`buffer_size`(默认 10)、`priority` 默认 `-1`、`redirect_stderr` 必须为 false。
+The fields are largely the same as `[program:x]`, with the additions of `events`(required), `buffer_size`(default 10), `priority` defaulting to `-1`, and `redirect_stderr` must be false.
 
-**决策**:**暂不支持**;若 #6 启用,再映射为独立模型。INI 解析器遇到该段应给出明确错误或忽略并警告。
+**Decision**: **Not supported for now**; if §7 #6 is enabled, map it to a dedicated model later. When the INI parser encounters this section, it should raise a clear error or ignore it with a warning.
 
-### 4.10 `[fcgi-program:x]` → 不支持
+### 4.10 `[fcgi-program:x]` → Not Supported
 
-FastCGI 程序:额外 `socket` / `socket_owner` / `socket_mode`,并复用 program 字段。
+FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the program fields.
 
-**决策**:**不支持**(需 FastCGI socket 转发子系统,复杂且 Go 版亦未实现)。
-
----
-
-## 5. 语法与值格式差异(解析器必须处理)
-
-| 项 | Python INI | 当前 YAML | 需求 |
-| :--- | :--- | :--- | :--- |
-| 注释 | 前导空格 + `;` 或 `#`;`a=b ;comment` 有效,`a=b;comment` 无效 | YAML `#` | INI 注释规则需精确实现 |
-| 引号 | 除 `environment=` 外**不支持引号** | YAML 引号 | INI 值按字面取 |
-| 布尔 | `true/false/yes/no/1/0/on/off`(大小写不敏感) | `true/false` | 新增宽松布尔解析 |
-| `autorestart` | `false` / `unexpected` / `true` | `never/unexpected/always` | 值映射 |
-| `exitcodes` | `0,2`(逗号分隔) | `[0,2]` | 列表解析 |
-| `environment` | `A="1",B="2"`(逗号分隔、值带引号) | map | 专用解析器 |
-| `stdout_logfile` | `AUTO` / `NONE` / 路径 | `None`/路径 | `NONE→禁用`,`AUTO→默认路径` |
-| 宏 | `%(ENV_X)s`/`%(here)s`/`%(program_name)s`/`%(process_num)02d`/`%(numprocs)d`/`%(group_name)s`/`%(host_node_name)s` | 同(expand.rs 已实现) | 复用现有 `MacroExpander` |
-| 键名 | 大小写不敏感、无下划线风格(`startsecs`) | snake_case(`start_secs`) | 别名表 |
-| 多值列表 | `programs`/`files`/`exitcodes` 逗号或空白 | YAML 序列 | 按字段选择分隔规则 |
+**Decision**: **Not supported**(requires a FastCGI socket forwarding subsystem — complex, and not implemented in the Go version either).
 
 ---
 
-## 6. 默认值差异(Python 4.2.5 vs 当前)
+## 5. Syntax & Value-Format Differences (parser must handle)
 
-| 字段 | Python 默认 | 当前默认 | 裁决 |
+| Item | Python INI | Current YAML | Requirement |
 | :--- | :--- | :--- | :--- |
-| `priority` | 999(无上限) | 50,校验 `≤99` | **P1**:放宽到 `0..=999` 或明确拒绝超范围并报错 |
-| `startsecs` | 1 | 3 | 保持 ours(文档化差异) |
-| `startretries` | 3 | 3 | 一致 |
-| `stopwaitsecs` | 10 | 10 | 一致 |
-| `exitcodes` | `[0]` | `[0]` | 一致 |
-| `autorestart` | unexpected | unexpected | 一致 |
-| `logfile_maxbytes` | 50MB | 20MB | 文档化差异 |
-| `logfile_backups` | 10 | 3 | 文档化差异 |
+| Comments | leading whitespace + `;` or `#`; `a=b ;comment` valid, `a=b;comment` invalid | YAML `#` | INI comment rules must be implemented precisely |
+| Quotes | **no quotes supported** except in `environment=` | YAML quotes | INI values taken literally |
+| Booleans | `true/false/yes/no/1/0/on/off`(case-insensitive) | `true/false` | add lenient boolean parsing |
+| `autorestart` | `false` / `unexpected` / `true` | `never/unexpected/always` | value mapping |
+| `exitcodes` | `0,2`(comma-delimited) | `[0,2]` | list parsing |
+| `environment` | `A="1",B="2"`(comma-delimited, quoted values) | map | dedicated parser |
+| `stdout_logfile` | `AUTO` / `NONE` / path | `None`/path | `NONE→disabled`, `AUTO→default path` |
+| Macros | `%(ENV_X)s`/`%(here)s`/`%(program_name)s`/`%(process_num)02d`/`%(numprocs)d`/`%(group_name)s`/`%(host_node_name)s` | same (expand.rs implemented) | reuse existing `MacroExpander` |
+| Key names | case-insensitive, no underscore style (`startsecs`) | snake_case (`start_secs`) | alias table |
+| Multi-value lists | `programs`/`files`/`exitcodes` comma or whitespace | YAML sequences | pick delimiter rules per field |
+
+---
+
+## 6. Default-Value Differences (Python 4.2.5 vs Current)
+
+| Field | Python Default | Current Default | Verdict |
+| :--- | :--- | :--- | :--- |
+| `priority` | 999 (no upper bound) | 50, validates `≤99` | **P1**: relax to `0..=999` or explicitly reject out-of-range with an error |
+| `startsecs` | 1 | 3 | keep ours (documented difference) |
+| `startretries` | 3 | 3 | consistent |
+| `stopwaitsecs` | 10 | 10 | consistent |
+| `exitcodes` | `[0]` | `[0]` | consistent |
+| `autorestart` | unexpected | unexpected | consistent |
+| `logfile_maxbytes` | 50MB | 20MB | documented difference |
+| `logfile_backups` | 10 | 3 | documented difference |
 | `umask` | 022 | None | **P2** |
-| `redirect_stderr` | false | false | 一致 |
+| `redirect_stderr` | false | false | consistent |
 
-> 默认值差异不阻塞加载;建议"配置里显式写了就用显式值",未写时用 ours 默认并在文档标注。
+> Default-value differences do not block loading; recommended: "if a config explicitly writes a value, use the explicit value"; when not written, use the ours default and note it in the docs.
 
 ---
 
-## 7. 需要实现的功能清单(按优先级)
+## 7. Implementation Checklist (by priority)
 
-### P0 — INI 前端基础设施
+### P0 — INI front-end infrastructure
 
-1. **INI 解析器**(新模块 `src/config/ini.rs`):section、`key=value`、注释规则、行续、大小写不敏感键、逐值宏展开。
-2. **后缀识别**:`SupervisorConfig::from_file`(schema.rs:332)按扩展名分派——`.ini`→INI 管线,`.yaml/.yml`→YAML 管线;**两者产出同一 `SupervisorConfig`**。
-3. **值规范化层**:宽松布尔、`autorestart` 三态映射、列表解析(`exitcodes`/`programs`/`files`)、`environment` 专用解析、`AUTO`/`NONE` 日志路径。
-4. **字段别名表**:`startsecs→start_secs`、`startretries→start_retries`、`stopwaitsecs→stop_wait_secs`、`stopsignal→stop_signal`、`exitcodes→exit_codes`、`stdout_logfile→logs.stdout` 等全量映射。
-5. **核心 5 段映射**:`[unix_http_server]`、`[inet_http_server]`、`[supervisord]`(日志子集)、`[program:x]`、`[group:x]`。
+1. **INI parser**(new module `src/config/ini.rs`): sections, `key=value`, comment rules, line continuation, case-insensitive keys, per-value macro expansion.
+2. **Suffix detection**: `SupervisorConfig::from_file`(schema.rs:332) dispatches by extension — `.ini`→INI pipeline, `.yaml/.yml`→YAML pipeline; **both produce the same `SupervisorConfig`**.
+3. **Value-normalization layer**: lenient booleans, `autorestart` three-state mapping, list parsing (`exitcodes`/`programs`/`files`), dedicated `environment` parsing, `AUTO`/`NONE` log paths.
+4. **Field alias table**: full mapping such as `startsecs→start_secs`, `startretries→start_retries`, `stopwaitsecs→stop_wait_secs`, `stopsignal→stop_signal`, `exitcodes→exit_codes`, `stdout_logfile→logs.stdout`.
+5. **Core 5-section mapping**: `[unix_http_server]`, `[inet_http_server]`, `[supervisord]`(logging subset), `[program:x]`, `[group:x]`.
 
 ### P1
 
-6. `[include]` `files`(glob + 合并)。
-7. `[rpcinterface:*]` 容忍(解析并忽略)。
-8. `[supervisorctl]` → CLI 缺省(配合 `CLI_COMPAT.md` `-c`)。
-9. `priority` 范围裁决(`0..=999`)。
+6. `[include]` `files`(glob + merge).
+7. `[rpcinterface:*]` tolerance (parse and ignore).
+8. `[supervisorctl]` → CLI defaults (in coordination with `CLI_COMPAT.md` `-c`).
+9. `priority` range arbitration (`0..=999`).
 
 ### P2
 
-10. `[supervisord]` 运行面字段(`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`identifier`/`environment`/`silent`)→ 依赖 #12。
-11. `[unix_http_server]` `chmod`/`chown`。
-12. stdout/stderr 独立 `maxbytes`/`backups`(当前 `logs` 单值共享)。
+10. `[supervisord]` runtime-surface fields (`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`identifier`/`environment`/`silent`) → depends on §7 #12.
+11. `[unix_http_server]` `chmod`/`chown`.
+12. Independent stdout/stderr `maxbytes`/`backups`(currently a single shared `logs` value).
 
-### 不支持
+### Not Supported
 
-13. `[eventlistener:x]`(条件性,#6)。
-14. `[fcgi-program:x]`(复杂,Go 版亦无)。
-15. `[program:x]` 的 `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`*_events_enabled`/`*_syslog`/`serverurl`。
-16. `[supervisord]` `nocleanup`/`strip_ansi`。
-17. `[supervisorctl]` `prompt`/`history_file`。
+13. `[eventlistener:x]`(conditional, §7 #6).
+14. `[fcgi-program:x]`(complex, not present in the Go version either).
+15. `[program:x]` `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`*_events_enabled`/`*_syslog`/`serverurl`.
+16. `[supervisord]` `nocleanup`/`strip_ansi`.
+17. `[supervisorctl]` `prompt`/`history_file`.
 
 ---
 
-## 8. 验收
+## 8. Acceptance
 
-**P0 验收**:标准生产 `supervisord.conf`(含 `[unix_http_server]`/`[supervisord]`/`[rpcinterface:supervisor]`/`[program:x]`/`[group:x]`)可**字面加载**,宏正确展开,`resolve_programs` 输出与等价 YAML 一致。
+**P0 acceptance**: a standard production `supervisord.conf`(containing `[unix_http_server]`/`[supervisord]`/`[rpcinterface:supervisor]`/`[program:x]`/`[group:x]`) loads **literally**, macros expand correctly, and `resolve_programs` output matches the equivalent YAML.
 
 ```bash
-rsupervisord -c /etc/supervisord.conf          # INI 加载
-rsupervisord -c /etc/rsupervisord.yaml         # YAML 加载(回归)
+rsupervisord -c /etc/supervisord.conf          # INI load
+rsupervisord -c /etc/rsupervisord.yaml         # YAML load (regression)
 ```
 
-**等价性验收**:同一配置分别以 INI / YAML 表达,`resolve_programs()` 结果逐字段相等。
+**Equivalence acceptance**: the same config expressed in INI / YAML respectively, with `resolve_programs()` results field-for-field equal.
 
 ---
 
-## 9. 与其它文档的关系
+## 9. Relationship to Other Documents
 
-- 客户端参数与 `[supervisorctl]` 消费:见 `CLI_COMPAT.md`。
-- `[rpcinterface]` 与 XML-RPC 方法面:见 `SUPERVISORD_COMPAT.md` §7 #5。
-- `[eventlistener:x]`(条件性):见 `SUPERVISORD_COMPAT.md` §7 #6。
-- daemon 运行面(`pidfile`/rlimit 等):见 `SUPERVISORD_COMPAT.md` §7 #12。
+- Client arguments and `[supervisorctl]` consumption: see `CLI_COMPAT.md`.
+- `[rpcinterface]` and the XML-RPC method surface: see `SUPERVISORD_COMPAT.md` §7 #5.
+- `[eventlistener:x]`(conditional): see `SUPERVISORD_COMPAT.md` §7 #6.
+- daemon runtime surface (`pidfile`/rlimit etc.): see `SUPERVISORD_COMPAT.md` §7 #12.

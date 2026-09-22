@@ -1,258 +1,258 @@
-# rsupervisord: XML-RPC 兼容需求 (XMLRPC_COMPAT.md)
+# rsupervisord: XML-RPC Compatibility Requirements (XMLRPC_COMPAT.md)
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.1.0** | Draft / For Review | Rust (Edition 2024) | XML-RPC 线协议、Fault 错误码、`supervisor.*` / `system.*` 方法面、逐方法映射与优先级,目标:标准 `supervisorctl` 直连;可执行基准见 §12 / [`../compat/README.md`](../compat/README.md) |
+| **v1.1.0** | Draft / For Review | Rust (Edition 2024) | XML-RPC wire protocol, Fault codes, `supervisor.*` / `system.*` method surface, per-method mapping and priorities; target: stock `supervisorctl` connect directly; executable baseline per §12 / [`../compat/README.md`](../compat/README.md) |
 
 ---
 
-## 1. 目的与范围
+## 1. Purpose & Scope
 
-回答:**要让标准 `supervisorctl`(Python 4.2.5)直连 rsupervisord,需要实现哪些 XML-RPC 能力、达成什么协议行为。**
+Question answered: **To let a stock `supervisorctl` (Python 4.2.5) connect directly to rsupervisord, which XML-RPC capabilities must be implemented and what on-the-wire behavior must be achieved.**
 
-- **权威基准**:Python Supervisor **4.2.5** 的 `supervisor/rpcinterface.py`(方法面)与 `supervisor/xmlrpc.py`(线协议/Faults/命名空间/`multicall`)。
-- **现状基线**:`src/server/api.rs`(REST 路由 + `AppState`)、`src/server/auth.rs`(Basic auth)、`src/manager/supervisor.rs`(`ManagerHandle` + `ManagerCommand`)。
-- **关联**:CLI 侧参数/退出码见 [`CLI_COMPAT.md`](./CLI_COMPAT.md);日志字节偏移降级见 [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #8;进程组/事件见 §7 #4/#6。
+- **Authoritative baseline**: `supervisor/rpcinterface.py` (method surface) and `supervisor/xmlrpc.py` (wire protocol / Faults / namespaces / `multicall`) of Python Supervisor **4.2.5**.
+- **Current state baseline**: `src/server/api.rs` (REST routes + `AppState`), `src/server/auth.rs` (Basic auth), `src/manager/supervisor.rs` (`ManagerHandle` + `ManagerCommand`).
+- **Related**: CLI-side arguments/exit codes see [`CLI_COMPAT.md`](./CLI_COMPAT.md); log byte-offset degradation see [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #8; process groups/events see §7 #4/#6.
 
-**核心结论(预览)**:XML-RPC 是**纯适配层**——新的 `src/server/xrpc.rs` 挂在现有 Axum 路由的 `/RPC2`,复用 `AppState`/`ManagerHandle`/Basic auth,把 XML-RPC 调用翻译为既有的 `ManagerCommand`。**无需改动执行核心**;主要工作是**编解码、Fault 映射、名称语义(namespec/组)、日志降级**。
+**Core conclusion (preview)**: XML-RPC is a **pure adaptation layer** — a new `src/server/xrpc.rs` mounts on the existing Axum route `/RPC2`, reuses `AppState`/`ManagerHandle`/Basic auth, and translates XML-RPC calls into the existing `ManagerCommand`. **No changes to the execution core are required**; the main work is **encode/decode, Fault mapping, name semantics (namespec/group), and log degradation**.
 
 ---
 
-## 2. 优先级定义
+## 2. Priority Definitions
 
-| 级别 | 含义 |
+| Level | Meaning |
 | :--- | :--- |
-| **P0** | 让 stock `supervisorctl` 的日常命令直连可用(status/start/stop/restart/signal/tail/maintail/version/shutdown/reread/update/all)。 |
-| **P1** | 完整覆盖其余只读/辅助方法(clear、read*、avail/getAllConfigInfo、system.* 内省、group 级 signal)。 |
-| **P2 / 搁置** | 尚无对应基础能力的项(当前无)。 |
-| **不支持 / 降级** | 复杂或与架构冲突,明确声明降级行为。 |
+| **P0** | Make the everyday commands of a stock `supervisorctl` usable via direct connection (status/start/stop/restart/signal/tail/maintail/version/shutdown/reread/update/all). |
+| **P1** | Full coverage of the remaining read-only/auxiliary methods (clear, read*, avail/getAllConfigInfo, system.* introspection, group-level signal). |
+| **P2 / deferred** | Items with no corresponding underlying capability yet (currently none). |
+| **Not supported / degraded** | Complex or conflicting with the architecture; the degraded behavior is explicitly declared. |
 
 ---
 
-## 3. 线协议要求(wire protocol)
+## 3. Wire Protocol Requirements (wire protocol)
 
-| 项 | Python 行为 | rsupervisord 要求 |
+| Item | Python behavior | rsupervisord requirement |
 | :--- | :--- | :--- |
-| 端点 | HTTP `POST` 到路径 **`/RPC2`** | 新增路由 `/RPC2`,并入现有 `build_router`(同 UDS/TCP、同进程) |
-| Content-Type | 请求/响应均 `text/xml` | 一致;兼容缺失 `Content-Type` 的宽松客户端 |
-| 请求体 | `<methodCall><methodName>ns.m</methodName><params><param><value>…</value></param></params></methodCall>` | 一致;允许**无 `<params>`** 的零参调用 |
-| 响应体 | `<methodResponse><params><param><value>…</value></param></params></methodResponse>` | 一致 |
-| Fault | `<methodResponse><fault><value><struct>{faultCode:int,faultString:string}</struct></value></fault></methodResponse>`,HTTP 仍 **200** | 一致;Fault 码见 §4 |
-| 鉴权 | HTTP **Basic**(`[inet_http_server]` username/password);UDS 亦适用 | 复用 `src/server/auth.rs` 的 `BasicAuthConfig` / `inet_http_auth_middleware` |
-| 整数 | 32-bit `i4`;时间戳经 `capped_int` 饱和到 `MININT/MAXINT`(2038 问题) | 必须饱和;`getProcessInfo.start/stop/now` 用 `i4` |
-| 布尔 | `<boolean>1</boolean>` / `0` | 一致 |
-| base64 | 用于 `sendProcessStdin` 的二进制 chars | 一致 |
-| dateTime.iso8601 | 解析支持(入站) | 入站可选;出站不产生 |
-| 命名空间 | `supervisor.*` 与 `system.*`;**方法名必须恰有 2 段点分**(CVE-2017-11610 防护) | 严格 2 段;拒绝 `_` 前缀方法与属性遍历 |
-| 未知方法 | `Fault(1 UNKNOWN_METHOD)` | 一致 |
-| 参数错误 | `Fault(2 INCORRECT_PARAMETERS)` | 一致 |
-| 长操作 | 返回**回调函数**(`NOT_DONE_YET`),由 select 循环分块续跑(如 `startProcess(wait=True)`) | **降级**:同步 `await` 后一次性返回;语义结果一致,不模拟分块 |
-| `system.multicall` | 顺序执行,逐项返回结果或 fault;禁止递归 multicall | 一致(递归拒绝返回 `INCORRECT_PARAMETERS`) |
+| Endpoint | HTTP `POST` to path **`/RPC2`** | Add a `/RPC2` route, integrated into the existing `build_router` (same UDS/TCP, same process) |
+| Content-Type | `text/xml` for both request and response | Match; tolerate lenient clients missing `Content-Type` |
+| Request body | `<methodCall><methodName>ns.m</methodName><params><param><value>…</value></param></params></methodCall>` | Match; allow zero-argument calls **without `<params>`** |
+| Response body | `<methodResponse><params><param><value>…</value></param></params></methodResponse>` | Match |
+| Fault | `<methodResponse><fault><value><struct>{faultCode:int,faultString:string}</struct></value></fault></methodResponse>`, HTTP still **200** | Match; Fault codes see §4 |
+| Authentication | HTTP **Basic** (`[inet_http_server]` username/password); also applies to UDS | Reuse `BasicAuthConfig` / `inet_http_auth_middleware` from `src/server/auth.rs` |
+| Integer | 32-bit `i4`; timestamps saturated via `capped_int` to `MININT/MAXINT` (2038 problem) | Must saturate; `getProcessInfo.start/stop/now` use `i4` |
+| Boolean | `<boolean>1</boolean>` / `0` | Match |
+| base64 | Used for the binary chars of `sendProcessStdin` | Match |
+| dateTime.iso8601 | Parse support (inbound) | Inbound optional; none produced outbound |
+| Namespace | `supervisor.*` and `system.*`; **method names must have exactly 2 dot-separated segments** (CVE-2017-11610 mitigation) | Strictly 2 segments; reject `_`-prefixed methods and attribute traversal |
+| Unknown method | `Fault(1 UNKNOWN_METHOD)` | Match |
+| Argument error | `Fault(2 INCORRECT_PARAMETERS)` | Match |
+| Long-running operations | Return a **callback function** (`NOT_DONE_YET`), continued in chunks by the select loop (e.g. `startProcess(wait=True)`) | **Degraded**: `await` synchronously and return once; semantically equivalent result, chunking not simulated |
+| `system.multicall` | Executes sequentially, returns a result or fault per item; recursive multicall forbidden | Match (recursion rejected with `INCORRECT_PARAMETERS`) |
 
-**入站解析注意**:Python 的 `loads` 用 `iterparse` 且对 `array/struct/value` 有特殊反序列化;实现时按标准 XML-RPC 解析即可,但需容忍其宽松点(缺 `<params>`、空 `<value>`)。
+**Inbound parsing note**: Python's `loads` uses `iterparse` with special deserialization for `array/struct/value`; implementation may parse per standard XML-RPC, but must tolerate Python's lenient points (missing `<params>`, empty `<value>`).
 
 ---
 
-## 4. Fault 错误码表(`supervisor/xmlrpc.py::Faults`)
+## 4. Fault Code Table (`supervisor/xmlrpc.py::Faults`)
 
-所有业务错误必须映射为下表的 `faultCode`/`faultString`(中英文字符串以 Python 为准,便于客户端识别):
+All business errors must map to the `faultCode`/`faultString` in the table below (the Chinese/English strings follow Python for easy client recognition):
 
-| Code | 名称 | 触发场景 | rsupervisord 来源 |
+| Code | Name | Triggering scenario | rsupervisord source |
 | :--- | :--- | :--- | :--- |
-| 1 | `UNKNOWN_METHOD` | 方法不存在/命名空间非法 | 适配层直接返回 |
-| 2 | `INCORRECT_PARAMETERS` | 参数个数/类型错(含 TypeError) | 适配层 |
-| 3 | `BAD_ARGUMENTS` | 参数值非法 | 适配层(如有) |
-| 4 | `SIGNATURE_UNSUPPORTED` | `system.methodHelp/Signature` 未找到 | `system.*` |
-| 6 | `SHUTDOWN_STATE` | daemon 处于 SHUTDOWN/RESTARTING,拒绝调用 | 新增 mood/状态位 |
-| 10 | `BAD_NAME` | 名称不存在 | `ProgramError::NotFound` / 组不存在 |
-| 11 | `BAD_SIGNAL` | 信号名/编号非法 | 信号解析失败 |
-| 20 | `NO_FILE` | 日志文件不存在 / stdin EPIPE | `readFile`/日志路径缺失;stdin 写失败 |
-| 21 | `NOT_EXECUTABLE` | command 不可执行/权限不足 | `StartFailed`(可执行性) |
-| 30 | `FAILED` | 通用失败 | 多数 `ProgramError` 兜底 |
-| 40 | `ABNORMAL_TERMINATION` | 等待启动期间非 STARTING/RUNNING | 启动 wait 超时/异常 |
-| 50 | `SPAWN_ERROR` | 派生失败(spawnerr) | `StartFailed` |
-| 60 | `ALREADY_STARTED` | 已在运行 | `AlreadyRunning` |
-| 70 | `NOT_RUNNING` | 未运行 | `NotRunning` |
-| 80 | `SUCCESS` | (仅用于批量结果 `status` 字段) | 批量结果 |
-| 90 | `ALREADY_ADDED` | 组已存在 | `addProcessGroup` |
-| 91 | `STILL_RUNNING` | 删除组时仍有进程运行 | `removeProcessGroup` |
-| 92 | `CANT_REREAD` | 配置重载失败 | `reloadConfig` 解析/校验失败 |
+| 1 | `UNKNOWN_METHOD` | Method not found / invalid namespace | Returned directly by the adaptation layer |
+| 2 | `INCORRECT_PARAMETERS` | Wrong argument count/type (incl. TypeError) | Adaptation layer |
+| 3 | `BAD_ARGUMENTS` | Invalid argument value | Adaptation layer (where applicable) |
+| 4 | `SIGNATURE_UNSUPPORTED` | `system.methodHelp/Signature` not found | `system.*` |
+| 6 | `SHUTDOWN_STATE` | Daemon in SHUTDOWN/RESTARTING state, call refused | New mood/state bits |
+| 10 | `BAD_NAME` | Name does not exist | `ProgramError::NotFound` / group does not exist |
+| 11 | `BAD_SIGNAL` | Invalid signal name/number | Signal parsing failure |
+| 20 | `NO_FILE` | Log file does not exist / stdin EPIPE | `readFile`/missing log path; stdin write failure |
+| 21 | `NOT_EXECUTABLE` | command not executable / insufficient permission | `StartFailed` (executability) |
+| 30 | `FAILED` | Generic failure | Fallback for most `ProgramError`s |
+| 40 | `ABNORMAL_TERMINATION` | Not STARTING/RUNNING during start wait | Start wait timeout/abnormal |
+| 50 | `SPAWN_ERROR` | Spawn failed (spawnerr) | `StartFailed` |
+| 60 | `ALREADY_STARTED` | Already running | `AlreadyRunning` |
+| 70 | `NOT_RUNNING` | Not running | `NotRunning` |
+| 80 | `SUCCESS` | (Only used for the `status` field of batch results) | Batch results |
+| 90 | `ALREADY_ADDED` | Group already exists | `addProcessGroup` |
+| 91 | `STILL_RUNNING` | Processes still running when removing a group | `removeProcessGroup` |
+| 92 | `CANT_REREAD` | Configuration reload failed | `reloadConfig` parse/validation failure |
 
-> `ProgramError`(`src/error.rs`)到 Fault 的建议映射:`AlreadyRunning→60`、`NotRunning→70`、`NotFound→10`、`StartFailed→50/21`、`Timeout→40`、`InvalidState→40/70`、`ShuttingDown→6`、其余→`30`。
+> Recommended `ProgramError` (`src/error.rs`) → Fault mapping: `AlreadyRunning→60`, `NotRunning→70`, `NotFound→10`, `StartFailed→50/21`, `Timeout→40`, `InvalidState→40/70`, `ShuttingDown→6`, everything else→`30`.
 
 ---
 
-## 5. 方法总览
+## 5. Method Overview
 
-### 5.1 `supervisor` 命名空间(共 29 个入口,含别名)
+### 5.1 `supervisor` namespace (29 entries total, incl. aliases)
 
-| 方法 | 优先级 | Python 签名 | 当前映射 / 实现途径 | 差异 / 降级 |
+| Method | Priority | Python signature | Current mapping / implementation path | Differences / degradation |
 | :--- | :--- | :--- | :--- | :--- |
-| `getAPIVersion` | **P0** | `() → str` | 常量 `"3.0"`(`getVersion` 别名同返) | 直接返回 |
-| `getSupervisorVersion` | **P0** | `() → str` | rsupervisord 版本号 | 返回自身版本(非 "4.2.5") |
-| `getIdentification` | **P0** | `() → str` | `server`/`[supervisord] identifier`,或默认 `supervisor` | 可配置,默认 `supervisor` |
-| `getState` | **P0** | `() → {statecode,statename}` | 新增 mood 状态(RUNNING/SHUTDOWN/RESTARTING/FATAL) | 需引入 supervisor mood 概念 |
-| `getPID` | **P0** | `() → int` | `std::process::id()` | 直接 |
-| `getAllProcessInfo` | **P0** | `() → [struct]` | `ManagerHandle::get_all_status` → **getProcessInfo 字段表**(§6) | 字段适配 |
-| `getProcessInfo` | **P0** | `(name) → struct` | `get_status(name)` + namespec 解析 | 字段/description 适配 |
-| `startProcess` | **P0** | `(name, wait=True) → bool` | `ManagerCommand::StartProgram`(namespec→进程/组/`*`) | 同步等待 |
-| `startProcessGroup` | **P0** | `(name, wait=True) → [struct]` | `StartGroup` | 结果 struct 适配 |
-| `startAllProcesses` | **P0** | `(wait=True) → [struct]` | `StartAll` | 结果 struct 适配 |
-| `stopProcess` | **P0** | `(name, wait=True) → bool` | `StopProgram` | 同步等待 |
-| `stopProcessGroup` | **P0** | `(name, wait=True) → [struct]` | `StopGroup` | 结果 struct 适配 |
-| `stopAllProcesses` | **P0** | `(wait=True) → [struct]` | `StopAll` | 结果 struct 适配 |
-| `signalProcess` | **P0** | `(name, signal) → bool` | `SignalProgram` | 信号名↔`StopSignal` |
-| `signalProcessGroup` | **P1** | `(name, signal) → [struct]` | 组内逐进程 signal | 结果 struct 适配 |
-| `signalAllProcesses` | **P1** | `(signal) → [struct]` | 全量逐进程 signal | 结果 struct 适配 |
-| `tailProcessStdoutLog` | **P0** | `(name, offset, length) → [str, int, bool]` | `subscribe/read_logs` + **#8 降级** | **行级降级**:见 §7.1 |
-| `tailProcessStderrLog` | **P0** | `(name, offset, length) → [str, int, bool]` | 同上(stderr 合并语义) | 行级降级 |
-| `readLog` | **P0** | `(offset, length) → str` | 主日志(`logging.file`)读取 | maintail;见 §7.2 |
-| `readProcessStdoutLog` | **P1** | `(name, offset, length) → str` | 程序日志读取 | 行级降级 |
-| `readProcessStderrLog` | **P1** | `(name, offset, length) → str` | 程序 stderr 日志 | 行级降级 |
-| `clearLog` | **P1** | `() → bool` | 主日志清空/重开 | 见 §7.2 |
-| `clearProcessLogs` | **P1** | `(name) → bool` | 程序日志清空 | 轮转重置 |
-| `clearAllProcessLogs` | **P1** | `() → [struct]` | 全量清空 | 结果 struct 适配 |
-| `reloadConfig` | **P0** | `() → [[added,changed,removed]]` | `ReloadConfig` → `ReloadSummary` | 见 §7.3 |
-| `addProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::AddProcessGroup`(pending 配置激活) | Python 语义:未在源配置 → `BAD_NAME`;已激活 → `ALREADY_ADDED` |
-| `removeProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::RemoveProcessGroup`(仅移除活动组,源配置保留) | Python 语义:未激活 → `BAD_NAME`;运行中 → `STILL_RUNNING` |
-| `getAllConfigInfo` | **P1** | `() → [struct]` | 配置(raw)+ `inuse` 计算 | 字段子集,见 §7.4 |
-| `sendProcessStdin` | **P1** | `(name, chars) → bool` | `SendStdin`(依赖 **#7**) | #7 未落地前返回 `FAILED`/`NO_FILE` |
-| `sendRemoteCommEvent` | **P0** | `(type, data) → bool` | `send_remote_comm_event` → `REMOTE_COMMUNICATION` | 直达事件监听池 |
-| `shutdown` | **P0** | `() → bool` | `ManagerCommand::Shutdown` | 直接 |
-| `restart` | **P0** | `() → bool` | `ManagerCommand::RestartDaemon`(停全部→重读配置→再启动) | **语义差异**:见 §7.5(与 hot-reload 分离) |
-| 别名 `getVersion`/`readMainLog`/`readProcessLog`/`tailProcessLog`/`clearProcessLog` | **P0/P1** | 同对应方法 | 直接转发 | 零成本,必做 |
+| `getAPIVersion` | **P0** | `() → str` | Constant `"3.0"` (the `getVersion` alias returns the same) | Return directly |
+| `getSupervisorVersion` | **P0** | `() → str` | rsupervisord version number | Returns our own version (not "4.2.5") |
+| `getIdentification` | **P0** | `() → str` | `server`/`[supervisord] identifier`, or default `supervisor` | Configurable, default `supervisor` |
+| `getState` | **P0** | `() → {statecode,statename}` | New mood states (RUNNING/SHUTDOWN/RESTARTING/FATAL) | Requires introducing the supervisor mood concept |
+| `getPID` | **P0** | `() → int` | `std::process::id()` | Direct |
+| `getAllProcessInfo` | **P0** | `() → [struct]` | `ManagerHandle::get_all_status` → **getProcessInfo field table** (§6) | Field adaptation |
+| `getProcessInfo` | **P0** | `(name) → struct` | `get_status(name)` + namespec parsing | Field/description adaptation |
+| `startProcess` | **P0** | `(name, wait=True) → bool` | `ManagerCommand::StartProgram` (namespec→process/group/`*`) | Synchronous wait |
+| `startProcessGroup` | **P0** | `(name, wait=True) → [struct]` | `StartGroup` | Result struct adaptation |
+| `startAllProcesses` | **P0** | `(wait=True) → [struct]` | `StartAll` | Result struct adaptation |
+| `stopProcess` | **P0** | `(name, wait=True) → bool` | `StopProgram` | Synchronous wait |
+| `stopProcessGroup` | **P0** | `(name, wait=True) → [struct]` | `StopGroup` | Result struct adaptation |
+| `stopAllProcesses` | **P0** | `(wait=True) → [struct]` | `StopAll` | Result struct adaptation |
+| `signalProcess` | **P0** | `(name, signal) → bool` | `SignalProgram` | Signal name↔`StopSignal` |
+| `signalProcessGroup` | **P1** | `(name, signal) → [struct]` | Signal per process within the group | Result struct adaptation |
+| `signalAllProcesses` | **P1** | `(signal) → [struct]` | Signal across all processes | Result struct adaptation |
+| `tailProcessStdoutLog` | **P0** | `(name, offset, length) → [str, int, bool]` | `subscribe/read_logs` + **#8 degradation** | **Line-level degradation**: see §7.1 |
+| `tailProcessStderrLog` | **P0** | `(name, offset, length) → [str, int, bool]` | Same as above (stderr merged semantics) | Line-level degradation |
+| `readLog` | **P0** | `(offset, length) → str` | Read main log (`logging.file`) | maintail; see §7.2 |
+| `readProcessStdoutLog` | **P1** | `(name, offset, length) → str` | Read program log | Line-level degradation |
+| `readProcessStderrLog` | **P1** | `(name, offset, length) → str` | Program stderr log | Line-level degradation |
+| `clearLog` | **P1** | `() → bool` | Clear/reopen main log | see §7.2 |
+| `clearProcessLogs` | **P1** | `(name) → bool` | Clear program log | Rotation reset |
+| `clearAllProcessLogs` | **P1** | `() → [struct]` | Clear all | Result struct adaptation |
+| `reloadConfig` | **P0** | `() → [[added,changed,removed]]` | `ReloadConfig` → `ReloadSummary` | see §7.3 |
+| `addProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::AddProcessGroup` (activate pending config) | Python semantics: not in source config → `BAD_NAME`; already active → `ALREADY_ADDED` |
+| `removeProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::RemoveProcessGroup` (removes only the active group; source config preserved) | Python semantics: not active → `BAD_NAME`; running → `STILL_RUNNING` |
+| `getAllConfigInfo` | **P1** | `() → [struct]` | Config (raw) + `inuse` computation | Field subset, see §7.4 |
+| `sendProcessStdin` | **P1** | `(name, chars) → bool` | `SendStdin` (depends on **#7**) | Return `FAILED`/`NO_FILE` until #7 lands |
+| `sendRemoteCommEvent` | **P0** | `(type, data) → bool` | `send_remote_comm_event` → `REMOTE_COMMUNICATION` | Straight to the event listener pool |
+| `shutdown` | **P0** | `() → bool` | `ManagerCommand::Shutdown` | Direct |
+| `restart` | **P0** | `() → bool` | `ManagerCommand::RestartDaemon` (stop all→re-read config→start again) | **Semantics difference**: see §7.5 (kept separate from hot reload) |
+| Aliases `getVersion`/`readMainLog`/`readProcessLog`/`tailProcessLog`/`clearProcessLog` | **P0/P1** | Same as the corresponding method | Forward directly | Zero cost, required |
 
-### 5.2 `system` 命名空间(内省)
+### 5.2 `system` namespace (introspection)
 
-| 方法 | 优先级 | 签名 | 说明 |
+| Method | Priority | Signature | Description |
 | :--- | :--- | :--- | :--- |
-| `system.listMethods` | **P1** | `() → [str]` | 返回全部可用方法名(含命名空间前缀),字典序排序 |
-| `system.methodHelp` | **P1** | `(name) → str` | 返回方法 docstring;未找到 → `SIGNATURE_UNSUPPORTED` |
-| `system.methodSignature` | **P1** | `(name) → [rtype, ptype...]` | 从 docstring `@param/@return` 解析 |
-| `system.multicall` | **P1** | `(calls) → [result]` | 逐项 `{methodName, params}`,失败项返回 `{faultCode,faultString}`;禁止递归 |
+| `system.listMethods` | **P1** | `() → [str]` | Returns all available method names (with namespace prefix), sorted lexicographically |
+| `system.methodHelp` | **P1** | `(name) → str` | Returns the method docstring; not found → `SIGNATURE_UNSUPPORTED` |
+| `system.methodSignature` | **P1** | `(name) → [rtype, ptype...]` | Parsed from docstring `@param/@return` |
+| `system.multicall` | **P1** | `(calls) → [result]` | Per item `{methodName, params}`; failed items return `{faultCode,faultString}`; recursion forbidden |
 
-> 内省方法可用**静态注册表**(方法名→(doc, 签名))实现,不必反射 Rust 类型。
+> Introspection methods can be implemented with a **static registry** (method name→(doc, signature)); no need to reflect over Rust types.
 
 ---
 
-## 6. `getProcessInfo` 返回字段(必须逐字段对齐)
+## 6. `getProcessInfo` Return Fields (must align field by field)
 
-| 字段 | 类型 | Python 来源 | rsupervisord 来源 / 说明 |
+| Field | Type | Python source | rsupervisord source / description |
 | :--- | :--- | :--- | :--- |
 | `name` | string | `config.name` | `ProgramStatus.name` |
 | `group` | string | `group.config.name` | `ProgramStatus.group` |
-| `start` | int | `laststart`(capped) | 需记录 last start UNIX 秒 |
-| `stop` | int | `laststop`(capped) | 需记录 last stop |
-| `now` | int | `time.time()`(capped) | 当前时间 |
-| `state` | int | `ProcessStates` | **需 0..7 码映射**,见下 |
+| `start` | int | `laststart` (capped) | Need to record last start UNIX seconds |
+| `stop` | int | `laststop` (capped) | Need to record last stop |
+| `now` | int | `time.time()` (capped) | Current time |
+| `state` | int | `ProcessStates` | **Needs 0..7 code mapping**, see below |
 | `statename` | string | `getProcessStateDescription` | `STARTING/RUNNING/BACKOFF/STOPPING/STOPPED/EXITED/FATAL/UNKNOWN` |
-| `spawnerr` | string | `spawnerr or ''` | 启动错误文本(空串默认) |
-| `exitstatus` | int | `exitstatus or 0` | `exit_code` 默认 0 |
-| `logfile` | string | stdout 路径(兼容别名) | 同 `stdout_logfile` |
-| `stdout_logfile` | string | stdout 日志路径 | 空则 `''` |
-| `stderr_logfile` | string | stderr 日志路径 | 空则 `''` |
-| `pid` | int | `process.pid` | `pid` 默认 0(非 `null`) |
-| `description` | string | `_interpretProcessInfo` | 见下 |
+| `spawnerr` | string | `spawnerr or ''` | Startup error text (empty string by default) |
+| `exitstatus` | int | `exitstatus or 0` | `exit_code` defaults to 0 |
+| `logfile` | string | stdout path (compat alias) | Same as `stdout_logfile` |
+| `stdout_logfile` | string | stdout log path | `''` if empty |
+| `stderr_logfile` | string | stderr log path | `''` if empty |
+| `pid` | int | `process.pid` | `pid` defaults to 0 (not `null`) |
+| `description` | string | `_interpretProcessInfo` | See below |
 
-**`state` 码映射**(Python `ProcessStates`):`STOPPED=0, STARTING=10, RUNNING=20, BACKOFF=30, STOPPING=40, EXITED=100, FATAL=200, UNKNOWN=1000`。rsupervisord 的 `ProgramState`(`Stopped/Starting/Running/Backoff/Stopping/Exited/Fatal`)需映射到上述码。
+**`state` code mapping** (Python `ProcessStates`): `STOPPED=0, STARTING=10, RUNNING=20, BACKOFF=30, STOPPING=40, EXITED=100, FATAL=200, UNKNOWN=1000`. rsupervisord's `ProgramState` (`Stopped/Starting/Running/Backoff/Stopping/Exited/Fatal`) must map to the codes above.
 
-**`description` 规则**(`_interpretProcessInfo`):
-- RUNNING → `"pid {pid}, uptime {H:MM:SS}"`(uptime = now - start,负值归零)
-- FATAL/BACKOFF → `spawnerr`(空则 `unknown error (try "tail {name}")`)
-- STOPPED/EXITED → 有 start 则本地时间 `"%b %d %I:%M %p"`;否则 `"Not started"`
-- 其它 → `""`
+**`description` rules** (`_interpretProcessInfo`):
+- RUNNING → `"pid {pid}, uptime {H:MM:SS}"` (uptime = now - start, negative values clamped to zero)
+- FATAL/BACKOFF → `spawnerr` (or `unknown error (try "tail {name}")` if empty)
+- STOPPED/EXITED → local time `"%b %d %I:%M %p"` if a start exists; otherwise `"Not started"`
+- Others → `""`
 
 ---
 
-## 7. 重点方法的语义与降级
+## 7. Semantics & Degradation of Key Methods
 
-### 7.1 `tail*Log`(P0,依赖 #8 降级)
+### 7.1 `tail*Log` (P0, depends on #8 degradation)
 
-- **Python 语义**:`tailProcessStdoutLog(name, offset, length) → [bytes, offset, overflow]`。从 `offset` 读至多 `length` 字节;若总长 > `offset+length`,置 `overflow=True` 并把 offset 对齐到日志末尾;返回的 offset 恒为"最后读取位置 +1"。
-- **rsupervisord 降级**(与 [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #8 一致):
-  - `offset` = 行级 ring buffer 内**行索引**;`length` = **行数**;返回 `[文本, 新行游标, overflow]`。
-  - **极大 offset(`0x7fffffffffffffff`,`supervisorctl tail -f` 约定)饱和为"从窗末追"**。
-  - 深历史不可达(仅保留窗)、daemon 重启窗口归零——**必须在文档声明**。
-- **验收**:真 `supervisorctl tail -f <name>` 可用(浅尾追)。
+- **Python semantics**: `tailProcessStdoutLog(name, offset, length) → [bytes, offset, overflow]`. Reads up to `length` bytes from `offset`; if total length > `offset+length`, set `overflow=True` and align offset to the end of the log; the returned offset is always "last read position + 1".
+- **rsupervisord degradation** (consistent with [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #8):
+  - `offset` = **line index** in the line-level ring buffer; `length` = **number of lines**; returns `[text, new line cursor, overflow]`.
+  - **A max offset (`0x7fffffffffffffff`, the `supervisorctl tail -f` convention) is saturated to "follow from the end of the window"**.
+  - Deep history unreachable (window only), window resets on daemon restart — **must be declared in the documentation**.
+- **Acceptance**: a real `supervisorctl tail -f <name>` works (shallow tail follow).
 
-### 7.2 `readLog` / `clearLog`(maintail)
+### 7.2 `readLog` / `clearLog` (maintail)
 
-- `readLog(offset,length)`:读主日志文件(`logging.file`)。无文件 → `NO_FILE`。
-- `clearLog`:`supervisorctl maintail` 依赖;实现为截断/重开主日志文件。
-- 与程序日志一样走**行级降级**;`maintail -f` 同 `tail -f` 处理。
+- `readLog(offset,length)`: reads the main log file (`logging.file`). No file → `NO_FILE`.
+- `clearLog`: relied upon by `supervisorctl maintail`; implemented as truncating/reopening the main log file.
+- Follows the same **line-level degradation** as program logs; `maintail -f` handled like `tail -f`.
 
-### 7.3 `reloadConfig`(P0)
+### 7.3 `reloadConfig` (P0)
 
-- **Python 返回**:`[[added, changed, removed]]`(三段名称数组,注意**外层再包一层数组**)。
-- **rsupervisord 映射**:`ManagerHandle::reload_config` 返回 `ReloadSummary` → 拆出 added/changed/removed 的名称列表。
-- **解析/校验失败** → `Fault(92 CANT_REREAD, <细节>)`。
-- **注意**:与 `supervisorctl reread`(仅检测)/`update`(应用)的关系见 [`CLI_COMPAT.md`](./CLI_COMPAT.md) §5.1.2。
+- **Python return**: `[[added, changed, removed]]` (three arrays of names; note the **outer extra wrapping array**).
+- **rsupervisord mapping**: `ManagerHandle::reload_config` returns `ReloadSummary` → split out the added/changed/removed name lists.
+- **Parse/validation failure** → `Fault(92 CANT_REREAD, <details>)`.
+- **Note**: the relationship to `supervisorctl reread` (detect only) / `update` (apply) see [`CLI_COMPAT.md`](./CLI_COMPAT.md) §5.1.2.
 
-### 7.4 `getAllConfigInfo`(P1,`supervisorctl avail`)
+### 7.4 `getAllConfigInfo` (P1, `supervisorctl avail`)
 
-Python 返回每个 program(组被摊平)的**配置快照**,键含:`autostart, directory, uid, command, exitcodes, group, group_prio, inuse, killasgroup, name, process_prio, redirect_stderr, startretries, startsecs, stdout_capture_maxbytes, stdout_events_enabled, stdout_logfile, stdout_logfile_backups, stdout_logfile_maxbytes, stdout_syslog, stopsignal(int), stopwaitsecs, stderr_* , serverurl`,且 `Automatic→'auto'`、`None→'none'`。
+Python returns a **configuration snapshot** per program (groups flattened), keys include: `autostart, directory, uid, command, exitcodes, group, group_prio, inuse, killasgroup, name, process_prio, redirect_stderr, startretries, startsecs, stdout_capture_maxbytes, stdout_events_enabled, stdout_logfile, stdout_logfile_backups, stdout_logfile_maxbytes, stdout_syslog, stopsignal(int), stopwaitsecs, stderr_* , serverurl`, with `Automatic→'auto'`, `None→'none'`.
 
-- **要求**:返回字段**超集/子集均可能被客户端读取**,至少提供上表存在映射的字段;缺失字段用 `'none'`/默认值填充以免客户端 KeyError。
-- `inuse` = 该组当前是否在运行注册表中。
+- **Requirement**: the returned fields may be read by clients **regardless of superset/subset**; at minimum provide the fields in the table above that have a mapping; fill missing fields with `'none'`/default values to avoid client KeyErrors.
+- `inuse` = whether the group is currently in the running registry.
 
-### 7.5 `restart` vs hot-reload(语义差异)
+### 7.5 `restart` vs hot reload (semantics difference)
 
-- Python `restart`:置 daemon mood 为 `RESTARTING`,进程退出后由外部(init/systemd/supervisor 自身)**重新拉起**,配置随之生效。
-- rsupervisord 的"热重载"是 `reloadConfig` 的应用路径,**不是** `restart`。
-- **裁决**:`restart` 已实现为 `ManagerCommand::RestartDaemon`(**停全部 → 重读配置 → 再启动**,见 `manager/supervisor.rs::execute_restart_daemon`),语义与 Python `reload`/`restart` 对齐。与 hot-reload 的边界:
-  - `supervisor.restart` / CLI `reload` → **重启 daemon**(停全部、重建实例、autostart 重启)。
-  - `supervisor.reloadConfig` / CLI `reload-config` / `config reload` → **零停机热重载**(增量 diff,未变化程序保 PID 在线)。
-- **不要把 hot-reload 嫁接到 `restart`**(与 `CLI_COMPAT.md` P0 的 `reload` 语义裁决一致)。
+- Python `restart`: sets the daemon mood to `RESTARTING`; after the process exits, it is **brought back up externally** (init/systemd/supervisor itself), and configuration takes effect accordingly.
+- rsupervisord's "hot reload" is the application path of `reloadConfig`, **not** `restart`.
+- **Ruling**: `restart` is implemented as `ManagerCommand::RestartDaemon` (**stop all → re-read config → start again**, see `manager/supervisor.rs::execute_restart_daemon`), aligned with Python `reload`/`restart` semantics. The boundary with hot reload:
+  - `supervisor.restart` / CLI `reload` → **restart the daemon** (stop all, rebuild instances, autostart restarts).
+  - `supervisor.reloadConfig` / CLI `reload-config` / `config reload` → **zero-downtime hot reload** (incremental diff, unchanged programs keep PIDs online).
+- **Do not graft hot reload onto `restart`** (consistent with the semantics ruling for `reload` at P0 in `CLI_COMPAT.md`).
 
 ### 7.6 `sendProcessStdin` / `sendRemoteCommEvent`
 
-- `sendProcessStdin`:映射 `ManagerCommand::SendStdin`,**完全依赖 #7**(stdin piped + 背压通道)。#7 前应返回 `NOT_RUNNING`/`FAILED`;参数非字符串 → `INCORRECT_PARAMETERS`;EPIPE → `NO_FILE`。
-- `sendRemoteCommEvent`:依赖 **#6** EventHub→listener;未落地时 `Fault(UNKNOWN_METHOD)` 或 `FAILED`。
+- `sendProcessStdin`: maps to `ManagerCommand::SendStdin`, **fully depends on #7** (stdin piped + backpressure channel). Before #7, return `NOT_RUNNING`/`FAILED`; non-string argument → `INCORRECT_PARAMETERS`; EPIPE → `NO_FILE`.
+- `sendRemoteCommEvent`: depends on **#6** EventHub→listener; until it lands, `Fault(UNKNOWN_METHOD)` or `FAILED`.
 
 ---
 
-## 8. 架构落点
+## 8. Architecture Placement
 
-- **新模块**:`src/server/xrpc.rs`,导出 `pub fn xrpc_router() -> Router`,在 `src/server/mod.rs` 注册,并在 `build_router(state)` 中 `merge`(路径 `/RPC2`,与 `/api/v1/*` 并存)。
-- **复用**:`AppState { manager: ManagerHandle, basic_auth, .. }`;Basic auth 复用 `src/server/auth.rs`。
-- **编解码**:引入纯 Rust XML-RPC 编解码(自实现或轻量 crate),**不引入 Python 依赖**;Faults 用枚举常量(§4)。
-- **状态位**:新增 supervisor mood(`RUNNING/SHUTDOWN/RESTARTING/FATAL`)以支撑 `getState`/`restart`/`SHUTDOWN_STATE`。
-- **名称语义**:实现 `namespec` 解析(`group:name`、`group:*`、裸名),对齐 [`CLI_COMPAT.md`](./CLI_COMPAT.md) §4.3。
+- **New module**: `src/server/xrpc.rs`, exporting `pub fn xrpc_router() -> Router`, registered in `src/server/mod.rs`, and `merge`d in `build_router(state)` (path `/RPC2`, coexisting with `/api/v1/*`).
+- **Reuse**: `AppState { manager: ManagerHandle, basic_auth, .. }`; Basic auth reuses `src/server/auth.rs`.
+- **Encode/decode**: introduce a pure-Rust XML-RPC codec (self-implemented or a lightweight crate), **no Python dependency**; Faults as enum constants (§4).
+- **State bits**: add a supervisor mood (`RUNNING/SHUTDOWN/RESTARTING/FATAL`) to support `getState`/`restart`/`SHUTDOWN_STATE`.
+- **Name semantics**: implement `namespec` parsing (`group:name`, `group:*`, bare name), aligned with [`CLI_COMPAT.md`](./CLI_COMPAT.md) §4.3.
 
 ---
 
-## 9. 优先级清单(汇总)
+## 9. Priority Checklist (Summary)
 
-**P0(让 stock supervisorctl 可用)**
-1. `/RPC2` 路由 + XML-RPC 编解码 + Basic auth + Faults 映射 + 2 段方法名校验。
-2. `getAPIVersion`/`getVersion`、`getSupervisorVersion`、`getIdentification`、`getState`、`getPID`。
-3. `getAllProcessInfo`、`getProcessInfo`(§6 全字段)。
-4. `startProcess`/`stopProcess` + group + all;`signalProcess`。
-5. `tailProcessStdoutLog`/`tailProcessStderrLog` + 别名;`readLog`(maintail)。
-6. `reloadConfig`;`shutdown`;**`restart`**(daemon 重启语义,§7.5)。
+**P0 (make stock supervisorctl usable)**
+1. `/RPC2` route + XML-RPC codec + Basic auth + Faults mapping + 2-segment method name validation.
+2. `getAPIVersion`/`getVersion`, `getSupervisorVersion`, `getIdentification`, `getState`, `getPID`.
+3. `getAllProcessInfo`, `getProcessInfo` (all fields per §6).
+4. `startProcess`/`stopProcess` + group + all; `signalProcess`.
+5. `tailProcessStdoutLog`/`tailProcessStderrLog` + aliases; `readLog` (maintail).
+6. `reloadConfig`; `shutdown`; **`restart`** (daemon restart semantics, §7.5).
 
 **P1**
-7. `readProcessStdoutLog`/`readProcessStderrLog`、`clearLog`/`clearProcessLogs`/`clearAllProcessLogs`。
-8. `signalProcessGroup`/`signalAllProcesses`、`getAllConfigInfo`。
-9. `sendProcessStdin`(#7 后)、`system.listMethods`/`methodHelp`/`methodSignature`/`multicall`。
-10. `addProcessGroup`/`removeProcessGroup`(pending 配置激活/移除,Python 语义)。
+7. `readProcessStdoutLog`/`readProcessStderrLog`, `clearLog`/`clearProcessLogs`/`clearAllProcessLogs`.
+8. `signalProcessGroup`/`signalAllProcesses`, `getAllConfigInfo`.
+9. `sendProcessStdin` (after #7), `system.listMethods`/`methodHelp`/`methodSignature`/`multicall`.
+10. `addProcessGroup`/`removeProcessGroup` (activate/remove pending config, Python semantics).
 
-**P2 / 搁置**
-11. (已并入 P0:`restart` daemon 重启已实现)
+**P2 / deferred**
+11. (Already folded into P0: `restart` daemon restart is implemented)
 
-**不支持 / 降级**
-12. 长操作回调分块(`NOT_DONE_YET`)→ **同步返回降级**。
-13. `tail`/`read` 深历史 → **行级 ring buffer 降级**(声明式)。
+**Not supported / degraded**
+12. Long-running-operation callback chunking (`NOT_DONE_YET`) → **synchronous-return degradation**.
+13. `tail`/`read` deep history → **line-level ring buffer degradation** (declarative).
 
 ---
 
-## 10. 验收
+## 10. Acceptance
 
-- **端到端**:未改动的 Python `supervisorctl` 用 `-s unix://…`(或 `http://…` + `-u/-p`)直连 rsupervisord,以下命令 **100% 通过**:
-  `status`、`status <name>`、`start/stop/restart <name>`、`start/stop/restart all`、`signal <name> <sig>`、`tail -f <name>`、`maintail`、`version`、`pid`、`reread`、`update`、`shutdown`。
-- **Fault 正确性**:错误名 → 期望 `faultCode`(§4)逐项断言。
-- **协议健壮性**:无 `<params>`、非法 2 段名、`_` 前缀方法、递归 `multicall` 均被正确拒绝。
-- **互操作回归**:REST(`/api/v1/*`)与 XML-RPC(`/RPC2`)共存,现有 67 测试与 clippy `-D warnings` 保持通过。
+- **End-to-end**: an unmodified Python `supervisorctl` connects to rsupervisord directly via `-s unix://…` (or `http://…` + `-u/-p`); the following commands **pass 100%**:
+  `status`, `status <name>`, `start/stop/restart <name>`, `start/stop/restart all`, `signal <name> <sig>`, `tail -f <name>`, `maintail`, `version`, `pid`, `reread`, `update`, `shutdown`.
+- **Fault correctness**: error names → expected `faultCode` (§4) asserted item by item.
+- **Protocol robustness**: missing `<params>`, invalid 2-segment names, `_`-prefixed methods, and recursive `multicall` are all correctly rejected.
+- **Interop regression**: REST (`/api/v1/*`) and XML-RPC (`/RPC2`) coexist; the existing 67 tests and clippy `-D warnings` keep passing.
 
 ```bash
 supervisorctl -c /etc/supervisord.conf status
@@ -262,16 +262,16 @@ supervisorctl -c /etc/supervisord.conf shutdown
 
 ---
 
-## 11. 与其它文档的关系
+## 11. Relationship to Other Documents
 
-- CLI 参数、退出码、`reload`/`reread`/`update` 语义:见 [`CLI_COMPAT.md`](./CLI_COMPAT.md)。
-- INI 段(尤其 `[rpcinterface:supervisor]`、`[inet_http_server]`)加载:见 [`INI_COMPAT.md`](./INI_COMPAT.md)。
-- #4 Group、#6 Event Listener、#7 stdin、#8 日志字节偏移:见 [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7。
+- CLI arguments, exit codes, `reload`/`reread`/`update` semantics: see [`CLI_COMPAT.md`](./CLI_COMPAT.md).
+- Loading of INI sections (especially `[rpcinterface:supervisor]`, `[inet_http_server]`): see [`INI_COMPAT.md`](./INI_COMPAT.md).
+- #4 Group, #6 Event Listener, #7 stdin, #8 log byte offsets: see [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7.
 
 ---
 
-## 12. 兼容测试基线
+## 12. Compatibility Test Baseline
 
-本文的契约由 [`../compat/tests/test_xmlrpc.py`](../compat/tests/test_xmlrpc.py)(31 例,直接断言 `supervisor.*` / `system.*` / Fault)与 [`test_cli.py`](../compat/tests/test_cli.py)(27 例,走未改动的 stock `supervisorctl`)作为可执行基准承载,先在 Python **4.2.5** 上全绿。
+The contracts in this document are carried by [`../compat/tests/test_xmlrpc.py`](../compat/tests/test_xmlrpc.py) (31 cases, asserting `supervisor.*` / `system.*` / Fault directly) and [`test_cli.py`](../compat/tests/test_cli.py) (27 cases, running through an unmodified stock `supervisorctl`) as the executable baseline, all green on Python **4.2.5** first.
 
-对编译出的 rsupervisord(默认靶标)先做 `/RPC2` 能力探测:当前**尚未实现**,相关用例统一记为 **`xfail`(59 例)**;`SUPERVISOR_STRICT=1` 时转为硬失败,即 §9 优先级清单的待办全貌。实现 `/RPC2` 后**无需改动测试**,门控会自动放行并开始逐项断言(详见 [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §8)。
+For the compiled rsupervisord (default target), first do `/RPC2` capability probing: currently **not yet implemented**, so the relevant cases are uniformly marked **`xfail` (59 cases)**; with `SUPERVISOR_STRICT=1` they turn into hard failures, i.e. the full picture of the §9 priority checklist's pending work. Once `/RPC2` is implemented, **no test changes are needed**; the gating automatically passes and starts asserting item by item (for details, see [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §8).

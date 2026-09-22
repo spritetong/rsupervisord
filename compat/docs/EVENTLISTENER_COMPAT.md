@@ -1,50 +1,50 @@
-# rsupervisord: Event Listener 兼容需求 (EVENTLISTENER_COMPAT.md)
+# rsupervisord: Event Listener Compatibility Requirements (EVENTLISTENER_COMPAT.md)
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.0.0** | Draft / For Review | Rust (Edition 2024) | `[eventlistener:x]` 配置面、`READY`/`RESULT` 线协议、事件封装与事件类型 payload、池缓冲/分发/生命周期语义,目标:drop-in 兼容 superlance 等外部监听工具;可执行基准见 §12 / [`../compat/tests/test_eventlistener.py`](../compat/tests/test_eventlistener.py) |
+| **v1.0.0** | Draft / For Review | Rust (Edition 2024) | `[eventlistener:x]` configuration surface, `READY`/`RESULT` wire protocol, event envelope and event type payloads, pool buffering/dispatch/lifecycle semantics, goal: drop-in compatibility with external listener tools such as superlance; executable baseline in §12 / [`../compat/tests/test_eventlistener.py`](../compat/tests/test_eventlistener.py) |
 
 ---
 
-## 1. 目的与范围
+## 1. Purpose & Scope
 
-回答:**要让 stock supervisord 生态里的事件监听程序(如 superlance `memmon`/`httpok`)无改动接入 rsupervisord,需要实现哪些能力、达成什么协议行为。**
+Question: **What capabilities must be implemented and what protocol behavior achieved so that event listener programs from the stock supervisord ecosystem (e.g. superlance `memmon`/`httpok`) can plug into rsupervisord without modification.**
 
-- **权威基准**:Python Supervisor **4.2.5** 的实现:
-  - `supervisor/options.py`(`[eventlistener:x]` 段解析与 `EventListenerPoolConfig`);
-  - `supervisor/process.py::EventListenerPool`(池、缓冲、封装、分发、serial);
-  - `supervisor/dispatchers.py::PEventListenerDispatcher`(握手状态机与 `RESULT` 解析);
-  - `supervisor/events.py`(事件类型与 `payload()`);
-  - `supervisor/rpcinterface.py::sendRemoteCommEvent`。
-- **现状基线**:rsupervisord 内部事件总线 `src/manager/event.rs`(`EventHub` / `SystemEvent` / `LogEntry`,tokio broadcast,**面向内部**,非线协议);INI 适配器当前**丢弃** `[eventlistener:*]` 段(`src/compat/ini/adapter.rs:115-118`);XML-RPC `sendRemoteCommEvent` 返回 `FAILED`(`src/compat/xmlrpc/supervisor.rs:276`)。
-- **关联**:功能编号 #6 见 [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7(条件性启用);`[eventlistener:x]` 字段继承 `[program:x]` 见 [`INI_COMPAT.md`](./INI_COMPAT.md);`sendRemoteCommEvent` 见 [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9 P2。
+- **Authoritative baseline**: Python Supervisor **4.2.5** implementation:
+  - `supervisor/options.py` (`[eventlistener:x]` section parsing and `EventListenerPoolConfig`);
+  - `supervisor/process.py::EventListenerPool` (pool, buffering, envelope, dispatch, serial);
+  - `supervisor/dispatchers.py::PEventListenerDispatcher` (handshake state machine and `RESULT` parsing);
+  - `supervisor/events.py` (event types and `payload()`);
+  - `supervisor/rpcinterface.py::sendRemoteCommEvent`.
+- **Current-state baseline**: rsupervisord's internal event bus `src/manager/event.rs` (`EventHub` / `SystemEvent` / `LogEntry`, tokio broadcast, **internal-facing**, not the wire protocol); the INI adapter currently **discards** `[eventlistener:*]` sections (`src/compat/ini/adapter.rs:115-118`); XML-RPC `sendRemoteCommEvent` returns `FAILED` (`src/compat/xmlrpc/supervisor.rs:276`).
+- **Related**: feature number #6 is described in [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 (conditional enablement); `[eventlistener:x]` fields inherit from `[program:x]` per [`INI_COMPAT.md`](./INI_COMPAT.md); `sendRemoteCommEvent` is described in [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9 P2.
 
-**核心结论(预览)**:这是一个**双向线协议子系统**,不能只靠内部 `EventHub` 广播替代——daemon 必须与监听子进程建立 **stdout(事件流)/stdin(命令流)** 通道,实现 `READY`/`RESULT` 握手、长度前缀封装、每池事件缓冲与 serial 管理。**建议独立旁挂"Event Listener 子系统"**,由 `EventHub` → 事件适配层 → 监听池分发,不改写现有执行核心。
+**Core conclusion (preview)**: this is a **bidirectional wire-protocol subsystem** and cannot be replaced by the internal `EventHub` broadcast alone — the daemon must establish **stdout (event stream) / stdin (command stream)** channels with listener child processes, implementing the `READY`/`RESULT` handshake, length-prefixed envelope, per-pool event buffering and serial management. **It is recommended to add a standalone, sidecar "Event Listener subsystem"** that flows `EventHub` → event adapter layer → listener pool dispatch, without rewriting the existing execution core.
 
 ---
 
-## 2. 优先级定义
+## 2. Priority Definitions
 
-| 级别 | 含义 |
+| Level | Meaning |
 | :--- | :--- |
-| **P0** | 让协议正确的最小闭环:`[eventlistener:x]` 解析、池进程化、`READY`/`RESULT` 握手、`PROCESS_STATE_*` 事件投递、缓冲与背压。 |
-| **P1** | 完整事件面:`PROCESS_LOG_*`、`PROCESS_COMMUNICATION_*`、`REMOTE_COMMUNICATION`、`TICK_*`、`PROCESS_GROUP_*`、`SUPERVISOR_STATE_CHANGE_*`;`result_handler`;协议违规 → `UNKNOWN`。 |
-| **P2 / 搁置** | `PROCESS_COMMUNICATION_*` 依赖 stdin 注入(#7)与捕获 token;`sendRemoteCommEvent` 已可随本子系统解锁。 |
-| **不支持 / 降级** | 与 Python 运行时耦合的 `result_handler` import spec(见 §4、§13)。 |
+| **P0** | The minimal closed loop that makes the protocol correct: `[eventlistener:x]` parsing, pool process management, `READY`/`RESULT` handshake, `PROCESS_STATE_*` event delivery, buffering and backpressure. |
+| **P1** | Full event surface: `PROCESS_LOG_*`, `PROCESS_COMMUNICATION_*`, `REMOTE_COMMUNICATION`, `TICK_*`, `PROCESS_GROUP_*`, `SUPERVISOR_STATE_CHANGE_*`; `result_handler`; protocol violation → `UNKNOWN`. |
+| **P2 / deferred** | `PROCESS_COMMUNICATION_*` depends on stdin injection (#7) and capture tokens; `sendRemoteCommEvent` can be unlocked together with this subsystem. |
+| **Unsupported / degraded** | `result_handler` import spec coupled to the Python runtime (see §4, §13). |
 
 ---
 
-## 3. 术语与架构定位
+## 3. Terminology & Architecture Placement
 
-| 术语 | 定义 |
+| Term | Definition |
 | :--- | :--- |
-| **监听池(pool)** | 一个 `[eventlistener:x]` 段即一个**同构进程组**,`numprocs` 个监听进程共享同一 `events=` 订阅集。池名 = 段名 `x`。 |
-| **监听进程(listener)** | 池内的子进程;stdout 是**协议通道**,stdin 是**命令通道**,stderr 走日志。 |
-| **事件(event)** | daemon 内部 `notify(event)` 产生的对象,具有 `payload()` 与 `serial`。 |
-| **封装(envelope)** | 发往监听进程的一行头 + 变长 payload(§5.1)。 |
-| **`READY`/`RESULT`** | 监听进程侧的两条控制行:宣告可接收、回报处理结果。 |
+| **listener pool (pool)** | One `[eventlistener:x]` section is a **homogeneous process group**; `numprocs` listener processes share the same `events=` subscription set. Pool name = section name `x`. |
+| **listener process (listener)** | A child process within the pool; stdout is the **protocol channel**, stdin is the **command channel**, stderr goes to logs. |
+| **event** | An object produced by daemon-internal `notify(event)` that carries a `payload()` and a `serial`. |
+| **envelope** | A one-line header plus variable-length payload sent to a listener process (§5.1). |
+| **`READY`/`RESULT`** | Two control lines on the listener-process side: announcing readiness to receive and reporting the processing result. |
 
-**架构定位**:新增 daemon→listener 通道,与现有 `ManagerActor`/`ProcessActor` 并列。`EventListenerPool` 不是 `ProgramConfig` 的简单复用:它需要**独立的监听状态机**与**事件缓冲队列**。推荐:
+**Architecture placement**: add daemon→listener channels, alongside the existing `ManagerActor`/`ProcessActor`. `EventListenerPool` is not a simple reuse of `ProgramConfig`: it needs a **dedicated listener state machine** and an **event buffer queue**. Recommended design:
 
 ```
 EventHub (internal broadcast)
@@ -55,209 +55,209 @@ EventHub (internal broadcast)
 
 ---
 
-## 4. 配置面 `[eventlistener:x]`
+## 4. Configuration Surface `[eventlistener:x]`
 
-字段与 `[program:x]` **完全兼容**(继承 `EventListenerConfig(ProcessConfig)`),另加:
+Fields are **fully compatible** with `[program:x]` (inherits `EventListenerConfig(ProcessConfig)`), with the additions:
 
-| 字段 | 默认 | 约束 | 说明 |
+| Field | Default | Constraint | Description |
 | :--- | :--- | :--- | :--- |
-| `command` | — | 必填(继承) | 监听程序命令行。 |
-| `events` | — | **必填**;逗号/空白分隔;大写化;未知事件名 → 配置错误 | 订阅集,如 `PROCESS_STATE,PROCESS_LOG,TICK_5`。 |
-| `buffer_size` | `10` | 整数 `>= 1`,否则配置错误 | 每池事件缓冲上界(§7)。 |
-| `result_handler` | `supervisor.dispatchers:default_handler` | import spec,解析失败 → 配置错误 | 见 §5.3。 |
-| `priority` | `-1`(高) | 整数 | 监听者**优先启动、最后停止**。 |
-| `redirect_stderr` | `false` | **必须为 false**;置 true → 配置错误 | 混入 stdout 会破坏协议。 |
-| `autostart` | `true`(继承) | 布尔 | 池随 daemon 启动。 |
-| `numprocs` | `1` | 整数 | 池内监听进程数。 |
+| `command` | — | required (inherited) | The listener program command line. |
+| `events` | — | **required**; comma/whitespace separated; uppercased; unknown event name → configuration error | Subscription set, e.g. `PROCESS_STATE,PROCESS_LOG,TICK_5`. |
+| `buffer_size` | `10` | integer `>= 1`, otherwise configuration error | Per-pool upper bound for the event buffer (§7). |
+| `result_handler` | `supervisor.dispatchers:default_handler` | import spec, parse failure → configuration error | See §5.3. |
+| `priority` | `-1` (high) | integer | Listeners are **started first and stopped last**. |
+| `redirect_stderr` | `false` | **must be false**; setting true → configuration error | Mixing into stdout would corrupt the protocol. |
+| `autostart` | `true` (inherited) | boolean | The pool starts together with the daemon. |
+| `numprocs` | `1` | integer | Number of listener processes in the pool. |
 
-> 其它 `[program:x]` 字段(`environment`、`user`、`startsecs`、`stopsignal`、`stdout_logfile` 等)语义一致;`use_stderr` 被**强制为 true**(监听进程 stderr 独立于 stdout)。
+> The other `[program:x]` fields (`environment`, `user`, `startsecs`, `stopsignal`, `stdout_logfile`, etc.) keep the same semantics; `use_stderr` is **forced to true** (the listener process's stderr is separate from stdout).
 
 ---
 
-## 5. 线协议(wire protocol)
+## 5. Wire Protocol
 
-### 5.1 事件封装(envelope)
+### 5.1 Event Envelope
 
-daemon 向监听进程 stdout 写入(UTF-8 字节):
+The daemon writes to the listener process's stdout (UTF-8 bytes):
 
 ```
 ver:3.0 server:<identifier> serial:<global_serial> pool:<pool_name> poolserial:<pool_serial> eventname:<NAME> len:<payload_len>\n<payload>
 ```
 
-| 字段 | 语义 |
+| Field | Semantics |
 | :--- | :--- |
-| `ver` | 固定 `3.0`。 |
-| `server` | `[supervisord] identifier`。 |
-| `serial` | **全局**单调递增序列(跨所有池),`maxint` 回绕。 |
-| `pool` | 池名(`[eventlistener:x]` 的 `x`)。 |
-| `poolserial` | **池内**单调递增序列。 |
-| `eventname` | §6 的事件名(抽象类型不出现)。 |
-| `len` | payload 的**字符数**(Python `len(payload)`)。ASCII 下等于字节数;**含多字节 UTF-8 时按字符计,原版即如此**,监听方按此语义读取。 |
-| `<payload>` | 紧随换行的定长 body(§6),无结尾换行要求。 |
+| `ver` | Fixed at `3.0`. |
+| `server` | `[supervisord] identifier`. |
+| `serial` | **Global** monotonically increasing sequence (across all pools), wrapping at `maxint`. |
+| `pool` | Pool name (`x` of `[eventlistener:x]`). |
+| `poolserial` | **Per-pool** monotonically increasing sequence. |
+| `eventname` | An event name from §6 (abstract types never appear). |
+| `len` | **Character count** of the payload (Python `len(payload)`). Equal to the byte count under ASCII; **counted by character when multibyte UTF-8 is present, matching the original**, and the receiver reads under this semantics. |
+| `<payload>` | The fixed-length body following the newline (§6); no trailing newline required. |
 
-### 5.2 握手状态机(监听进程侧)
+### 5.2 Handshake State Machine (listener-process side)
 
-监听进程 `listener_state` 初值为 `ACKNOWLEDGED`(忙),状态机:
+The listener process's `listener_state` starts as `ACKNOWLEDGED` (busy); the state machine:
 
-| 当前态 | 收到 | 迁移 | daemon 动作 |
+| Current state | Received | Transition | daemon action |
 | :--- | :--- | :--- | :--- |
-| `ACKNOWLEDGED` | buffer 以 `READY\n` 起始 | → `READY` | 可投递事件 |
-| `ACKNOWLEDGED` | 有数据但非 `READY\n` | → **`UNKNOWN`** | 记录 warning,停止投递 |
-| `READY` | 任何投机数据 | → **`UNKNOWN`** | 记录 warning,停止投递 |
-| `BUSY` | `RESULT <n>\n<n 字节>` | → `ACKNOWLEDGED` | 调用 `result_handler`,成功则继续 |
-| `BUSY` | `RESULT` 头非法 | → **`UNKNOWN`** + `EventRejectedEvent` | 事件被丢弃并告警 |
-| `BUSY` | `<n>` 不足 | 保持 `BUSY`(续读) | 等待剩余数据 |
-| `UNKNOWN` | 任意 | 保持 `UNKNOWN` | 该监听进程**永久**退出接收 |
+| `ACKNOWLEDGED` | buffer begins with `READY\n` | → `READY` | may deliver events |
+| `ACKNOWLEDGED` | data present but not `READY\n` | → **`UNKNOWN`** | log warning, stop delivery |
+| `READY` | any speculative data | → **`UNKNOWN`** | log warning, stop delivery |
+| `BUSY` | `RESULT <n>\n<n bytes>` | → `ACKNOWLEDGED` | invoke `result_handler`, continue on success |
+| `BUSY` | invalid `RESULT` header | → **`UNKNOWN`** + `EventRejectedEvent` | event is dropped and warned |
+| `BUSY` | insufficient `<n>` | stay `BUSY` (continue reading) | wait for the remaining data |
+| `UNKNOWN` | anything | stay `UNKNOWN` | the listener process is **permanently** out of receive |
 
-> `READY` token 为**恰好** `READY\n`(含换行);`RESULT` 前缀为 `RESULT `。
+> The `READY` token is **exactly** `READY\n` (newline included); the `RESULT` prefix is `RESULT `.
 
-### 5.3 结果处理(`result_handler`)
+### 5.3 Result Handling (`result_handler`)
 
-- 默认 `supervisor.dispatchers:default_handler`:body 必须为 `OK`,否则抛 `RejectEvent`。
-- `RejectEvent` → 状态回到 `ACKNOWLEDGED` 并 `notify(EventRejectedEvent)`;池把被拒事件**重新插回缓冲头部**(重投)。
-- handler 抛任意异常 → → `UNKNOWN` + `EventRejectedEvent`。
+- Default `supervisor.dispatchers:default_handler`: the body must be `OK`, otherwise `RejectEvent` is raised.
+- `RejectEvent` → state returns to `ACKNOWLEDGED` and `notify(EventRejectedEvent)` is called; the pool **reinserts the rejected event at the head of the buffer** (redelivery).
+- Handler raising any exception → → `UNKNOWN` + `EventRejectedEvent`.
 
 ---
 
-## 6. 事件类型与 payload 规范
+## 6. Event Types & Payload Specification
 
-`payload` 为**单行 k:v 空格分隔**(`PROCESS_LOG_*`/`PROCESS_COMMUNICATION_*`/`REMOTE_COMMUNICATION` 含一个换行后接数据体):
+`payload` is a **single line of space-separated `k:v` pairs** (`PROCESS_LOG_*`/`PROCESS_COMMUNICATION_*`/`REMOTE_COMMUNICATION` add one newline followed by a data body):
 
-| eventname | payload 格式 |
+| eventname | payload format |
 | :--- | :--- |
 | `PROCESS_STATE_STARTING` / `PROCESS_STATE_BACKOFF` | `processname:<n> groupname:<g> from_state:<STATE> tries:<n>` |
 | `PROCESS_STATE_RUNNING` / `PROCESS_STATE_STOPPING` / `PROCESS_STATE_STOPPED` | `processname:<n> groupname:<g> from_state:<STATE> pid:<pid>` |
 | `PROCESS_STATE_EXITED` | `processname:<n> groupname:<g> from_state:<STATE> expected:<0\|1> pid:<pid>` |
 | `PROCESS_STATE_FATAL` / `PROCESS_STATE_UNKNOWN` | `processname:<n> groupname:<g> from_state:<STATE>` |
 | `PROCESS_LOG_STDOUT` | `processname:<n> groupname:<g> pid:<pid> channel:stdout\n<data>` |
-| `PROCESS_LOG_STDERR` | 同上,`channel:stderr` |
+| `PROCESS_LOG_STDERR` | same as above, `channel:stderr` |
 | `PROCESS_COMMUNICATION_STDOUT` / `_STDERR` | `processname:<n> groupname:<g> pid:<pid>\n<data>` |
 | `REMOTE_COMMUNICATION` | `type:<type>\n<data>` |
-| `TICK_5` / `TICK_60` / `TICK_3600` | `when:<unix 秒整数>` |
-| `SUPERVISOR_STATE_CHANGE_RUNNING` / `_STOPPING` | 空串 |
+| `TICK_5` / `TICK_60` / `TICK_3600` | `when:<unix seconds integer>` |
+| `SUPERVISOR_STATE_CHANGE_RUNNING` / `_STOPPING` | empty string |
 | `PROCESS_GROUP_ADDED` / `PROCESS_GROUP_REMOVED` | `groupname:<g>\n` |
 
-`<STATE>` 为 `getProcessStateDescription` 名(`STOPPED`/`STARTING`/`RUNNING`/`BACKOFF`/`STOPPING`/`EXITED`/`FATAL`/`UNKNOWN`);`expected` 为 `0/1` 整数。
+`<STATE>` is a `getProcessStateDescription` name (`STOPPED`/`STARTING`/`RUNNING`/`BACKOFF`/`STOPPING`/`EXITED`/`FATAL`/`UNKNOWN`); `expected` is an `0/1` integer.
 
-**触发点**:
-- `PROCESS_STATE_*`:`[program:x]`/组内进程状态迁移。
-- `PROCESS_LOG_*`:进程配置 `stdout_events_enabled` / `stderr_events_enabled=true`,且产生输出。
-- `PROCESS_COMMUNICATION_*`:配置 `stdout_capture_maxbytes` / `stderr_capture_maxbytes`,且输出含 `<!--XSUPERVISOR:BEGIN-->…<!--XSUPERVISOR:END-->` 捕获 token。
-- `REMOTE_COMMUNICATION`:XML-RPC `sendRemoteCommEvent(type, data)`。
-- `TICK_*`:daemon 每 5s / 60s / 3600s 定时。
-- `PROCESS_GROUP_ADDED/REMOVED`:运行时 `addProcessGroup`/`removeProcessGroup`(rsupervisord 的 compat shim,见 [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9)。
-- `SUPERVISOR_STATE_CHANGE_*`:daemon 进入 RUNNING / 开始 STOPPING。
-
----
-
-## 7. 池、缓冲与分发语义
-
-1. **每池独立缓冲**:事件先 `_acceptEvent` 入池队列,再在 `transition()` 中按序分发。
-2. **serial 分配入队时完成**:`serial`(全局)与 `poolserial`(池内)在首次入队时赋值;重投复用同一 `serial`/`poolserial`。
-3. **背压**:仅投递给 `RUNNING` 且 `listener_state == READY` 的监听进程;头一个可用者接收,该进程转 `BUSY`。
-4. **重投**:分发失败(含 `RejectEvent`)时事件**插回队首**,并停止本轮后续分发。
-5. **溢出**:队列长度 `>= buffer_size` 时**丢弃最旧**事件并记录 error(`pool <name> event buffer overflowed, discarding event <serial>`)。
-6. **多监听进程**:同池多进程并发时,每个事件只投递给一个 `READY` 进程。
+**Trigger points**:
+- `PROCESS_STATE_*`: state transitions of processes in `[program:x]`/groups.
+- `PROCESS_LOG_*`: the process config sets `stdout_events_enabled` / `stderr_events_enabled=true`, and the process produces output.
+- `PROCESS_COMMUNICATION_*`: `stdout_capture_maxbytes` / `stderr_capture_maxbytes` are configured and the output contains `<!--XSUPERVISOR:BEGIN-->…<!--XSUPERVISOR:END-->` capture tokens.
+- `REMOTE_COMMUNICATION`: XML-RPC `sendRemoteCommEvent(type, data)`.
+- `TICK_*`: daemon timers every 5s / 60s / 3600s.
+- `PROCESS_GROUP_ADDED/REMOVED`: runtime `addProcessGroup`/`removeProcessGroup` (rsupervisord's compat shim, see [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9).
+- `SUPERVISOR_STATE_CHANGE_*`: daemon enters RUNNING / begins STOPPING.
 
 ---
 
-## 8. 生命周期与进程语义
+## 7. Pool, Buffering & Dispatch Semantics
 
-- 池以 `priority` 默认 `-1` **最先启动、最后停止**;daemon 停止时应先停止普通程序、最后停止监听池。
-- 监听进程 stdout 仅承载协议;`redirect_stderr=true` 被拒绝。
-- 池可被 `startProcess`/`stopProcess`/`signalProcess` 等按普通组操作(池名即 group 名,进程名同池名,故 namespec 为 `listener`、`listener:*`)。
+1. **Per-pool independent buffer**: events first go through `_acceptEvent` into the pool queue, then are dispatched in order during `transition()`.
+2. **Serial assigned at enqueue time**: `serial` (global) and `poolserial` (per-pool) are assigned on first enqueue; redelivery reuses the same `serial`/`poolserial`.
+3. **Backpressure**: events are delivered only to a `RUNNING` listener process with `listener_state == READY`; the first available one receives the event and that process transitions to `BUSY`.
+4. **Redelivery**: on dispatch failure (including `RejectEvent`) the event is **reinserted at the head of the queue** and the current round of further dispatch stops.
+5. **Overflow**: when the queue length is `>= buffer_size`, the **oldest** event is discarded and an error logged (`pool <name> event buffer overflowed, discarding event <serial>`).
+6. **Multiple listener processes**: when several processes in the same pool are concurrent, each event is delivered to only one `READY` process.
 
 ---
 
-## 9. XML-RPC / CLI 交互面
+## 8. Lifecycle & Process Semantics
 
-| 方法/命令 | 行为 |
+- Pools use the default `priority` of `-1` and are **started first and stopped last**; when the daemon stops, ordinary programs should be stopped first and listener pools last.
+- Listener stdout carries only the protocol; `redirect_stderr=true` is rejected.
+- A pool can be operated like an ordinary group via `startProcess`/`stopProcess`/`signalProcess`, etc. (the pool name is the group name and the process name equals the pool name, so the namespecs are `listener`, `listener:*`).
+
+---
+
+## 9. XML-RPC / CLI Interaction Surface
+
+| Method/command | Behavior |
 | :--- | :--- |
-| `supervisor.getProcessInfo("listener")` / `getAllProcessInfo` | 监听池作为普通组出现(`group == pool name`,进程名 == pool name,`statename` 正常)。 |
-| `supervisor.sendRemoteCommEvent(type, data)` | 触发 `REMOTE_COMMUNICATION` 事件,返回 `True`。 |
-| `supervisor.getAllConfigInfo` | 监听池配置**在** `process_group_configs` 内(与程序组并列)。 |
-| `supervisorctl status` | 显示监听池,与程序组一致。 |
+| `supervisor.getProcessInfo("listener")` / `getAllProcessInfo` | The listener pool appears as an ordinary group (`group == pool name`, process name == pool name, `statename` normal). |
+| `supervisor.sendRemoteCommEvent(type, data)` | Triggers the `REMOTE_COMMUNICATION` event, returns `True`. |
+| `supervisor.getAllConfigInfo` | Listener pool configuration appears **in** `process_group_configs` (alongside program groups). |
+| `supervisorctl status` | Displays the listener pool, consistent with program groups. |
 
 ---
 
-## 10. rsupervisord 现状与差距映射
+## 10. rsupervisord Current State & Gap Mapping
 
-| 能力 | 现状 | 差距 |
+| Capability | Current state | Gap |
 | :--- | :--- | :--- |
-| `[eventlistener:x]` 解析 | INI 适配器**丢弃**并发 warning(`src/compat/ini/adapter.rs:115-118`) | 需建成池配置(§4) |
-| 事件源 | `EventHub`(`src/manager/event.rs`:`SystemEvent`/`LogEntry`,内部) | 需映射为 §6 的 stock payload + serial |
-| 线协议 | 无 | 全新 `READY`/`RESULT` 通道 + 状态机(§5) |
-| 缓冲/分发 | 无 | 每池队列 + `buffer_size` + 重投/溢出(§7) |
-| `sendRemoteCommEvent` | `FAILED`(`src/compat/xmlrpc/supervisor.rs:276`) | 接入本子系统后返回 `True` |
-| `PROCESS_COMMUNICATION_*` | 依赖 stdin 注入(#7)与捕获 token | P2,依赖 #7 |
+| `[eventlistener:x]` parsing | INI adapter **discards** and logs a warning (`src/compat/ini/adapter.rs:115-118`) | must build pool configuration (§4) |
+| Event source | `EventHub` (`src/manager/event.rs`: `SystemEvent`/`LogEntry`, internal) | must map to §6's stock payload + serial |
+| Wire protocol | none | brand-new `READY`/`RESULT` channel + state machine (§5) |
+| Buffering/dispatch | none | per-pool queue + `buffer_size` + redelivery/overflow (§7) |
+| `sendRemoteCommEvent` | `FAILED` (`src/compat/xmlrpc/supervisor.rs:276`) | returns `True` once wired into this subsystem |
+| `PROCESS_COMMUNICATION_*` | depends on stdin injection (#7) and capture tokens | P2, depends on #7 |
 
-**EventHub → stock 事件的最小映射**(P0):
+**Minimal mapping of EventHub → stock events** (P0):
 
-| 内部 `SystemEvent` | stock 事件 |
+| internal `SystemEvent` | stock event |
 | :--- | :--- |
 | `StateChanged`(→ Starting/Running/Exited/...) | `PROCESS_STATE_*` |
-| `LogEntry`(stdout/stderr) | `PROCESS_LOG_STDOUT` / `PROCESS_LOG_STDERR`(受 `*_events_enabled` 控制) |
-| `ConfigReloaded` + 组增删 | `PROCESS_GROUP_ADDED` / `PROCESS_GROUP_REMOVED` |
+| `LogEntry`(stdout/stderr) | `PROCESS_LOG_STDOUT` / `PROCESS_LOG_STDERR`(gated by `*_events_enabled`) |
+| `ConfigReloaded` + group add/remove | `PROCESS_GROUP_ADDED` / `PROCESS_GROUP_REMOVED` |
 | `DaemonLifecycle` | `SUPERVISOR_STATE_CHANGE_RUNNING` / `_STOPPING` |
-| 定时器 | `TICK_5` / `TICK_60` / `TICK_3600` |
+| timers | `TICK_5` / `TICK_60` / `TICK_3600` |
 | XML-RPC `sendRemoteCommEvent` | `REMOTE_COMMUNICATION` |
 
 ---
 
-## 11. 详细需求条目
+## 11. Detailed Requirements
 
-约定:**MUST** 必须实现;**SHOULD** 强烈建议;**MAY** 可选。
+Convention: **MUST** must be implemented; **SHOULD** strongly recommended; **MAY** optional.
 
-- **EL-1(MUST)** 解析 `[eventlistener:x]` 为监听池配置:`events` 必填且校验、`buffer_size>=1`、`redirect_stderr` 禁止、`priority` 默认 `-1`;监听池在 `getAllProcessInfo` 中作为组 `<x>` 出现。
-- **EL-2(MUST)** 池内监听进程 stdin/stdout 建为管道;stdout 仅承载协议,stderr 独立。
-- **EL-3(MUST)** 实现 `READY\n` 握手与 `ACKNOWLEDGED→READY→BUSY→ACKNOWLEDGED` 状态机;`BUSY` 仅在有完整 `RESULT <n>\n` 头与 `<n>` 字节 body 后推进。
-- **EL-4(MUST)** 按 §5.1 生成封装,`serial`(全局)与 `poolserial`(池内)单调递增,`len` 为 payload 字符数。
-- **EL-5(MUST)** 仅向订阅集内事件(§6)投递;`events=` 未列出的类型不得下发。
-- **EL-6(MUST)** P0 至少覆盖 `PROCESS_STATE_*`、`TICK_*`、`REMOTE_COMMUNICATION`;P1 覆盖 `PROCESS_LOG_*`、`PROCESS_GROUP_*`、`SUPERVISOR_STATE_CHANGE_*`;payload 字段与 §6 逐字段一致。
-- **EL-7(MUST)** 协议违规(非 `READY` 数据、`READY` 后投机数据、非法 `RESULT` 头)→ 监听进程转入 `UNKNOWN`,记录 warning,并**停止**向其投递。
-- **EL-8(MUST)** 每池缓冲与背压:溢出丢最旧并记录 error;分发失败重投队首;`result_handler` 拒绝时重投。
-- **EL-9(SHOULD)** `result_handler` 语义对齐(默认 body==`OK`);rsupervisord 可先固定默认 handler。
-- **EL-10(MUST)** `sendRemoteCommEvent(type, data)` 返回 `True` 并触发 `REMOTE_COMMUNICATION`。
-- **EL-11(SHOULD)** 池默认最高优先级:先启动、最后停止。
-- **EL-12(MAY)** `PROCESS_COMMUNICATION_*`(依赖 #7 stdin 注入与捕获 token)。
+- **EL-1 (MUST)** Parse `[eventlistener:x]` into listener pool configuration: `events` required and validated, `buffer_size>=1`, `redirect_stderr` forbidden, `priority` defaults to `-1`; the listener pool appears in `getAllProcessInfo` as group `<x>`.
+- **EL-2 (MUST)** Listener stdin/stdout within the pool are created as pipes; stdout carries only the protocol, stderr is separate.
+- **EL-3 (MUST)** Implement the `READY\n` handshake and the `ACKNOWLEDGED→READY→BUSY→ACKNOWLEDGED` state machine; `BUSY` advances only after a complete `RESULT <n>\n` header and `<n>` byte body.
+- **EL-4 (MUST)** Generate the envelope per §5.1; `serial` (global) and `poolserial` (per-pool) increase monotonically; `len` is the payload character count.
+- **EL-5 (MUST)** Deliver only events in the subscription set (§6); types not listed in `events=` must not be sent down.
+- **EL-6 (MUST)** P0 covers at least `PROCESS_STATE_*`, `TICK_*`, `REMOTE_COMMUNICATION`; P1 covers `PROCESS_LOG_*`, `PROCESS_GROUP_*`, `SUPERVISOR_STATE_CHANGE_*`; payload fields match §6 field by field.
+- **EL-7 (MUST)** Protocol violations (non-`READY` data, speculative data after `READY`, invalid `RESULT` header) → the listener process transitions to `UNKNOWN`, a warning is logged, and delivery to it **stops**.
+- **EL-8 (MUST)** Per-pool buffering and backpressure: on overflow drop the oldest and log an error; on dispatch failure redeliver from the head of the queue; redeliver when `result_handler` rejects.
+- **EL-9 (SHOULD)** `result_handler` semantics align (default body==`OK`); rsupervisord may initially fix the default handler.
+- **EL-10 (MUST)** `sendRemoteCommEvent(type, data)` returns `True` and triggers `REMOTE_COMMUNICATION`.
+- **EL-11 (SHOULD)** Pools get the highest default priority: started first, stopped last.
+- **EL-12 (MAY)** `PROCESS_COMMUNICATION_*`(depends on #7 stdin injection and capture tokens).
 
 ---
 
-## 12. 验收与基准测试映射
+## 12. Acceptance & Baseline Test Mapping
 
-可执行基准:[`../compat/tests/test_eventlistener.py`](../compat/tests/test_eventlistener.py),先在 Python **4.2.5** 上全绿,再对 rsupervisord 门控放行。
+Executable baseline: [`../compat/tests/test_eventlistener.py`](../compat/tests/test_eventlistener.py); first get all green on Python **4.2.5**, then gate release against rsupervisord.
 
-| 需求 | 基准用例 |
+| Requirement | Baseline case |
 | :--- | :--- |
-| EL-1 | `test_eventlistener_pool_is_running`、`test_process_state_groupname` |
-| EL-3/EL-4 | `test_event_envelope_fields`、`test_protocol_violation_marks_listener_unknown` |
-| EL-5/EL-6 | `test_process_state_events`、`test_process_log_stdout_events`、`test_tick_event`、`test_remote_communication_event` |
+| EL-1 | `test_eventlistener_pool_is_running`, `test_process_state_groupname` |
+| EL-3/EL-4 | `test_event_envelope_fields`, `test_protocol_violation_marks_listener_unknown` |
+| EL-5/EL-6 | `test_process_state_events`, `test_process_log_stdout_events`, `test_tick_event`, `test_remote_communication_event` |
 | EL-7 | `test_protocol_violation_marks_listener_unknown` |
 | EL-8 | `test_event_buffer_overflow_discards_oldest` |
 | EL-10 | `test_remote_communication_event` |
 
-运行:
+Running:
 
 ```bash
-SUPERVISOR_TARGET=python bash compat/run.sh -k eventlistener   # 基准(全绿)
-bash compat/run.sh -k eventlistener                           # rsupervisord(当前 xfail,实现后放行)
+SUPERVISOR_TARGET=python bash compat/run.sh -k eventlistener   # baseline (all green)
+bash compat/run.sh -k eventlistener                           # rsupervisord (currently xfail; unblock once implemented)
 ```
 
-> 未实现前,该模块在 rsupervisord 靶标统一记为 **`xfail`**;`SUPERVISOR_STRICT=1` 转为硬失败,即 §11 的待办全貌。
+> Until implemented, this module is marked uniformly as **`xfail`** on the rsupervisord target; `SUPERVISOR_STRICT=1` escalates it to a hard failure, i.e. the full §11 backlog.
 
 ---
 
-## 13. 非目标与降级
+## 13. Non-Goals & Degradation
 
-- **`result_handler` 的 Python import spec**:rsupervisord 不内嵌 Python 运行时。**降级**:仅支持内置默认 handler(`body == OK`);自定义 `result_handler` 声明为不支持,或提供 Rust 侧等价注册点(MAY)。
-- **`PROCESS_COMMUNICATION_*`**:依赖 #7 stdin 注入与捕获 token,列为 P2。
-- **不改变现有执行核心**:监听池是旁挂子系统;`EventHub` 仍是内部事实源,线协议是适配层产物。
+- **`result_handler` Python import spec**: rsupervisord does not embed a Python runtime. **Degradation**: only the built-in default handler (`body == OK`) is supported; custom `result_handler` is declared unsupported, or an equivalent Rust-side registration point may be provided (MAY).
+- **`PROCESS_COMMUNICATION_*`**: depends on #7 stdin injection and capture tokens, listed as P2.
+- **No rewrite of the existing execution core**: the listener pool is a sidecar subsystem; `EventHub` remains the internal source of truth, and the wire protocol is a product of the adapter layer.
 
 ---
 
-## 14. 参考
+## 14. References
 
-- Python Supervisor **4.2.5**:`options.py`(`EventListenerConfig` / `EventListenerPoolConfig`)、`process.py::EventListenerPool`、`dispatchers.py::PEventListenerDispatcher`、`events.py`、`rpcinterface.py::sendRemoteCommEvent`。
-- 协议文档:Supervisor 官方 *Event Listeners* / *Events* 章节(events 类型与 `READY`/`RESULT` 示例)。
-- Go 参考实现 `ochinchina/supervisord` `events` 包(`EventSysVersion = "3.0"`、`EventListener`、`BaseEvent`、`ProcessStateEvent`、`RemoteCommunicationEvent`)——事件命名/封装的可对照实现。
-- 关联文档:[`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #6、[`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9、[`INI_COMPAT.md`](./INI_COMPAT.md)、[`../compat/README.md`](../compat/README.md)。
+- Python Supervisor **4.2.5**: `options.py`(`EventListenerConfig` / `EventListenerPoolConfig`), `process.py::EventListenerPool`, `dispatchers.py::PEventListenerDispatcher`, `events.py`, `rpcinterface.py::sendRemoteCommEvent`.
+- Protocol documentation: the official Supervisor *Event Listeners* / *Events* sections (event types and `READY`/`RESULT` examples).
+- Go reference implementation `ochinchina/supervisord` `events` package (`EventSysVersion = "3.0"`, `EventListener`, `BaseEvent`, `ProcessStateEvent`, `RemoteCommunicationEvent`) — a comparable implementation for event naming/envelopes.
+- Related docs:[`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #6, [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §9, [`INI_COMPAT.md`](./INI_COMPAT.md), [`../compat/README.md`](../compat/README.md).
