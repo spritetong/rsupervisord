@@ -1,6 +1,6 @@
 # rsupervisord
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]
 [![Tests](https://img.shields.io/badge/Tests-74%2F74%20Passing-brightgreen.svg)]
@@ -292,4 +292,4 @@ http://127.0.0.1:9001/
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Mozilla Public License 2.0](LICENSE).

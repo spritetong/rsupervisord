@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sprite Tong <spritetong@gmail.com>"]
 repository = "https://github.com/spritetong/rsupervisord"
-license = "MIT"
+license = "MPL-2.0"
 description = "High-performance, memory-safe, asynchronous process supervisor with DAG orchestration, zero-downtime hot reload, and embedded Web UI"
 readme = "README.md"
 
