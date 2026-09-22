@@ -149,6 +149,20 @@ impl Fault {
     pub fn cant_reread(detail: impl Into<String>) -> Self {
         Self::new(FaultCode::CantReread, detail)
     }
+
+    pub fn already_added(name: &str) -> Self {
+        Self::new(
+            FaultCode::AlreadyAdded,
+            format!("{}: {}", FaultCode::AlreadyAdded.name(), name),
+        )
+    }
+
+    pub fn still_running(name: &str) -> Self {
+        Self::new(
+            FaultCode::StillRunning,
+            format!("{}: {}", FaultCode::StillRunning.name(), name),
+        )
+    }
 }
 
 impl std::fmt::Display for Fault {

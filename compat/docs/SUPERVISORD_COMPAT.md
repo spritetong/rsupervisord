@@ -80,7 +80,7 @@ Basic auth 兼容(`[inet_http_server]` username/password)。可覆盖的方法�
 
 | # | 缺口 | 现状 | 所需新增 | 建议 |
 | :--- | :--- | :--- | :--- | :--- |
-| C-1 | 运行时 `addProcessGroup` / `removeProcessGroup` | 无 group 领域对象 | **轻量方案**:group 仅为"名称前缀 + 元数据",add/remove = 批量注册/注销 actor(依赖 Layer B 的展开产物);可选完整方案为 `GroupActor` | 推荐轻量方案 |
+| C-1 | 运行时 `addProcessGroup` / `removeProcessGroup` | **已实现(轻量方案)**:group 为"名称前缀 + 元数据",add/remove = 基于 pending 配置批量注册/注销 actor(依赖 Layer B 的展开产物);`ALREADY_ADDED`/`BAD_NAME`/`STILL_RUNNING` 与 Python 一致 | 轻量方案已落地 |
 | C-2 | **事件监听协议(Event Listener)** | `EventHub` 仅对内广播 | 全新 daemon→program 通道:`README`/`RESULT` 三步握手、自定义 `STATE_CHANGED` / `PROCESS_LOG` 等事件序列化、`{FD_2}`/`FD_NUM` 展开;与 XML-RPC 无关 | **二期最大工作量**,独立子系统 |
 | C-3 | `sendProcessStdin`(含 F_EVENT) | `Stdio::null()`(`process.rs:680`) | 将 stdin 改为 piped + 新增 manager→actor 写通道 + 管道生存期管理 | 独立子系统 |
 | C-4 | `tailProcessLog` 字节偏移 / daemon `getLog` | 行级内存 ring buffer,无持久化 | 进程日志落盘或"字节游标"缓存;否则 P→O 偏移语义无法给出 | 二选一,涉及日志管线 |
@@ -102,16 +102,17 @@ Basic auth 兼容(`[inet_http_server]` username/password)。可覆盖的方法�
 
 > 本节为**功能升级的完整定义**(编号 #1-#12),含**最终三态**_裁决_:
 > **立即 / 已实现 / 搁置 / 条件 / 皮**。对应多次讨论结论:numprocs 与 Group 的**配置层已落地**、
-> Event Listener 仅条件性启用、日志"绝对字节游标"因旋转日志矛盾被否决。
+> **运行时 add/remove 已按 Python 语义落地**、Event Listener 已落地、
+> 日志"绝对字节游标"因旋转日志矛盾被否决。
 
 ### 7.1 三态汇总
 
 | 状态 | 编号 | 裁决依据 |
 | :--- | :--- | :--- |
 | **立即** | #1 载具、#2 INI+宏、#5 XML-RPC 子集+Basic auth、#7 sendProcessStdin | 支撑"supervisorctl 日常可连",且对现有执行核心零侵入 |
-| **已实现(配置层)** | #3 numprocs、#4 Group | 见 §7.2:`numprocs` 展开、`group` 归属与校验、`program_defaults` 均已在 `schema.rs` 落地;仅**协议/运行时面**(XML-RPC group 方法、运行时 add/remove)按需再补 |
-| **搁置(协议/运行时面)** | #3/#4 的 `group:*` 批量语义、`addProcessGroup`/`removeProcessGroup` | 对核心功能无影响;`#5` 的 group 方法面留 stub;`getAllProcessInfo` 的 `group` 字段给默认分组名 |
-| **条件性** | #6 Event Listener | 仅在出现"drop-in 兼容监听/告警工具"硬需求时启用;启用时优先做 EventHub→listener 桥 |
+| **已实现(配置层)** | #3 numprocs、#4 Group | 见 §7.2:`numprocs` 展开、`group` 归属与校验、`program_defaults` 均已在 `schema.rs` 落地;运行时 add/remove 按 Python 语义落地(见下行) |
+| **已实现(运行时面)** | #4 运行时 `addProcessGroup`/`removeProcessGroup`、`group:*` 批量操作 | pending 配置(pending_configs,镜像 `process_group_configs`)激活/移除 + `ALREADY_ADDED`/`BAD_NAME`/`STILL_RUNNING`;移除仅影响活动集,源配置保留,`reloadConfig` 后可复现 |
+| **已实现** | #6 Event Listener | READY/RESULT 广播协议、事件分类映射、pool 背压/UNKNOWN 违约、`sendRemoteCommEvent` 已落地,详见 [`EVENTLISTENER_COMPAT.md`](./EVENTLISTENER_COMPAT.md) |
 | **可选/顺带** | #8 日志字节偏移 | 纯协议兼容需求,已否决"绝对游标";若硬做原版 log 功能才顺带,块式字节链垫底 |
 | **皮** | #9-#12 | 骨完成后铺 |
 
@@ -122,8 +123,8 @@ Basic auth 兼容(`[inet_http_server]` username/password)。可覆盖的方法�
 | #1 | 立即 | **Service Install/Uninstall/Start/Stop/Restart**(Windows + Systemd) | Windows:SCM 服务,单二进制自承载、`--install`/`--uninstall`、`--username/password` 登录账户、AutoStart 延迟、`SC_ACTION_RESTART` 崩溃恢复;Systemd:生成 `rsupervisord.service`(Restart=always、LimitNOFILE、User/Group、Environment、KillMode 对齐),支持 `--enable/--disable/--start/--stop/--restart`;安装路径与参数回写进 unit/注册表(ExecStart 带绝对 `-c`);uninstall 必须先 stop 再 remove,失败返回非零;入口建议:`rsupervisorctl service ...` 子命令(本机 UDS 鉴权) | Windows/Linux 各跑通 install→start→restart→stop→uninstall;进程树无残留;uninstall 前未停止时返回非零 + 明确提示 |
 | #2 | 立即 | **INI 配置解析 + `%()` 宏展开** | 消化 `[program:x]` / `[supervisord]` / `[inet_http_server]` / `[unix_http_server]` / `[eventlistener]` / `[supervisorctl]` 段;宏展开 `%(ENV_x)s` / `%(program_name)s` / `%(process_num)02d`;**与 YAML 并存**(`-c x.ini` 按后缀自动识别),统一喂同一 resolve 管线;`deny_unknown_fields` 对 INI 走宽松路径。**逐段字段映射/值格式/优先级详见 [`INI_COMPAT.md`](./INI_COMPAT.md)**;宏展开器(`ENV_`/`here`/`program_name`/`process_num`/`numprocs`/`group_name`)已存在 | 标准 supervisord 生产配置字面可加载;宏正确展开;YAML/INI 双通路回归测试通过 |
 | #3 | 已实现(配置层) | **numprocs 实例展开** | **已在 `src/config/schema.rs` 落地**:`numprocs` / `numprocs_start` / `process_name` 字段存在,`resolve_programs` 展开为 `name:0..N-1` 共 N 个 actor(经 `%(process_num)02d` 与 `MacroExpander` 联动),共享同一 `ProgramConfig` 模板。**剩余**:XML-RPC 实例方法面(`supervisor.process.*` 逐实例)按 #5 铺 | N 实例全部独立启停;状态/日志按实例隔离 |
-| #4 | 部分实现(配置层) | **Group 元数据模型(轻量)** | **配置层已在 `schema.rs` 落地**:`groups:`(programs + priority)、`ProgramConfig.group`、`resolve_programs` 的归属解析与校验齐全;**不做 GroupActor 重模型**。**剩余(搁置)**:`group:*` 批量操作、运行时 add/remove、XML-RPC group 方法 | **(启用时)**运行时注册/注销 N 实例原子成功或整体回滚;无孤儿进程 |
-| #5 | 立即 | **XML-RPC 协议适配层**(`server/xrpc`) | 标准 `supervisord.*` / `supervisor.process.*` 方法面 + Basic auth(`[inet_http_server]` username/password);挂在现有 Axum 独立 router(同进程,复用 UDS/端口);长期目标 stock `supervisorctl` 直连;**group 方法面因 #4 搁置暂为 stub**;日志方法走 #8 降级映射 | 标准 `supervisorctl` 的 status/start/stop/restart/signal/tail 全部通过 100%;auth 校验正确;`addProcessGroup` 等 stub 返回明确"未实现" |
+| #4 | 已实现(配置层 + 运行时) | **Group 元数据模型(轻量)+ 运行时 add/remove** | **配置层已在 `schema.rs` 落地**:`groups:`(programs + priority)、`ProgramConfig.group`、`resolve_programs` 的归属解析与校验齐全;**不做 GroupActor 重模型**。**运行时已按 Python 语义落地**:`ManagerCommand::AddProcessGroup`/`RemoveProcessGroup` 基于 pending 配置(镜像 `process_group_configs`)激活/移除,`ALREADY_ADDED`/`BAD_NAME`/`STILL_RUNNING` 与 stock 一致;移除仅动活动集,源配置保留 | 运行时注册/注销组原子成功;未运行组可移除、运行中组返回 `STILL_RUNNING`、组不存在返回 `BAD_NAME`;无孤儿进程 |
+| #5 | 立即 | **XML-RPC 协议适配层**(`server/xrpc`) | 标准 `supervisord.*` / `supervisor.process.*` 方法面 + Basic auth(`[inet_http_server]` username/password);挂在现有 Axum 独立 router(同进程,复用 UDS/端口);长期目标 stock `supervisorctl` 直连;**group 方法面与运行时 add/remove 已落地**;日志方法走 #8 降级映射 | 标准 `supervisorctl` 的 status/start/stop/restart/signal/tail 全部通过 100%;auth 校验正确;`addProcessGroup`/`removeProcessGroup` 返回 Python 一致的 fault 码 |
 | #6 | 条件性 | **Event Listener 协议** | 启用前提:drop-in 兼容监听/告警工具(如 superlance)成为硬需求。优先实现 **EventHub→listener 桥**(用 #2 的 INI 读 `[eventlistener:]` 段,桥一个适配器把 EventHub 事件喂给监听程序),原生 `READY`/`RESULT` 握手仅在桥不足以覆盖时再做 | **(启用时)**superlance `memmon` 等接入并收到 state/log 事件 |
 | #7 | 立即 | **sendProcessStdin(数据面)** | stdin 从 `Stdio::null()`(`process.rs:680`)改为 piped + manager→actor **Bounded 写通道**(背压:子进程不读时 Bounded+溢出丢弃+告警)+ 写入时机(不在 select! 内阻塞 write_all;独立 writer 任务或非阻塞 drain)+ **管道生存期管理**(wait_exit 后 drop 写端;对已退出进程写入返回错误;Restart 换新写端);F_EVENT 展开可选 | 注入 stdin 可被子进程读取;停止/退出后写通道安全关闭,无泄漏 |
 | #8 | 可选/顺带 | **原版 log 功能(字节偏移 / getLog)** | **否决"绝对字节游标"**:日志文件滚动使单调游标与轮转文件矛盾,引入更多问题。**参数面与 Python 版逐字段一致**(`tailProcessStdoutLog(name, offset, length)` → `(bytes, offset, total)`),语义映射到现有行级 ring buffer:offset=保留窗内行索引、length=行数、返回里 offset 推进为行游标、total=窗内行总数;**极大 offset(`0x7fffffffffffffff`,supervisorctl tail -f 约定)饱和为"从窗末追"**;降级行为明示(深历史不可达、重启归零) | 真 `supervisorctl tail -f` 可用(浅尾追);边界行为符合降级声明 |
@@ -134,9 +135,9 @@ Basic auth 兼容(`[inet_http_server]` username/password)。可覆盖的方法�
 
 ### 7.3 关键决策记录(本次讨论定论)
 
-- **numprocs(#3)/ Group(#4)**:**配置层已实现**(`schema.rs` 的字段、展开、归属与校验),不再作为待做项;仅**协议/运行时面**(XML-RPC group 方法、运行时 add/remove)搁置,`#5` 留 stub。
+- **numprocs(#3)/ Group(#4)**:**配置层已实现**(`schema.rs` 的字段、展开、归属与校验);**运行时 add/remove 已按 Python 语义落地**(pending 配置激活/移除,`ALREADY_ADDED`/`BAD_NAME`/`STILL_RUNNING`),`#5` 的 group 方法面与运行时 add/remove 均已接通。
 - **INI(#2)**:逐段字段映射、值格式与优先级详见 [`INI_COMPAT.md`](./INI_COMPAT.md);结论是**前端解析器 + 复用现有 resolve 管线**,执行骨架零改动。
-- **Event Listener(#6)**:条件性;优先 EventHub→listener 桥,原生握手仅按需再上。
+- **Event Listener(#6)**:已实现(READY/RESULT、事件分类、pool 背压、违约 UNKNOWN、`sendRemoteCommEvent`),详见 [`EVENTLISTENER_COMPAT.md`](./EVENTLISTENER_COMPAT.md);原生握手即协议本体,已直接落地。
 - **日志字节偏移(#8)**:否决绝对游标(旋转日志与之矛盾);改为**参数面一致 + 行级语义降级**,
   极大 tail offset 做饱和映射——保证真 `supervisorctl tail -f` 可用。
 - **日志"块式 Bytes 链 + 绝对游标"优化**:随口一提,非必要不实现;仅硬做原版 log 功能时顺带。

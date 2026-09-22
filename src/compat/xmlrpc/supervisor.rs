@@ -267,12 +267,34 @@ pub async fn handle_supervisor_method(
         "supervisor.restart" => Err(Fault::failed(
             "FAILED: daemon restart requires external supervisor; use reloadConfig or shutdown",
         )),
-        "supervisor.addProcessGroup" => Err(Fault::failed(
-            "FAILED: addProcessGroup at runtime is not supported",
-        )),
-        "supervisor.removeProcessGroup" => Err(Fault::failed(
-            "FAILED: removeProcessGroup at runtime is not supported",
-        )),
+        "supervisor.addProcessGroup" => {
+            let name = get_str_param(params, 0, "addProcessGroup requires group name parameter")?;
+            let ok = ctx
+                .manager
+                .add_process_group(name)
+                .await
+                .map_err(Fault::from)?;
+            if !ok {
+                return Err(Fault::already_added(name));
+            }
+            Ok(Value::Boolean(true))
+        }
+        "supervisor.removeProcessGroup" => {
+            let name = get_str_param(
+                params,
+                0,
+                "removeProcessGroup requires group name parameter",
+            )?;
+            let ok = ctx
+                .manager
+                .remove_process_group(name)
+                .await
+                .map_err(Fault::from)?;
+            if !ok {
+                return Err(Fault::still_running(name));
+            }
+            Ok(Value::Boolean(true))
+        }
         "supervisor.sendRemoteCommEvent" => {
             let type_str = get_str_param(params, 0, "type string required")?;
             let data = get_str_param(params, 1, "data string required")?;

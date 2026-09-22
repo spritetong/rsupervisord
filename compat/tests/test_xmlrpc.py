@@ -226,6 +226,32 @@ def test_start_stop_all(rpc, instance):
     assert instance.wait_state("services:ticker", "RUNNING", timeout=20)
 
 
+def test_add_remove_process_group(rpc):
+    # A group never seen in the source config => BAD_NAME for both add and remove.
+    with pytest.raises(Fault) as exc:
+        rpc.supervisor.addProcessGroup("doesnotexist")
+    assert exc.value.faultCode == 10  # BAD_NAME
+
+    with pytest.raises(Fault) as exc:
+        rpc.supervisor.removeProcessGroup("doesnotexist")
+    assert exc.value.faultCode == 10  # BAD_NAME
+
+    # An already-active group cannot be added again => ALREADY_ADDED.
+    with pytest.raises(Fault) as exc:
+        rpc.supervisor.addProcessGroup("echo")
+    assert exc.value.faultCode == 90  # ALREADY_ADDED
+
+    # Removing a stopped group deactivates it: process lookups then fail.
+    assert rpc.supervisor.removeProcessGroup("echo") is True
+    with pytest.raises(Fault) as exc:
+        assert rpc.supervisor.getProcessInfo("echo")
+    assert exc.value.faultCode == 10  # BAD_NAME
+
+    # Re-adding re-activates the group from the source config.
+    assert rpc.supervisor.addProcessGroup("echo") is True
+    assert rpc.supervisor.getProcessInfo("echo")["name"] == "echo"
+
+
 def test_signal_process(rpc, instance):
     assert instance.wait_state("services:ticker", "RUNNING")
     assert rpc.supervisor.signalProcess("services:ticker", "HUP") is True

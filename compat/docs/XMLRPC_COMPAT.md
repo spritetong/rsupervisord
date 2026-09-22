@@ -24,7 +24,7 @@
 | :--- | :--- |
 | **P0** | 让 stock `supervisorctl` 的日常命令直连可用(status/start/stop/restart/signal/tail/maintail/version/shutdown/reread/update/all)。 |
 | **P1** | 完整覆盖其余只读/辅助方法(clear、read*、avail/getAllConfigInfo、system.* 内省、group 级 signal)。 |
-| **P2 / 搁置** | 依赖搁置项(#4 运行时组、#6 事件)或 daemon 重启语义。 |
+| **P2 / 搁置** | 依赖 daemon 重启语义(`restart`),或尚无对应基础能力的项。 |
 | **不支持 / 降级** | 复杂或与架构冲突,明确声明降级行为。 |
 
 ---
@@ -113,11 +113,11 @@
 | `clearProcessLogs` | **P1** | `(name) → bool` | 程序日志清空 | 轮转重置 |
 | `clearAllProcessLogs` | **P1** | `() → [struct]` | 全量清空 | 结果 struct 适配 |
 | `reloadConfig` | **P0** | `() → [[added,changed,removed]]` | `ReloadConfig` → `ReloadSummary` | 见 §7.3 |
-| `addProcessGroup` | **P2/搁置** | `(name) → bool` | — | 依赖 #4 运行时组;**stub 返回明确未实现** |
-| `removeProcessGroup` | **P2/搁置** | `(name) → bool` | — | 同上 |
+| `addProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::AddProcessGroup`(pending 配置激活) | Python 语义:未在源配置 → `BAD_NAME`;已激活 → `ALREADY_ADDED` |
+| `removeProcessGroup` | **P1** | `(name) → bool` | `ManagerCommand::RemoveProcessGroup`(仅移除活动组,源配置保留) | Python 语义:未激活 → `BAD_NAME`;运行中 → `STILL_RUNNING` |
 | `getAllConfigInfo` | **P1** | `() → [struct]` | 配置(raw)+ `inuse` 计算 | 字段子集,见 §7.4 |
 | `sendProcessStdin` | **P1** | `(name, chars) → bool` | `SendStdin`(依赖 **#7**) | #7 未落地前返回 `FAILED`/`NO_FILE` |
-| `sendRemoteCommEvent` | **P2/搁置** | `(type, data) → bool` | EventHub(依赖 **#6**) | 依赖事件监听 |
+| `sendRemoteCommEvent` | **P0** | `(type, data) → bool` | `send_remote_comm_event` → `REMOTE_COMMUNICATION` | 直达事件监听池 |
 | `shutdown` | **P0** | `() → bool` | `ManagerCommand::Shutdown` | 直接 |
 | `restart` | **P2** | `() → bool` | daemon 重启(非 hot-reload) | **语义差异**:见 §7.5 |
 | 别名 `getVersion`/`readMainLog`/`readProcessLog`/`tailProcessLog`/`clearProcessLog` | **P0/P1** | 同对应方法 | 直接转发 | 零成本,必做 |
@@ -232,10 +232,10 @@ Python 返回每个 program(组被摊平)的**配置快照**,键含:`autostart, 
 7. `readProcessStdoutLog`/`readProcessStderrLog`、`clearLog`/`clearProcessLogs`/`clearAllProcessLogs`。
 8. `signalProcessGroup`/`signalAllProcesses`、`getAllConfigInfo`。
 9. `sendProcessStdin`(#7 后)、`system.listMethods`/`methodHelp`/`methodSignature`/`multicall`。
+10. `addProcessGroup`/`removeProcessGroup`(pending 配置激活/移除,Python 语义)。
 
 **P2 / 搁置**
-10. `addProcessGroup`/`removeProcessGroup`(#4 运行时组)。
-11. `sendRemoteCommEvent`(#6)、`restart`(daemon 重启语义)。
+11. `restart`(daemon 重启语义)。
 
 **不支持 / 降级**
 12. 长操作回调分块(`NOT_DONE_YET`)→ **同步返回降级**。

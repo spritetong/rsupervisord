@@ -229,6 +229,14 @@ impl EventListenerPool {
                         .accept_event("PROCESS_GROUP_REMOVED", &format!("groupname:{}\n", g));
                 }
             }
+            SystemEvent::ProcessGroupAdded { group } => {
+                self.inner
+                    .accept_event("PROCESS_GROUP_ADDED", &format!("groupname:{}\n", group));
+            }
+            SystemEvent::ProcessGroupRemoved { group } => {
+                self.inner
+                    .accept_event("PROCESS_GROUP_REMOVED", &format!("groupname:{}\n", group));
+            }
             _ => {}
         }
     }

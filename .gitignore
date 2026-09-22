@@ -16,7 +16,6 @@ __pycache__
 *.bak
 *.log
 *.lock
-!Cargo.lock
 *.old
 *.out
 *.pid
@@ -29,4 +28,3 @@ __pycache__
 
 /config.yaml
 /Makefile
-/go-supervisord

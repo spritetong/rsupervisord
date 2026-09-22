@@ -48,16 +48,16 @@ The suite selects its target from the same corpus:
 - **native** tests (`-m native`) run only against the compiled bin.
 - **oracle** tests (`-m oracle`) need a server that speaks XML-RPC. Against the
   compiled bin they are **capability-probed** at `/RPC2`; XML-RPC is implemented,
-  so they run. The **event-listener** module is separately gated on the target
-  running `[eventlistener:*]` pools (feature #6): it is reported as **`xfail`**
-  with a reason pointing at `docs/EVENTLISTENER_COMPAT.md`.
-  `SUPERVISOR_STRICT=1` turns gated tests into hard failures.
+  so they run, including `addProcessGroup`/`removeProcessGroup`. The **event-listener**
+  module (feature #6) is implemented and its oracle tests run against the compiled
+  bin as well. `SUPERVISOR_STRICT=1` turns gated tests into hard failures.
 
 | Run | Result |
 | :--- | :--- |
-| `SUPERVISOR_TARGET=python` | 68 passed, 5 skipped |
-| default (compiled bin) | 64 passed, 9 xfailed (event listener, feature #6) |
-| `SUPERVISOR_STRICT=1` (compiled bin) | 64 passed, 9 errors (= the #6 backlog) |
+| `SUPERVISOR_TARGET=python` | 69 passed, 5 skipped |
+| default compiled bin (YAML) | 74 passed |
+| compiled bin with `SUPERVISOR_RSD_FORMAT=ini` | 74 passed |
+| `SUPERVISOR_STRICT=1` (compiled bin) | 74 passed |
 
 ## Layout
 

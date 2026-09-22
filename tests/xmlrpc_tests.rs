@@ -489,13 +489,46 @@ programs:
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<boolean>1</boolean>"));
 
-    // 5. Unsupported runtime group modification stubs
+    // 5. Runtime addProcessGroup / removeProcessGroup (Python-compatible semantics)
+    //    - add of a group not present in the source config => BAD_NAME
     let req = "<methodCall><methodName>supervisor.addProcessGroup</methodName><params><param><value><string>dyn_grp</string></value></param></params></methodCall>";
     let (status, body) = call_rpc(&app, req, None).await;
     assert_eq!(status, StatusCode::OK);
-    let (code, msg) = parse_fault(&body);
-    assert_eq!(code, FaultCode::Failed.code());
-    assert!(msg.contains("not supported"));
+    let (code, _) = parse_fault(&body);
+    assert_eq!(code, FaultCode::BadName.code());
+
+    //    - remove of a group that is not active => BAD_NAME
+    let req = "<methodCall><methodName>supervisor.removeProcessGroup</methodName><params><param><value><string>dyn_grp</string></value></param></params></methodCall>";
+    let (status, body) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (code, _) = parse_fault(&body);
+    assert_eq!(code, FaultCode::BadName.code());
+
+    //    - remove of a stopped group succeeds
+    let req = "<methodCall><methodName>supervisor.removeProcessGroup</methodName><params><param><value><string>alpha</string></value></param></params></methodCall>";
+    let (status, body) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<boolean>1</boolean>"));
+
+    //    - the group is gone from the active set but stays in the source config
+    let req = "<methodCall><methodName>supervisor.removeProcessGroup</methodName><params><param><value><string>alpha</string></value></param></params></methodCall>";
+    let (status, body) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (code, _) = parse_fault(&body);
+    assert_eq!(code, FaultCode::BadName.code());
+
+    //    - re-adding a removed group re-activates it from the source config
+    let req = "<methodCall><methodName>supervisor.addProcessGroup</methodName><params><param><value><string>alpha</string></value></param></params></methodCall>";
+    let (status, body) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<boolean>1</boolean>"));
+
+    //    - adding an already-active group => ALREADY_ADDED
+    let req = "<methodCall><methodName>supervisor.addProcessGroup</methodName><params><param><value><string>alpha</string></value></param></params></methodCall>";
+    let (status, body) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (code, _) = parse_fault(&body);
+    assert_eq!(code, FaultCode::AlreadyAdded.code());
 
     manager.shutdown().await.unwrap();
 }

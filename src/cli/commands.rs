@@ -443,6 +443,20 @@ pub async fn handle_events(client: &SupervisorClient) -> Result<()> {
                     crate::manager::SystemEvent::RemoteCommunication { type_str, data } => {
                         println!("RemoteCommunication: type={} len={}", type_str, data.len());
                     }
+                    crate::manager::SystemEvent::ProcessGroupAdded { group } => {
+                        println!(
+                            "{}: group={}",
+                            "ProcessGroupAdded".green().bold(),
+                            group.cyan().bold()
+                        );
+                    }
+                    crate::manager::SystemEvent::ProcessGroupRemoved { group } => {
+                        println!(
+                            "{}: group={}",
+                            "ProcessGroupRemoved".red().bold(),
+                            group.cyan().bold()
+                        );
+                    }
                 }
             } else {
                 println!("{}", line);

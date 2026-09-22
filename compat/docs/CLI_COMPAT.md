@@ -38,33 +38,78 @@
 
 ---
 
+## 2.1 兼容定位:契约 vs 体验(总纲)
+
+一条判断规则:
+
+> **某个输出会不会被旧脚本用管道消费?** 会 → **契约面**,必须与 Python 逐字 / 逐字节 / 逐退出码对齐;
+> 不会 → **体验面**,自由设计,且应刻意做得比 Python 现代。
+
+立场:**兼容是为了迁就不愿意迁移的旧应用,只覆盖它们会踩的接口;不是为 Python 的 UX 当老好人。**
+下文 §3–§7 每项均按此拆成两层标注。
+
+### 契约面(旧脚本依赖,oracle 测试锁死)
+
+| 面 | 项 | 为什么是契约 |
+| :--- | :--- | :--- |
+| 命令语法 + namespec | `stop mygroup:*`、`start all` | 脚本逐字调用 |
+| LSB 退出码 | `status >/dev/null; [ $? -eq 3 ]` | 这套 CLI 价值最高的兼容点 |
+| `status` 非 TTY 纯文本 | `status \| grep RUNNING` | 模板 `%(namespec)-33s%(state)-10s%(desc)s`(见 §4.2) |
+| `pid` 纯数字输出 | `pid=$(supervisorctl pid web)` | 数值直取 |
+| `tail` / `maintail` 字节上界 | `tail -100 web \| wc -c` | 字节语义 |
+| `reread` / `update` 行 | `reread \| grep available` | `name: available\|changed\|disappeared` |
+| `start` / `stop` / `restart` 结果行 | `\| grep -q started` | `namespec: started\|stopped` 与 `ERROR (...)`,在 stdout |
+| `avail` 非 TTY 列 | `avail \| awk '{print $1}'` | 列位固定 |
+| `-u/-p/-s/-c`(短 + 长名) | `supervisorctl -u a -p b status` | 脚本固定调用 |
+
+### 体验面(自由 → 刻意现代)
+
+| 面 | Python 现状 | rsupervisord 的做法 |
+| :--- | :--- | :--- |
+| `version` | 打印 daemon 版本 `4.2.5` | 打印自身身份 `rsupervisorctl <ver> (protocol supervisor 4.2.5)`;保留兼容标记,主体是"自己" |
+| `help` / `--help` | flat 命令列表 | clap 渲染:分组、示例、别名标注 |
+| 错误细节 | 混在 stdout 结果行里 | stdout 只走契约行;细节进 **stderr**,结构化、带上下文 |
+| `shutdown` / `reload` 文案 | `Shut down` / `Restarted supervisord` | 按自己的口气;退出码仍是契约 |
+| TTY 下的表格 / 颜色 | 逐字固定 | 表格 + 状态着色 + 高亮(已有,保留) |
+
+### 落地机关
+
+1. **测试只钉契约面**:`test_cli.py`(stock `supervisorctl` 直连)与 §10 脚本化验收逐项断言
+   退出码 / stdout 文本形状 / 字节上界;**体验面绝不入测试**——`version`/`help` 的文案、
+   TTY 表格渲染、错误 prose 均不设断言,现代化有完全自由且不被测试冻结。
+2. **契约面交给 oracle**:`test_cli.py`(stock `supervisorctl` 直连)与 §9 验收逐项断言,
+   由 XML-RPC/#5 门控自动放行。
+
+---
+
 ## 3. 总览
 
 ### 3.1 命令面
 
-| 命令 | Python 4.2.5 | Go 参考 | rsupervisorctl 现状 | 优先级 |
-| :--- | :--- | :--- | :--- | :--- |
-| `status` | ✅ 支持 namespec/`all` | ✅ | ⚠️ 有,但表格输出、无退出码 | **P0** |
-| `help` | ✅ | ❌ | ❌ | **P0** |
-| `version` | ✅ | ⚠️ 顶层 `version` | ❌ | **P0** |
-| `pid` | ✅ | ✅ | ❌ | **P0** |
-| `shutdown` | ✅ | ✅ | ❌ | **P0** |
-| `reload` | ✅(重启 daemon) | ✅(同 Python) | ⚠️ **语义相反**(热重载) | **P0** |
-| `reread` | ✅ | ✅ | ❌ | **P0** |
-| `update` | ✅ | ✅ | ⚠️ 能力在 `reload` 里 | **P0** |
-| `start` / `stop` / `restart` | ✅ namespec/`all` | ✅ | ⚠️ 有,namespec 语义待对齐 | **P0** |
-| `tail` | ✅ `[-f\|-N] <name> [stdout\|stderr]` | ⚠️ 无 `-N` | ⚠️ 形态不同(`-n` 行、无 channel) | **P0** |
-| `signal` | ✅ | ✅ | ❌ | **P1** |
-| `avail` | ✅ | ❌ | ❌ | **P1** |
-| `open` | ✅ | ❌ | ❌ | **P1** |
-| `maintail` | ✅ | ❌ | ❌ | **P1** |
-| `clear` | ✅ | ✅ | ❌ | **P2** |
-| `add` / `remove` | ✅ | ✅ | ❌ | **P2**(依赖 #3/#4) |
-| `fg` | ✅ | ✅(简化实现) | ❌ | **P2**(参考 Go) |
-| `quit` / `exit` / `^D` | ✅ | ❌ | ❌ | **不支持**(随交互 shell) |
-| (交互 shell) | ✅ | ❌ | ❌ | **不支持** |
-| `events` | ❌(扩展) | ✅ | ✅ | 保留扩展 |
-| `stdin` | ❌(扩展) | ❌(仅 XML-RPC) | ✅ | 保留扩展 |
+| 命令 | Python 4.2.5 | Go 参考 | rsupervisorctl 现状 | 优先级 | 定位 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `status` | ✅ 支持 namespec/`all` | ✅ | ⚠️ 有,但表格输出、无退出码 | **P0** | 契约(TTY 表格=体验) |
+| `help` | ✅ | ❌ | ❌ | **P0** | 体验 |
+| `version` | ✅ | ⚠️ 顶层 `version` | ❌ | **P0** | 体验(语法需存在) |
+| `pid` | ✅ | ✅ | ❌ | **P0** | 契约 |
+| `shutdown` | ✅ | ✅ | ❌ | **P0** | 契约(退出码)/文案体验 |
+| `reload` | ✅(重启 daemon) | ✅(同 Python) | ⚠️ 现为热重载,待改名 | **P0** | 契约(语义:重启 daemon) |
+| `reload-config` | ❌(扩展) | ❌ | ✅(现 `reload` 改名) | 保留扩展 | 扩展(热重载) |
+| `reread` | ✅ | ✅ | ❌ | **P0** | 契约 |
+| `update` | ✅ | ✅ | ⚠️ 能力在 `reload` 里 | **P0** | 契约 |
+| `start` / `stop` / `restart` | ✅ namespec/`all` | ✅ | ⚠️ 有,namespec 语义待对齐 | **P0** | 契约 |
+| `tail` | ✅ `[-f\|-N] <name> [stdout\|stderr]` | ⚠️ 无 `-N` | ⚠️ 形态不同(`-n` 行、无 channel) | **P0** | 契约 |
+| `signal` | ✅ | ✅ | ❌ | **P1** | 契约 |
+| `avail` | ✅ | ❌ | ❌ | **P1** | 契约(非 TTY 列) |
+| `open` | ✅ | ❌ | ❌ | **P1** | 体验 |
+| `maintail` | ✅ | ❌ | ❌ | **P1** | 契约 |
+| `clear` | ✅ | ✅ | ❌ | **P2** | 契约 |
+| `add` / `remove` | ✅ | ✅ | ❌ | **P2**(依赖 #3/#4) | 契约 |
+| `fg` | ✅ | ✅(简化实现) | ❌ | **P2**(参考 Go) | 扩展(非真 PTY,Go 简化形态) |
+| `quit` / `exit` / `^D` | ✅ | ❌ | ❌ | **不支持**(随交互 shell) | 不支持 |
+| (交互 shell) | ✅ | ❌ | ❌ | **不支持** | 不支持 |
+| `events` | ❌(扩展) | ✅ | ✅ | 保留扩展 | 扩展 |
+| `stdin` | ❌(扩展) | ❌(仅 XML-RPC) | ✅ | 保留扩展 | 扩展 |
 
 ### 3.2 客户端参数
 
@@ -157,7 +202,9 @@ rsupervisorctl start all
 
 ---
 
-## 5. 客户端参数需求
+## 5. 客户端参数需求〔契约面〕
+
+> 参数是旧脚本的固定调用点,均属**契约面**;`§5.2` 的 rsupervisord 独有扩展除外。
 
 ### 5.1 P0
 
@@ -211,7 +258,7 @@ rsupervisorctl --configuration /etc/supervisord.conf status
 
 ### 6.1 P0
 
-#### 6.1.1 `help`
+#### 6.1.1 `help`〔体验面〕
 
 **语法**:`help [action]`
 **语义**:无参列出全部动作;带参打印该动作帮助。
@@ -222,24 +269,28 @@ rsupervisorctl help
 rsupervisorctl help start
 ```
 
+**定位**:体验面(见 §2.1)。**不逐字对齐** Python 的 flat 列表,用 `clap` 现代渲染:分组、示例、别名标注。
 **现状**:无。可用 `clap` 帮助文本转接实现。
 
-#### 6.1.2 `version`
+#### 6.1.2 `version`〔体验面〕
 
 **语法**:`version`
-**语义**:打印远端 daemon 版本(`getSupervisorVersion`)。
+**语义**(**不对齐 Python 输出**):打印 rsupervisord 自身身份;附一行兼容协议标记。不再复读 `4.2.5`。
 **示例**
 
 ```bash
-rsupervisorctl version   # -> 4.2.5
+rsupervisorctl version
+# rsupervisorctl 0.6.0 (protocol supervisor 4.2.5)
 ```
 
-**现状**:无(有 `--version` 但那是客户端自身版本,语义不同)。
+**定位**:体验面(语法需要存在即可,格式自由;见 §2.1)。
+**现状**:无(有 `--version` 但那是客户端自身版本,语义不同——本次把 `version` 的语义修正为"打印自身身份",`--version` 归并/保持)。
 
-#### 6.1.3 `pid`
+#### 6.1.3 `pid`〔契约面〕
 
 **语法**:`pid [name…]` / `pid all`
-**语义**:无参=daemon PID;`all`=每个子进程一行;指定名=该进程 PID;PID==0 时退出码 7。
+**语义**:无参=daemon PID;`all`=每个子进程一行;指定名=该进程 PID;PID==0 时退出码 7。输出**仅数字/行**,可被 `pid=$(...)` 消费。
+**定位**:契约面。
 **示例**
 
 ```bash
@@ -250,10 +301,11 @@ rsupervisorctl pid all
 
 **现状**:无。
 
-#### 6.1.4 `shutdown`
+#### 6.1.4 `shutdown`〔契约面·文案体验〕
 
 **语法**:`shutdown`
-**语义**:关闭远端 daemon。接受参数时报错(退出码 1)。交互模式需确认;非交互直接执行。输出 `Shut down`。
+**语义**:关闭远端 daemon。接受参数时报错(退出码 1)。交互模式需确认;非交互直接执行。
+**定位**:退出码为契约;输出文案 `Shut down` 属体验面,可按自己的口气(C中一致即可)。
 **示例**
 
 ```bash
@@ -262,10 +314,12 @@ rsupervisorctl shutdown
 
 **现状**:无。
 
-#### 6.1.5 `reload`(语义裁决)
+#### 6.1.5 `reload`(语义裁决)〔契约面〕
 
 **语法**:`reload`
-**语义(对齐 Python)**:重启远端 daemon(停全部→重读配置→再启动);接受参数报错。输出 `Restarted supervisord`。
+**语义(对齐 Python)**:重启远端 daemon(停全部→重读配置→再启动);接受参数报错。
+**定位**:契约面——`reload` 的**语义**必须与 Python 一致(重启 daemon);输出文案属体验面。
+**输出**:契约行 `Restarted supervisord`(单一、稳定);daemon 实现见 §9 相关的重启(main loop)设计。
 
 > **⚠️ 高危冲突**:当前 `rsupervisorctl reload` 是**热重载配置**(不重启 daemon),与 Python 相反。Python 中:
 > - `reread` = 仅重读配置、**不增删**
@@ -278,12 +332,13 @@ rsupervisorctl shutdown
 rsupervisorctl reload        # 重启 daemon
 ```
 
-**现状差距**:需把现有热重载能力迁到 `update`,并把 `reload` 改为重启 daemon。若需保留"零停机热重载"作为扩展,另起不冲突的名字(如 `hotreload`)。
+**现状差距**:需把现有热重载能力改名 **`reload-config`**(扩展命令,见 §6.4),并把 `reload` 改为重启 daemon。daemon 侧两条路分离:热重载仍走 `/api/v1/reload`,`reload` 走新重启(main loop)语义。
 
-#### 6.1.6 `reread`
+#### 6.1.6 `reread`〔契约面〕
 
 **语法**:`reread`
 **语义**:重读配置,**不增删进程**。输出变更清单:每行 `name: available|changed|disappeared`,无变更输出 `No config updates to processes`。
+**定位**:契约面(行可被 `reread \| grep available` 消费)。
 **示例**
 
 ```
@@ -294,10 +349,11 @@ api: available
 
 **现状**:无(能力部分在现 `reload` 里)。
 
-#### 6.1.7 `update`
+#### 6.1.7 `update`〔契约面〕
 
 **语法**:`update [gname…]` / `update all`
 **语义**:重读配置 + 增删 + 重启受影响组。输出:`gname: stopped` / `gname: removed process group` / `gname: updated process group` / `gname: added process group`。
+**定位**:契约面(行可被脚本消费)。
 **示例**
 
 ```bash
@@ -308,10 +364,11 @@ rsupervisorctl update all
 
 **现状**:现有 `reload` 能力即此项,建议改名迁移。
 
-#### 6.1.8 `status`(改造)
+#### 6.1.8 `status`(改造)〔契约面〕
 
 **语法**:`status [name…|gname:*|all]`
 **语义**:无参或 `all`=全部;支持 `group:*` 与多名字;不存在名字输出 `X: ERROR (no such group|process)` 并置退出码 4;任一进程 STOPPED 置退出码 3。
+**定位**:契约面——**非 TTY** 下必须输出 Python 模板 `%(namespec)-33s %(state)-10s %(desc)s` 纯文本并可被 `grep`/`awk` 消费;**TTY** 输出现有表格+着色属体验面,自由。
 **示例**
 
 ```bash
@@ -322,7 +379,7 @@ rsupervisorctl status mygroup:*
 
 **现状差距**:输出为表格(见 §4.2);缺退出码;`group:*` 过滤待核对。
 
-#### 6.1.9 `start` / `stop` / `restart`(对齐)
+#### 6.1.9 `start` / `stop` / `restart`(对齐)〔契约面〕
 
 **语法**
 
@@ -330,6 +387,7 @@ rsupervisorctl status mygroup:*
 - `stop <name…>` / `stop all` / `stop gname:*`
 - `restart <name…>` / `restart all` / `restart gname:*`
 
+**定位**:契约面——结果行 `namespec: started|stopped` 与错误行 `namespec: ERROR (…)` **在 stdout**,可被 `\| grep -q started` 消费。
 **语义**:支持 namespec 与 `all`;`restart` = stop+start,**不重读配置**;`start` 缺参退出码 2,其余缺参退出码 1;死进程类错误退出码 7;输出 `namespec: started|stopped`,错误 `namespec: ERROR (…)`。
 
 **示例**
@@ -342,10 +400,11 @@ rsupervisorctl restart all
 
 **现状差距**:已有 `-a/--async`、`-t/--timeout`(**Python 无此参数,保留为扩展**);需对齐 namespec/`all`/退出码/输出文本。
 
-#### 6.1.10 `tail`(改造)
+#### 6.1.10 `tail`(改造)〔契约面〕
 
 **语法**:`tail [-f|-N] <name> [stdout|stderr]`
 **语义**:默认 `stdout`;默认取末尾 **1600 字节**;`-f` 持续跟随;`-N` 取末尾 N 字节。
+**定位**:契约面——字节上界可被 `tail -100 web \| wc -c` 校验。
 
 **示例**
 
@@ -365,10 +424,11 @@ rsupervisorctl tail -f web         # 持续跟随
 
 ### 6.2 P1
 
-#### 6.2.1 `signal`
+#### 6.2.1 `signal`〔契约面〕
 
 **语法**:`signal <sig> <name…>` / `signal <sig> all` / `signal <sig> gname:*`
 **语义**:发送信号;需 ≥2 参;输出 `namespec: signalled`。
+**定位**:契约面(结果行随 start/stop/restart 规则)。
 **示例**
 
 ```bash
@@ -378,10 +438,11 @@ rsupervisorctl signal TERM all
 
 **现状**:无。依赖 daemon 的信号能力。
 
-#### 6.2.2 `avail`
+#### 6.2.2 `avail`〔契约面〕
 
 **语法**:`avail`
 **语义**:列出全部已配置进程;模板 `'%(name)-32s %(inuse)-9s %(autostart)-9s %(priority)s'`,`inuse`=in use/avail,`autostart`=auto/manual,`priority`=`group_prio:process_prio`。
+**定位**:契约面——**非 TTY** 列位固定,可被 `awk '{print $1}'` 消费;TTY 高亮属体验面。
 **示例**
 
 ```
@@ -391,10 +452,11 @@ api                              avail     manual    999:999
 
 **现状**:无(有 `/api/v1/status` 可复用)。
 
-#### 6.2.3 `open`
+#### 6.2.3 `open`〔体验面〕
 
 **语法**:`open <url>`
 **语义**:切换当前会话的 serverurl,仅接受 `http://` 或 `unix://`。
+**定位**:体验面(会话级操作,无脚本消费场景;语法对齐即可)。
 **示例**
 
 ```bash
@@ -403,10 +465,11 @@ rsupervisorctl open unix:///run/rsupervisord.sock
 
 **现状**:无(廉价)。
 
-#### 6.2.4 `maintail`
+#### 6.2.4 `maintail`〔契约面〕
 
 **语法**:`maintail [-f|-N]`
 **语义**:tail **daemon 自身**日志;默认 1600 字节。
+**定位**:契约面——字节上界与 `tail` 同规则。
 **示例**
 
 ```bash
@@ -418,10 +481,11 @@ rsupervisorctl maintail -f
 
 ### 6.3 P2
 
-#### 6.3.1 `clear`
+#### 6.3.1 `clear`〔契约面〕
 
 **语法**:`clear <name…>` / `clear all`
 **语义**:清空进程日志;输出 `namespec: cleared`。
+**定位**:契约面(结果行随 start/stop/restart 规则)。
 **示例**
 
 ```bash
@@ -431,10 +495,11 @@ rsupervisorctl clear all
 
 **现状**:无。需日志清理能力(截断文件 + 清空 ring buffer)。
 
-#### 6.3.2 `add` / `remove`
+#### 6.3.2 `add` / `remove`〔契约面〕
 
 **语法**:`add <name…>` / `remove <name…>`
 **语义**:运行时激活/移除配置中的组;`remove` 对仍在运行的组报错。
+**定位**:契约面(命令语法/退出码;结果行随通用规则)。
 **示例**
 
 ```bash
@@ -442,9 +507,9 @@ rsupervisorctl add newgroup
 rsupervisorctl remove oldgroup
 ```
 
-**现状**:无。**依赖 #3/#4(已搁置)**,先返回明确的"未实现"(退出码 3)。
+**现状**:无。**依赖 #3/#4(已落地)**,转为 N/A——daemon 侧 `addProcessGroup`/`removeProcessGroup` 与 XML-RPC 已实现(见 `XMLRPC_COMPAT.md`),剩 CLI 接线。
 
-#### 6.3.3 `fg`
+#### 6.3.3 `fg`〔扩展〕
 
 **语法**:`fg <name>`
 **语义**:前台接管:跟随 stdout+stderr,并把终端输入转发到进程 stdin。
@@ -462,6 +527,7 @@ rsupervisorctl fg web
 | :--- | :--- |
 | `events` | SSE 实时系统事件流(rsupervisord 独有) |
 | `stdin <name> <chars>` | 向进程 stdin 注入(Python 仅 XML-RPC 暴露,无 CLI) |
+| `reload-config` | 零停机热重载(原 `reload` 改名;`reload` 归位为"重启 daemon"的 Python 语义) |
 
 ### 6.5 不支持
 
@@ -514,7 +580,27 @@ rsupervisorctl --configuration /etc/supervisord.conf status
 
 两个兼容目标分别对应两套可执行基准(见 [`../compat/README.md`](../compat/README.md)):
 
-- **目标 B(native 语法对齐)**:[`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) 对编译出的 `rsupervisorctl` 做冒烟验证(`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload`),默认靶标下 **5 passed**。
+- **目标 B(native 语法对齐)**:[`../compat/tests/test_native_cli.py`](../compat/tests/test_native_cli.py) 对编译出的 `rsupervisorctl` 做**契约面**冒烟验证(`status` / `start` / `stop` / `restart` / `tail` / `stdin` / `reload-config`;退出码 + 状态断言,**不断言 UX 文案**),默认靶标下 **5 passed**(CLI 改名落地前 `reload-config` 一例 `skip`,落地后自动回归 5 passed)。
 - **目标 A(未改动的 stock `supervisorctl` 直连)**:[`../compat/tests/test_cli.py`](../compat/tests/test_cli.py) 的 27 例为 oracle,先在 Python 4.2.5 上 **27 passed**;对编译 bin 因 `/RPC2` 未实现而统一 `xfail`(同 [`XMLRPC_COMPAT.md`](./XMLRPC_COMPAT.md) §12)。
 
 即:§6/§7 列出的 P0/P1 需求,一旦服务端具备 XML-RPC(§7 #5),上述 oracle 会**自动**由 `xfail` 转为逐项断言。
+
+---
+
+## 10. 契约 vs 体验 — 测试分工
+
+契约面与体验面在测试中的待遇**截然不同**:
+
+| 层 | 测试策略 | 断言点 |
+| :--- | :--- | :--- |
+| **契约面** | **严格硬化**(oracle/§7 脚本化验收) | 退出码、stdout 文本形状、字节上界、命令语法 |
+| **体验面** | **不设断言、也设防"被测试"** | `version`/`help` 文案、TTY 表格、错误 prose、stderr 细节——**严禁进入验证脚本** |
+
+要点:
+
+- `test_cli.py`(stock `supervisorctl` 直连)是契约面的权威 oracle;`test_native_cli.py` 只做
+  **契约面**的 native 冒烟(`status`/`start`/`stop`/`restart`/`tail`/`pid`/`reread`/`update`…),
+  且每条只断言退出码与 stdout 可机器消费的形式,**不断言任何 UX 文案**。
+- 现代化是自由选择:**不许用测试把"现代"钉死**(例如不写"`version` 不得含 `4.2.5`"),
+  也不许用测试把"Python 原样"钉死。契约不倒退、现代化不冻结。
+- 契约面的每一条断言都源自 §2.1 / §6 / §7;体验面在验证脚本中**没有**对应条目。

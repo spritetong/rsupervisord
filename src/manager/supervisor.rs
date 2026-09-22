@@ -74,6 +74,14 @@ pub enum ManagerCommand {
         new_config: Box<SupervisorConfig>,
         reply: oneshot::Sender<Result<ReloadSummary, ProgramError>>,
     },
+    AddProcessGroup {
+        name: String,
+        reply: oneshot::Sender<Result<bool, ProgramError>>,
+    },
+    RemoveProcessGroup {
+        name: String,
+        reply: oneshot::Sender<Result<bool, ProgramError>>,
+    },
     GetStatus {
         name: String,
         reply: oneshot::Sender<Result<ProgramStatus, ProgramError>>,
@@ -437,6 +445,56 @@ impl ManagerHandle {
             })?
     }
 
+    pub async fn add_process_group(&self, name: &str) -> Result<bool, ProgramError> {
+        self.activity_tracker.record_activity();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::AddProcessGroup {
+                name: name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(60);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn remove_process_group(&self, name: &str) -> Result<bool, ProgramError> {
+        self.activity_tracker.record_activity();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::RemoveProcessGroup {
+                name: name.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = Duration::from_secs(120);
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
     pub async fn get_status(&self, name: &str) -> Result<ProgramStatus, ProgramError> {
         self.activity_tracker.record_activity();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -764,9 +822,14 @@ impl SupervisorManagerBuilder {
             cancel_token.clone(),
         );
 
+        // Track the newest fully-parsed config as the pending/source config; this mirrors
+        // Python Supervisor's `process_group_configs` used by addProcessGroup/removeProcessGroup.
+        let pending_configs = programs_map.clone();
+
         let actor = ManagerActor {
             programs,
             configs: programs_map,
+            pending_configs,
             dag,
             cron_table,
             watch_handle,
@@ -822,6 +885,7 @@ impl SupervisorManager {
 struct ManagerActor {
     programs: HashMap<String, Box<dyn Program>>,
     configs: HashMap<String, ProgramConfig>,
+    pending_configs: HashMap<String, ProgramConfig>,
     dag: DependencyGraph,
     cron_table: crate::manager::cron::CronTable,
     watch_handle: crate::manager::WatchServiceHandle,
@@ -941,6 +1005,22 @@ impl ManagerActor {
                                 let _ = reply.send(Err(ProgramError::ShuttingDown { name: "manager".to_string() }));
                             } else {
                                 let res = self.execute_reload_config(*new_config).await;
+                                let _ = reply.send(res);
+                            }
+                        }
+                        ManagerCommand::AddProcessGroup { name, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
+                            } else {
+                                let res = self.execute_add_process_group(&name).await;
+                                let _ = reply.send(res);
+                            }
+                        }
+                        ManagerCommand::RemoveProcessGroup { name, reply } => {
+                            if self.is_shutting_down {
+                                let _ = reply.send(Err(ProgramError::ShuttingDown { name: name.clone() }));
+                            } else {
+                                let res = self.execute_remove_process_group(&name).await;
                                 let _ = reply.send(res);
                             }
                         }
@@ -1275,6 +1355,10 @@ impl ManagerActor {
         let new_programs_map = new_config.resolve_programs()?;
         let new_dag = DependencyGraph::build(&new_programs_map)?;
 
+        // The newly parsed config becomes the pending/source config for
+        // addProcessGroup/removeProcessGroup, mirroring process_group_configs.
+        self.pending_configs = new_programs_map.clone();
+
         let diff = ConfigDiff::compute(&self.configs, &new_programs_map);
 
         let summary = ReloadSummary {
@@ -1355,6 +1439,102 @@ impl ManagerActor {
             });
 
         Ok(summary)
+    }
+
+    /// Activates a process group from the pending/source config at runtime.
+    /// Mirrors Python's `supervisord.add_process_group`: returns Ok(false) when the
+    /// group is already active (ALREADY_ADDED), Err(NotFound) when the group does not
+    /// exist in the pending config (BAD_NAME).
+    async fn execute_add_process_group(&mut self, group: &str) -> Result<bool, ProgramError> {
+        if self.configs.values().any(|cfg| cfg.group == group) {
+            return Ok(false);
+        }
+
+        let candidates: Vec<ProgramConfig> = self
+            .pending_configs
+            .values()
+            .filter(|cfg| cfg.group == group)
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return Err(ProgramError::NotFound {
+                name: group.to_string(),
+            });
+        }
+
+        for cfg in &candidates {
+            let prog = instantiate_program(
+                cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut self.event_pools,
+            )?;
+            if cfg.autostart {
+                let _ = prog.start().await;
+            }
+            self.programs.insert(cfg.name.clone(), prog);
+            self.configs.insert(cfg.name.clone(), cfg.clone());
+        }
+
+        self.refresh_derived_state().await;
+        self.event_hub
+            .publish_system(crate::manager::SystemEvent::ProcessGroupAdded {
+                group: group.to_string(),
+            });
+        Ok(true)
+    }
+
+    /// Deactivates a process group from the active set at runtime.
+    /// Mirrors Python's `supervisord.remove_process_group`: returns Ok(false) while any
+    /// process in the group is still running (STILL_RUNNING), Err(NotFound) when the
+    /// group is not active (BAD_NAME). The group remains in the pending config.
+    async fn execute_remove_process_group(&mut self, group: &str) -> Result<bool, ProgramError> {
+        let active: Vec<String> = self
+            .configs
+            .values()
+            .filter(|cfg| cfg.group == group)
+            .map(|cfg| cfg.name.clone())
+            .collect();
+        if active.is_empty() {
+            return Err(ProgramError::NotFound {
+                name: group.to_string(),
+            });
+        }
+
+        for name in &active {
+            if let Some(prog) = self.programs.get(name) {
+                let st = prog.status();
+                if st.state.is_active() || matches!(st.state, ProgramState::Backoff) {
+                    return Ok(false);
+                }
+            }
+        }
+
+        for name in &active {
+            if let Some(mut prog) = self.programs.remove(name) {
+                let _ = prog.stop(Duration::from_secs(5)).await;
+                let _ = prog.shutdown().await;
+            }
+            self.configs.remove(name);
+        }
+
+        self.refresh_derived_state().await;
+        self.event_hub
+            .publish_system(crate::manager::SystemEvent::ProcessGroupRemoved {
+                group: group.to_string(),
+            });
+        Ok(true)
+    }
+
+    /// Rebuilds the derived scheduling structures after the active set changes.
+    async fn refresh_derived_state(&mut self) {
+        if let Ok(dag) = DependencyGraph::build(&self.configs) {
+            self.dag = dag;
+        }
+        self.cron_table = crate::manager::cron::CronTable::from_configs(&self.configs);
+        self.watch_handle.update_configs(self.configs.clone()).await;
     }
 
     /// Handles cron actions that became due at current wall-clock time.

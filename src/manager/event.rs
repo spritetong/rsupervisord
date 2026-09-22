@@ -45,6 +45,10 @@ pub enum SystemEvent {
         modified: Vec<String>,
         unchanged: Vec<String>,
     },
+    /// Fired when a process group is added at runtime via addProcessGroup.
+    ProcessGroupAdded { group: String },
+    /// Fired when a process group is removed at runtime via removeProcessGroup.
+    ProcessGroupRemoved { group: String },
     /// Fired on daemon-level lifecycle milestones (startup, shutdown).
     DaemonLifecycle { action: String, timestamp_secs: u64 },
     /// Fired when a program is scheduled or triggered by a cron expression.
@@ -100,7 +104,9 @@ impl SystemEvent {
             Self::ConfigReloaded { .. }
             | Self::DaemonLifecycle { .. }
             | Self::Tick { .. }
-            | Self::RemoteCommunication { .. } => None,
+            | Self::RemoteCommunication { .. }
+            | Self::ProcessGroupAdded { .. }
+            | Self::ProcessGroupRemoved { .. } => None,
         }
     }
 
