@@ -12,6 +12,7 @@ use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -915,7 +916,11 @@ impl ProgramActor {
             }
         }
 
-        let mut cmd = tokio::process::Command::new(&self.config.command);
+        let platform = crate::platform::native_platform();
+        let cmd_path = platform
+            .resolve_executable(&self.config.command, self.config.directory.as_deref())
+            .unwrap_or_else(|| PathBuf::from(&self.config.command));
+        let mut cmd = tokio::process::Command::new(&cmd_path);
         cmd.args(&self.config.args);
 
         if let Some(ref dir) = self.config.directory {
@@ -945,7 +950,6 @@ impl ProgramActor {
         }
 
         // Platform-agnostic pre-spawn configuration via PlatformBackend
-        let platform = crate::platform::native_platform();
         platform.configure_command(&mut cmd, self.config.user.as_deref(), self.config.umask)?;
 
         let child = cmd.spawn().map_err(|e| ProgramError::StartFailed {

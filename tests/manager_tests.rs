@@ -223,7 +223,13 @@ fn test_config_example_yaml_parsing() {
     assert!(micro.restart_when_binary_changed);
     assert_eq!(
         micro.restart_directory_monitor.as_deref(),
-        Some(std::path::Path::new("./config"))
+        Some(
+            example_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("./config")
+                .as_ref()
+        )
     );
     assert_eq!(micro.restart_file_pattern.as_deref(), Some("*.json"));
     assert_eq!(

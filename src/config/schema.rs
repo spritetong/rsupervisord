@@ -31,6 +31,12 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
     #[serde(default)]
     pub identifier: Option<String>,
+    /// When true (default), relative paths in path fields are absolutized against the
+    /// config file directory at the parse boundary. When false, relative paths are
+    /// preserved and interpretated relative to the daemon working directory, matching
+    /// python supervisor behavior.
+    #[serde(default = "default_true")]
+    pub path_translation: bool,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -49,6 +55,7 @@ impl Default for ServerConfig {
             username: None,
             password: None,
             identifier: None,
+            path_translation: true,
         }
     }
 }
@@ -398,10 +405,9 @@ impl SupervisorConfig {
         yaml_content: &str,
         config_dir: Option<&std::path::Path>,
     ) -> Result<Self, ProgramError> {
-        // Expand environment variables and patterns first
-        let expanded = crate::config::expand::MacroExpander::new()
-            .expand_with_config_dir(yaml_content, config_dir);
-        let mut config: Self = serde_yaml::from_str(&expanded).map_err(|e| {
+        // No text-level macro expansion here: `${VAR}`/`%()`/`$()` expansion and path
+        // absolutization happen per-value inside the shared translate_paths boundary.
+        let mut config: Self = serde_yaml::from_str(yaml_content).map_err(|e| {
             ProgramError::ConfigError(format!("Failed to parse YAML configuration: {}", e))
         })?;
         // Default UDS credentials from HTTP credentials in YAML frontend if omitted (Scheme B)
@@ -413,7 +419,40 @@ impl SupervisorConfig {
         }
         config.config_dir = config_dir.map(|p| p.to_path_buf());
         config.apply_default_paths();
+        config = config.translate_paths()?;
         config.validate()?;
+        Ok(config)
+    }
+
+    /// Applies the path-translation boundary transform shared by both the YAML and the
+    /// INI pipelines: serializes the typed config to JSON, walks the tree expanding
+    /// `${VAR}`/`%()`/`$()` macros (leniently, keeping literals on failure) and
+    /// absolutizing path-kind fields against `config_dir` when `server.path_translation`
+    /// is enabled, then deserializes back into a typed config.
+    pub(crate) fn translate_paths(self) -> Result<Self, ProgramError> {
+        let path_translation = self.server.path_translation;
+        let config_dir = self.config_dir.clone();
+        let mut value = serde_json::to_value(&self).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "Failed to serialize config for path translation: {}",
+                e
+            ))
+        })?;
+        crate::config::transform::transform(
+            &mut value,
+            &crate::config::transform::Ctx {
+                config_dir: config_dir.as_deref(),
+                path_translation,
+            },
+        );
+        let mut config: Self = serde_json::from_value(value).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "Failed to deserialize path-translated config: {}",
+                e
+            ))
+        })?;
+        // config_dir is #[serde(skip)]: restore it after the round-trip.
+        config.config_dir = config_dir;
         Ok(config)
     }
 
@@ -1504,6 +1543,8 @@ programs:
     #[test]
     fn test_restart_watch_fields_and_debounce_defaults() {
         let yaml = r#"
+server:
+  path_translation: false
 program_defaults:
   restart_debounce_secs: 10
 programs:

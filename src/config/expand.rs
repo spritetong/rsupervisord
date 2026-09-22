@@ -371,6 +371,42 @@ impl MacroExpander {
         result
     }
 
+    /// Expands environment variables and patterns within a single configuration value
+    /// (not a raw file), using an explicit config directory (populating `here`).
+    ///
+    /// Unlike [`Self::expand_with_config_dir`], this does not split on newlines or
+    /// preserve comment lines; it expands the whole string as one value.
+    pub fn expand_value(&self, value: &str, config_dir: Option<&Path>) -> String {
+        let expr = match config_dir {
+            Some(dir) => StringExpression::with_config_dir(dir),
+            None => StringExpression::with_defaults(),
+        };
+        self.expand_value_with_expr(value, &expr)
+    }
+
+    /// Expands environment variables and patterns within a single configuration value
+    /// using a specific `StringExpression` context.
+    ///
+    /// Mirrors [`Self::expand_with_expr`] semantics: `${VAR}` expansion first, then a
+    /// lenient `%()`/`$()` evaluation that keeps literals when expansion fails.
+    pub fn expand_value_with_expr(&self, value: &str, expr: &StringExpression) -> String {
+        if !value.contains('$') && !value.contains('%') {
+            return value.to_string();
+        }
+
+        // Step 1: Expand ${VAR:-default} and ${VAR}
+        let env_expanded = self.expand_line_env(value);
+
+        // Step 2: If % or $( is present, evaluate through StringExpression
+        if (env_expanded.contains('%') || env_expanded.contains("$("))
+            && let Ok(evaled) = expr.eval(&env_expanded)
+        {
+            return evaled;
+        }
+
+        env_expanded
+    }
+
     fn expand_line_env(&self, raw: &str) -> String {
         let mut result = String::with_capacity(raw.len());
         let mut chars = raw.chars().peekable();

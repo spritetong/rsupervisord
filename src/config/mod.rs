@@ -8,6 +8,7 @@ pub mod diff;
 pub mod expand;
 pub mod paths;
 pub mod schema;
+pub mod transform;
 
 pub use diff::ConfigDiff;
 pub use expand::{MacroExpander, StringExpression, expand_env_vars};

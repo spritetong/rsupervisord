@@ -135,6 +135,7 @@ pub fn adapt_ini_to_config(
     }
 
     config.apply_default_paths();
+    config = config.translate_paths()?;
     config.validate()?;
 
     Ok(config)
