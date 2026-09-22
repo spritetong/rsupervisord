@@ -155,7 +155,7 @@ logging:
 | `umask` | `umask` | 直接 |
 | `priority` | `priority` | **范围冲突**:Python 允许 `999`,ours 校验 `[0,99]` → 见 §6 |
 | `autostart` | `autostart` | 布尔解析差异(见 §5) |
-| `startsecs` | `start_secs` | 命名;默认 1(Python) vs 3(ours) |
+| `startsecs` | `start_secs` | 命名;默认 1 (与 Python 一致) |
 | `startretries` | `start_retries` | 命名 |
 | `autorestart` | `autorestart` | **值映射**:`false→never`,`true→always`,`unexpected→unexpected` |
 | `exitcodes` | `exit_codes` | 列表解析(`0,2` → `[0,2]`) |

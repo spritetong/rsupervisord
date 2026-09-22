@@ -335,7 +335,7 @@ fn default_true() -> bool {
 }
 
 fn default_start_secs() -> u64 {
-    3
+    1
 }
 
 fn default_start_retries() -> u32 {

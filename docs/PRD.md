@@ -416,7 +416,7 @@ groups:
 program_defaults:
   autostart: true
   autorestart: unexpected
-  start_secs: 3
+  start_secs: 1
   start_retries: 3
   stop_signal: "SIGTERM"
   stop_wait_secs: 10

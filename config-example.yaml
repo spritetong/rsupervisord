@@ -85,8 +85,8 @@ program_defaults:
   #   - never:      never restart automatically
   autorestart: unexpected
 
-  # Minimum continuous runtime (in seconds) before a process is considered RUNNING (default: 3)
-  start_secs: 3
+  # Minimum continuous runtime (in seconds) before a process is considered RUNNING (default: 1)
+  start_secs: 1
 
   # Maximum consecutive retry attempts when entering BACKOFF state (default: 3)
   start_retries: 3

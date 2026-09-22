@@ -639,7 +639,7 @@ impl SupervisorConfig {
             let start_secs = raw
                 .start_secs
                 .or(self.program_defaults.start_secs)
-                .unwrap_or(3);
+                .unwrap_or(1);
 
             let start_retries = raw
                 .start_retries
