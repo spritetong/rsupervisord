@@ -23,14 +23,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     if args.len() > 1 && args[1] == "ctl" {
-        // "rsupervisord ctl ..." is an alias of rsupervisorctl; strip the token
+        // "supervisord ctl ..." is an alias of supervisorctl; strip the token
         // and render usage/help as "<bin> ctl".
         let bin_name = format!(
             "{} ctl",
             std::path::Path::new(&args[0])
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "rsupervisord".to_string())
+                .unwrap_or_else(|| "supervisord".to_string())
         );
         args.remove(1);
         return rsupervisord::cli::run_from(args, Some(&bin_name));
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     let daemon_args = DaemonArgs::parse_from(args);
 
-    // Service lifecycle: `rsupervisord service <install|uninstall|start|stop|restart>`
+    // Service lifecycle: `supervisord service <install|uninstall|start|stop|restart>`
     if let Some(rsupervisord::daemon::DaemonAction::Service { op }) = &daemon_args.action {
         return rsupervisord::service::run_service_op(*op, daemon_args.config.as_deref());
     }

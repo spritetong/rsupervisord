@@ -179,7 +179,7 @@ pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
         Some(s) => s.to_string_lossy(),
         None => match std::env::args_os().next() {
             Some(s) => s.to_string_lossy().into_owned().into(),
-            None => return "rsupervisord".to_string(),
+            None => return "supervisord".to_string(),
         },
     };
 
@@ -187,7 +187,7 @@ pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
     let basename = raw_str.rsplit(['/', '\\']).next().unwrap_or(raw_str);
     let stem = match Path::new(basename).file_stem() {
         Some(s) => s.to_string_lossy(),
-        None => return "rsupervisord".to_string(),
+        None => return "supervisord".to_string(),
     };
 
     // Normalize Cargo test runner artifacts (e.g. `rsupervisord-097ddb1e4b724e0a`)
@@ -201,13 +201,13 @@ pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
         stem.as_ref()
     };
 
-    // If running under automated integration test harnesses, default to rsupervisord
+    // If running under automated integration test harnesses, default to supervisord
     if clean_stem.ends_with("_tests")
         || clean_stem.starts_with("test_")
         || clean_stem == "deps"
         || clean_stem.is_empty()
     {
-        return "rsupervisord".to_string();
+        return "supervisord".to_string();
     }
 
     derive_cmd_name_from_stem(clean_stem)
@@ -334,21 +334,20 @@ mod tests {
 
     #[test]
     fn test_derive_cmd_name() {
-        assert_eq!(derive_cmd_name_from_stem("rsupervisord"), "rsupervisord");
-        assert_eq!(derive_cmd_name_from_stem("rsupervisorctl"), "rsupervisord");
+        assert_eq!(derive_cmd_name_from_stem("supervisord"), "supervisord");
+        assert_eq!(derive_cmd_name_from_stem("supervisorctl"), "supervisord");
         assert_eq!(derive_cmd_name_from_stem("myctl"), "myd");
         assert_eq!(derive_cmd_name_from_stem("MYCTL"), "MYd");
         assert_eq!(derive_cmd_name_from_stem("ctl"), "d");
-        assert_eq!(derive_cmd_name_from_stem("supervisord"), "supervisord");
         assert_eq!(derive_cmd_name_from_stem("worker"), "worker");
 
         assert_eq!(
-            derive_cmd_name(Some(OsStr::new("rsupervisorctl"))),
-            "rsupervisord"
+            derive_cmd_name(Some(OsStr::new("supervisorctl"))),
+            "supervisord"
         );
         assert_eq!(
-            derive_cmd_name(Some(OsStr::new("rsupervisorctl.exe"))),
-            "rsupervisord"
+            derive_cmd_name(Some(OsStr::new("supervisorctl.exe"))),
+            "supervisord"
         );
         assert_eq!(
             derive_cmd_name(Some(OsStr::new("/usr/local/bin/myctl"))),
@@ -426,7 +425,7 @@ mod tests {
     fn test_find_daemon_exe_resolves_current_executable() {
         // Integration-test harness stems never end in "ctl", so the current
         // executable is returned (the ctl sibling branch needs a ctl-named binary).
-        let exe = find_daemon_exe("rsupervisord");
+        let exe = find_daemon_exe("supervisord");
         assert_eq!(exe, std::env::current_exe().unwrap());
     }
 }

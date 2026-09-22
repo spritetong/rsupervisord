@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-/// HTTP REST client communicating with rsupervisord over local IPC or TCP.
+/// HTTP REST client communicating with supervisord over local IPC or TCP.
 #[derive(Debug, Clone)]
 pub struct SupervisorClient {
     endpoint: Endpoint,
@@ -267,7 +267,7 @@ impl SupervisorClient {
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Connection timed out connecting to rsupervisord daemon at {:?}.",
+                    "Connection timed out connecting to supervisord daemon at {:?}.",
                     self.endpoint
                 )
             })?
@@ -299,7 +299,7 @@ impl SupervisorClient {
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
                     self.endpoint
                 )
             })?
@@ -342,7 +342,7 @@ impl SupervisorClient {
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
                     self.endpoint
                 )
             })?
@@ -381,7 +381,7 @@ impl SupervisorClient {
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
                     self.endpoint
                 )
             })?
@@ -432,13 +432,13 @@ impl SupervisorClient {
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to rsupervisord daemon at {:?}. Is rsupervisord running?",
+                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
                     self.endpoint
                 )
             })?
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Cannot connect to rsupervisord daemon at {:?}: {}. Is rsupervisord running?",
+                    "Cannot connect to supervisord daemon at {:?}: {}. Is supervisord running?",
                     self.endpoint,
                     e
                 )
@@ -472,7 +472,7 @@ impl SupervisorClient {
         }
         if status_code == 403 {
             bail!(
-                "Access denied (403 Forbidden): Caller privileges are insufficient to control rsupervisord."
+                "Access denied (403 Forbidden): Caller privileges are insufficient to control supervisord."
             );
         }
         if status_code == 404 {

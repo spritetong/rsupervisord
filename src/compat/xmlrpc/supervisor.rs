@@ -262,7 +262,14 @@ pub async fn handle_supervisor_method(
             Ok(Value::Boolean(true))
         }
         "supervisor.shutdown" => {
-            ctx.manager.shutdown().await.map_err(Fault::from)?;
+            // Stock supervisord sleeps briefly before quitting so the enclosing
+            // XML-RPC connection can flush its response; mirror that so the
+            // engine's teardown never races an in-flight shutdown response.
+            let manager = ctx.manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let _ = manager.shutdown().await;
+            });
             Ok(Value::Boolean(true))
         }
         "supervisor.restart" => {
@@ -682,7 +689,7 @@ async fn read_process_log(
 
 fn read_main_log(_ctx: &SupervisorRpcContext, offset: i32, length: i32) -> Result<Value, Fault> {
     let candidate_paths = [
-        PathBuf::from("logs/rsupervisord.log"),
+        PathBuf::from("logs/supervisord.log"),
         PathBuf::from("supervisord.log"),
         PathBuf::from("/tmp/supervisord.log"),
     ];
@@ -698,7 +705,7 @@ fn read_main_log(_ctx: &SupervisorRpcContext, offset: i32, length: i32) -> Resul
 
 fn clear_main_log(_ctx: &SupervisorRpcContext) -> Result<Value, Fault> {
     let candidate_paths = [
-        PathBuf::from("logs/rsupervisord.log"),
+        PathBuf::from("logs/supervisord.log"),
         PathBuf::from("supervisord.log"),
         PathBuf::from("/tmp/supervisord.log"),
     ];

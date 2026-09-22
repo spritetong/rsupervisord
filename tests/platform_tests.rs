@@ -33,10 +33,10 @@ fn test_platform_default_uds_path_is_valid() {
     assert!(!uds_path.as_os_str().is_empty());
 
     #[cfg(unix)]
-    assert_eq!(uds_path.to_str().unwrap(), "/var/run/rsupervisord.sock");
+    assert_eq!(uds_path.to_str().unwrap(), "/var/run/supervisord.sock");
 
     #[cfg(windows)]
-    assert_eq!(uds_path.to_str().unwrap(), r"\\.\pipe\rsupervisord");
+    assert_eq!(uds_path.to_str().unwrap(), r"\\.\pipe\supervisord");
 }
 
 #[tokio::test]

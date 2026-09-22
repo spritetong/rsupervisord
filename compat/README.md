@@ -15,7 +15,7 @@ Selected with `SUPERVISOR_TARGET`:
 
 | Target | Server under test | Client | Purpose |
 | :--- | :--- | :--- | :--- |
-| `rsupervisord` (**default**) | compiled `target/<profile>/rsupervisord` (YAML fixture) | `rsupervisorctl` (native) + stock client (gated) | measure current parity |
+| `rsupervisord` (**default**) | compiled `target/<profile>/supervisord` (YAML fixture) | `supervisorctl` (native) + stock client (gated) | measure current parity |
 | `python` | stock `supervisord` 4.2.5 (INI fixture) | stock `supervisorctl` + XML-RPC | define expected behavior (must be green) |
 
 ## Quick start
@@ -25,7 +25,7 @@ Selected with `SUPERVISOR_TARGET`:
 bash compat/run.sh                              # default: build + test compiled bin
 SUPERVISOR_TARGET=python bash compat/run.sh     # golden oracle (4.2.5)
 SUPERVISOR_STRICT=1 bash compat/run.sh          # unsupported features => hard failures
-bash compat/run.sh -m native                    # only native rsupervisorctl tests
+bash compat/run.sh -m native                    # only native supervisorctl tests
 bash compat/run.sh -k xmlrpc                    # subset (any pytest args pass through)
 ```
 
@@ -78,7 +78,7 @@ compat/
     test_xmlrpc.py        # oracle: supervisor.* / system.* methods + faults
     test_eventlistener.py # oracle: READY/RESULT protocol, event taxonomy, buffering (gated #6)
     test_zz_daemon.py     # oracle: shutdown (runs last)
-    test_native_cli.py    # native: rsupervisorctl against the compiled bin
+    test_native_cli.py    # native: supervisorctl against the compiled bin
 ```
 
 The local venv (`.venv/`) is a **disposable, project-local** environment so the
@@ -105,7 +105,7 @@ one-shot exit, long-running stdout+stderr, stdin (`sendProcessStdin`), a
   (+ LSB exit 3/4), `start`/`stop`/`restart`, `all`, `group:*`,
   `signal <sig> <name>`, `tail`, `maintail`, `clear`, `avail`, `reread`,
   `update`.
-- **Native** (`test_native_cli.py`): `rsupervisorctl status/start/stop/restart/
+- **Native** (`test_native_cli.py`): `supervisorctl status/start/stop/restart/
   tail/stdin/reload` over the UDS.
 - **Event listener oracle** (`test_eventlistener.py`, gated #6): pool as a
   process group, `READY`/`RESULT` envelope fields, `PROCESS_STATE_*` /

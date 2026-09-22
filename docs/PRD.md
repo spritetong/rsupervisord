@@ -29,12 +29,12 @@ In containerized environments, microservices architectures, edge devices, and Wi
 - **High-Precision Zero-Polling Cron Scheduling**: Native Cron expressions (`cron` for start, `cron_stop` for stop) supporting standard 5-part POSIX crontabs and 6-part second extensions, waking up reactively via earliest-deadline calculation without periodic polling.
 - **Lifecycle Hooks with Failure Degradation**: Supports `pre_start` and `pre_stop` execution. `pre_start` blocks start unless `pre_start_ignore_failure: true`, while `pre_stop` always degrades gracefully to guarantee processes are never unkillable.
 - **Activity-Aware Adaptive Metrics & Disableable Logging**: Automatically pauses CPU/memory sampling during idle periods when no CLI or Web clients are connected. Supports completely disabling process and daemon logging (`Stdio::null()`), eliminating pipeline overhead.
-- **Star-Topology Dual-Track Event Hub & SSE**: Unified system lifecycle event broadcasting (`SystemEvent`) and aggregated log bus (`LogEntry`) with dual-track isolation, zero-subscriber no-op optimization, real-time Web UI EventSource synchronization, and CLI streaming (`rsupervisorctl events` & `rsupervisorctl tail -f all`).
+- **Star-Topology Dual-Track Event Hub & SSE**: Unified system lifecycle event broadcasting (`SystemEvent`) and aggregated log bus (`LogEntry`) with dual-track isolation, zero-subscriber no-op optimization, real-time Web UI EventSource synchronization, and CLI streaming (`supervisorctl events` & `supervisorctl tail -f all`).
 - **Data-Plane Process Stdin Injection with Backpressure & Circuit Breaking**: Direct standard input (`stdin`) injection via `Stdio::piped()`, driven by an independent non-blocking writer Actor with an internal memory buffer (64KB), `tokio::select!` if-guard backpressure propagation, and 10s timeout circuit breaking.
 - **Resilient Scope-Guarded Lifecycle & Task Governance**: Integrates `scopeguard` to guard newly spawned child processes before platform tree attachment, eliminating orphan process leaks on initialization failures. Replaces handwritten `Drop` boilerplate with `tokio_util::sync::DropGuard` and `scopeguard::ScopeGuard`. Core subordinate tasks (Manager, Process, StdinWriter, HealthProbe, LogPump) retain `JoinHandle` for deterministic draining; tasks without a direct subordinate relationship (IPC connection streams, async API dispatchers, external cancel bridges) may spawn without retaining `JoinHandle`, but **MUST be strictly governed by the parent object's `CancellationToken`** and bound to that object's lifecycle.
 - **Flexible Threading Models & Single-Thread CurrentThread Mode**: Configurable Tokio worker threads (`worker_threads`), including a single-threaded `current_thread` event loop optimized for edge nodes and low-memory environments (2~4MB footprint).
 - **Modern Configuration & APIs**: Native **YAML** configuration with global `program_defaults` inheritance and multi-scheme auth (Bearer token & Basic Auth with plaintext or SHA-1); replaces XML-RPC with unified **IPC (UDS / Named Pipe) / TCP + JSON REST API**.
-- **Production-Grade System Service Architecture & Zero-CFG Isolation**: Full support for native service managers (Windows SCM via single-binary self-hosting with the `service install/uninstall/start/stop/restart` subcommand on both `rsupervisord` and `rsupervisorctl` plus internal `--service`, and Linux systemd unit generation). The entire service management capability is abstracted behind the `PlatformService` trait in `src/platform/traits.rs`. Core orchestration, CLI, daemon, and service facade contain zero `#[cfg]` branches. Windows SCM operation is hardened against abnormal exits with FFI panic catching (`catch_unwind`), SCM status checkpoints and wait hints, active stop heartbeats, automatic working directory correction, and `SC_ACTION_RESTART` crash recovery.
+- **Production-Grade System Service Architecture & Zero-CFG Isolation**: Full support for native service managers (Windows SCM via single-binary self-hosting with the `service install/uninstall/start/stop/restart` subcommand on both `supervisord` and `supervisorctl` plus internal `--service`, and Linux systemd unit generation). The entire service management capability is abstracted behind the `PlatformService` trait in `src/platform/traits.rs`. Core orchestration, CLI, daemon, and service facade contain zero `#[cfg]` branches. Windows SCM operation is hardened against abnormal exits with FFI panic catching (`catch_unwind`), SCM status checkpoints and wait hints, active stop heartbeats, automatic working directory correction, and `SC_ACTION_RESTART` crash recovery.
 - **Single-Binary Self-Contained Deployment**: Built-in modern Web Dashboard via `rust-embed` (powered by a zero-NPM production Vue 3 single file) and CLI client, providing out-of-the-box operation with zero external runtime dependencies.
 
 ---
@@ -44,7 +44,7 @@ In containerized environments, microservices architectures, edge devices, and Wi
 ```mermaid
 flowchart TD
     subgraph ConfigLayer ["Configuration & Declaration Layer (YAML Config)"]
-        YAML["rsupervisord.yaml\n(Env Var Interpolation / program_defaults Inheritance / Strict Typing)"]
+        YAML["supervisord.yaml\n(Env Var Interpolation / program_defaults Inheritance / Strict Typing)"]
     end
 
     subgraph ManagerLayer ["Orchestration Core (Manager & DAG Engine)"]
@@ -70,10 +70,10 @@ flowchart TD
 
     subgraph CommunicationLayer ["Communication Layer (Axum Web Service)"]
         Endpoints["Axum Unified Router Engine"]
-        UDS["Local UDS (/var/run/rsupervisord.sock or Windows AF_UNIX)"]
+        UDS["Local UDS (/var/run/supervisord.sock or Windows AF_UNIX)"]
         TCP["Remote TCP (Optional Bearer Token Auth)"]
         WebUI["Embedded Web UI (rust-embed Dashboard)"]
-        CLI["rsupervisorctl (JSON REST Client, Sync / Async Modes)"]
+        CLI["supervisorctl (JSON REST Client, Sync / Async Modes)"]
     end
 
     YAML --> DAG --> Supervisor
@@ -147,7 +147,7 @@ To eliminate boilerplate across multiple programs, the engine provides a `progra
 
 #### 3.1.6 Hot Reload & Incremental Diff Engine
 
-Executing `rsupervisorctl reload` or sending `SIGHUP` triggers an incremental diff comparison between running and new configurations:
+Executing `supervisorctl reload` or sending `SIGHUP` triggers an incremental diff comparison between running and new configurations:
 
 1. **Unchanged**: Identical configurations **remain untouched, keeping their original PID and uninterrupted network connections**.
 2. **Added**: Registered into the DAG and started according to their `autostart` policy.
@@ -163,11 +163,11 @@ Executing `rsupervisorctl reload` or sending `SIGHUP` triggers an incremental di
 
 #### 3.1.8 Process Groups & Hierarchical Operations
 
-`rsupervisord` provides comprehensive support for logical grouping of related processes:
+`supervisord` provides comprehensive support for logical grouping of related processes:
 
 - **Group Declaration**: Programs can specify a `group: <group_name>` in their configuration, or top-level `groups:` can map group names to arrays of program names (`groups: { web: ["nginx", "api"] }`).
 - **DAG Group Ordering**: Batch start and stop operations across a group strictly honor the topological dependencies and `priority` values among members of that group.
-- **Unified Control**: Supports group operations across CLI (`rsupervisorctl start <group>:*`, `stop <group>:*`, `restart <group>:*`, `status <group>:*`), REST API endpoints (`/api/v1/groups/:group/...`), and Web Dashboard filtering.
+- **Unified Control**: Supports group operations across CLI (`supervisorctl start <group>:*`, `stop <group>:*`, `restart <group>:*`, `status <group>:*`), REST API endpoints (`/api/v1/groups/:group/...`), and Web Dashboard filtering.
 
 #### 3.1.9 Cron Expression Scheduling (`cron` & `cron_stop`)
 
@@ -201,7 +201,7 @@ Provides direct character/byte stream injection into the standard input (`stdin`
   - Replaces traditional detached/null standard input (`Stdio::null()`) with asynchronous Tokio pipes (`Stdio::piped()`).
   - Child stdin handle is driven by an independent, non-blocking `StdinWriterTask` Actor.
 - **Zero-Drop Bounded Backpressure Transmission**:
-  - Unlike naive supervisor implementations that drop bytes on buffer overflow (which corrupts command/binary streams for slow programs), `rsupervisord` employs an internal memory buffer (`BytesMut`, up to 64KB) paired with a bounded MPSC channel (`capacity: 16`).
+  - Unlike naive supervisor implementations that drop bytes on buffer overflow (which corrupts command/binary streams for slow programs), `supervisord` employs an internal memory buffer (`BytesMut`, up to 64KB) paired with a bounded MPSC channel (`capacity: 16`).
   - **`tokio::select!` If-Guard Backpressure**: When the child process reads slowly or the OS pipe buffer is saturated and the memory buffer reaches 64KB, the writer task's channel receiver branch is disabled via `if buffer.len() < MAX_STDIN_BUFFER_BYTES`. This naturally stalls upstream channel sends (`tx.send(data).await`), propagating backpressure directly to the caller (API / CLI).
 - **Timeout Circuit Breaker**:
   - Upstream senders bound their transmission with a 10-second timeout. If a child process is completely deadlocked or permanently ceases reading stdin, the sender gracefully terminates with `StdinWriteTimeout` (HTTP 504 Gateway Timeout), ensuring the supervisor daemon and actor event loop remain 100% responsive without blocking.
@@ -237,7 +237,7 @@ Built with the production-proven `file-rotate` crate:
    - **Stream Merging**: Supports redirecting `stderr` into `stdout`.
 3. **In-Memory RingBuffer**:
    - Maintains a bounded circular buffer (e.g., 2,000 lines) per program.
-   - **CLI**: Supports `rsupervisorctl tail -f <program>`, instantly replaying recent history before streaming.
+   - **CLI**: Supports `supervisorctl tail -f <program>`, instantly replaying recent history before streaming.
    - **Web UI**: Streams logs in real time via Server-Sent Events (SSE).
 4. **Disableable Logging & Channel Optimizations**:
    - **Program-Level Disabling**: When `logs: { enabled: false }` or paths point to `/dev/null`, `none`, or `off`, the process is spawned with `Stdio::null()`, avoiding pipe allocations and background pump tasks.
@@ -251,7 +251,7 @@ Built with the production-proven `file-rotate` crate:
 #### 3.3.1 Transport Endpoints & Dual Transports
 
 - **Windows Named Pipe (Default IPC on Windows)**:
-  - Listens on `\\.\pipe\<cmd_name>` (e.g. `\\.\pipe\rsupervisord`).
+  - Listens on `\\.\pipe\<cmd_name>` (e.g. `\\.\pipe\supervisord`).
   - Enabled by default on Windows (unless explicitly disabled via `pipe_path: ""`). Provides superior OS compatibility and zero file-permission/socket-path issues across Windows 10/11 and Server editions.
   - Windows daemon binds **both Named Pipe and AF_UNIX UDS concurrently**, allowing clients to connect via either mechanism.
   - CLI automatically selects the Named Pipe transport on Windows when available.
@@ -264,22 +264,22 @@ Built with the production-proven `file-rotate` crate:
 
 #### 3.3.2 Caller Security & Multi-Scheme Authentication
 
-`rsupervisorctl` and API endpoints enforce strict privilege and identity validation:
+`supervisorctl` and API endpoints enforce strict privilege and identity validation:
 
 - **Unix / BSD (Peer Credentials Compatibility)**:
   - Extracts peer credentials via socket options (Linux `SO_PEERCRED`, BSD/macOS `getpeereid`).
   - **Rules**:
-    1. If `rsupervisord` runs as `root` (UID 0), only `root` or authorized callers can execute control operations.
-    2. If `rsupervisord` runs under non-root UID X, only UID X or `root` callers are authorized.
+    1. If `supervisord` runs as `root` (UID 0), only `root` or authorized callers can execute control operations.
+    2. If `supervisord` runs under non-root UID X, only UID X or `root` callers are authorized.
     3. Unauthorized callers receive immediate `403 Forbidden` responses.
 - **Windows (Token Elevation Checks)**:
-  - If `rsupervisord` runs as an elevated administrator (`is_admin = true`) or under `NT AUTHORITY\SYSTEM`;
-  - The calling `rsupervisorctl` process must also hold elevated privileges (`TokenElevation`).
+  - If `supervisord` runs as an elevated administrator (`is_admin = true`) or under `NT AUTHORITY\SYSTEM`;
+  - The calling `supervisorctl` process must also hold elevated privileges (`TokenElevation`).
   - Unelevated callers are intercepted with clear actionable guidance.
 - **HTTP Authentication (Bearer Token & Basic Auth)**:
   - Bearer Token: Validated against `server.auth_token`.
   - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.user` and either plaintext `server.password` or SHA-1 hashed `server.password_sha1` (supporting `{SHA}...` or raw 40-character hex strings).
-  - CLI Standalone Connectivity: `rsupervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
+  - CLI Standalone Connectivity: `supervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
 
 #### 3.3.3 Core RESTful JSON API Specification
 
@@ -306,7 +306,7 @@ Built with the production-proven `file-rotate` crate:
 #### 3.3.4 Activity-Aware Adaptive Metrics Sampling
 
 - **Idle Timeout & Auto-Pause**: An `ActivityTracker` tracks the timestamp of incoming client interactions. After 30 seconds (`idle_timeout_secs: 30`) of inactivity, CPU and RSS memory metrics sampling across all child processes automatically pauses, eliminating unnecessary `/proc` and kernel queries.
-- **On-Demand Resumption**: Any incoming CLI command (e.g., `rsupervisorctl status`) or Web UI request immediately awakens metrics sampling. Setting `idle_timeout_secs: 0` disables pause mode for continuous monitoring.
+- **On-Demand Resumption**: Any incoming CLI command (e.g., `supervisorctl status`) or Web UI request immediately awakens metrics sampling. Setting `idle_timeout_secs: 0` disables pause mode for continuous monitoring.
 
 ---
 
@@ -314,14 +314,14 @@ Built with the production-proven `file-rotate` crate:
 
 #### 3.4.1 CLI Interaction: Sync & Async Modes
 
-Following the operational model of Windows `net start/stop` (synchronous confirmation) versus `sc start/stop` (asynchronous fire-and-return), `rsupervisorctl` supports dual modes:
+Following the operational model of Windows `net start/stop` (synchronous confirmation) versus `sc start/stop` (asynchronous fire-and-return), `supervisorctl` supports dual modes:
 
 - **Synchronous Mode (Sync - Default)**:
   - Blocks and monitors state transitions until the program is confirmed `RUNNING`, `STOPPED`, or failed.
   - Outputs clear durations and PIDs:
 
     ```text
-    $ rsupervisorctl start core-api
+    $ supervisorctl start core-api
     Starting core-api... [OK] (started in 2.1s, PID: 18492)
     ```
 
@@ -329,19 +329,19 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
   - Submits the command and returns immediately (< 5ms):
 
     ```text
-    $ rsupervisorctl start core-api --async
+    $ supervisorctl start core-api --async
     Command accepted: core-api status changed to STARTING.
     ```
 
 - **CLI Commands & Group Syntax**:
-  - `rsupervisorctl status [name | group:*]`: Formatted table with status, PID, Uptime, Priority, Health, and Cron schedule.
-  - `rsupervisorctl start <name | group:*> [--async] [--timeout 30]`: Start individual program or entire group.
-  - `rsupervisorctl stop <name | group:*> [--async] [--timeout 30]`: Stop individual program or entire group.
-  - `rsupervisorctl restart <name | group:*> [--async]`: Restart individual program or entire group.
-  - `rsupervisorctl reload`: Incrementally reload configuration, reporting added/removed/modified/unchanged counts.
-  - `rsupervisorctl stdin <name> <chars>` (alias: `send-stdin`): Send input characters or commands directly into the process's standard input.
-  - `rsupervisorctl events`: Real-time streaming of system lifecycle and hook events.
-  - `rsupervisorctl tail -f <name> [--lines=100]`: Live tail console output.
+  - `supervisorctl status [name | group:*]`: Formatted table with status, PID, Uptime, Priority, Health, and Cron schedule.
+  - `supervisorctl start <name | group:*> [--async] [--timeout 30]`: Start individual program or entire group.
+  - `supervisorctl stop <name | group:*> [--async] [--timeout 30]`: Stop individual program or entire group.
+  - `supervisorctl restart <name | group:*> [--async]`: Restart individual program or entire group.
+  - `supervisorctl reload`: Incrementally reload configuration, reporting added/removed/modified/unchanged counts.
+  - `supervisorctl stdin <name> <chars>` (alias: `send-stdin`): Send input characters or commands directly into the process's standard input.
+  - `supervisorctl events`: Real-time streaming of system lifecycle and hook events.
+  - `supervisorctl tail -f <name> [--lines=100]`: Live tail console output.
   - Flags: `--key <TOKEN>`, `--user <USER>`, `--password <PWD>`, `-s / --server <URL>` (enables connecting directly without local config).
 
 #### 3.4.2 Embedded Web Dashboard
@@ -359,11 +359,11 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
 
 ---
 
-## 4. Configuration Specification (`rsupervisord.yaml`)
+## 4. Configuration Specification (`supervisord.yaml`)
 
 ```yaml
 # ==========================================
-# rsupervisord Global Configuration
+# supervisord Global Configuration
 # ==========================================
 # Tokio runtime worker threads. Defaults to hardware CPU cores when omitted or null.
 # Set to 1 to activate `current_thread` single-threaded event loop mode for minimal memory overhead.
@@ -372,9 +372,9 @@ worker_threads: 2
 
 server:
   # Native local UDS socket path (Supported on Linux, macOS, BSD, and Windows 10/11)
-  uds_path: "/var/run/rsupervisord.sock"
+  uds_path: "/var/run/supervisord.sock"
   # Windows Named Pipe path (Defaults to \\.\pipe\<cmd_name> on Windows; set to "" to disable)
-  pipe_path: "\\\\.\\pipe\\rsupervisord"
+  pipe_path: "\\\\.\\pipe\\supervisord"
   # Optional: Remote TCP listener
   http_bind: "127.0.0.1:9001"
   auth_token: ""
@@ -387,7 +387,7 @@ server:
 logging:
   # Set to false or level: "off" to completely silence daemon internal logs
   enabled: true
-  file: "/var/log/rsupervisord.log"
+  file: "/var/log/supervisord.log"
   level: "info"
   max_bytes: "20MB"
   backups: 3
@@ -440,7 +440,7 @@ programs:
     priority: 10 # Explicit priority [0, 99], lower values start first
     stop_wait_secs: 20 # Overrides default 10s
     logs:
-      stdout: "/var/log/rsupervisord/mysql.log"
+      stdout: "/var/log/supervisord/mysql.log"
       max_bytes: "50MB"
       backups: 5
 
@@ -462,8 +462,8 @@ programs:
       timeout_secs: 2
       failure_threshold: 3
     logs:
-      stdout: "/var/log/rsupervisord/core-api.log"
-      stderr: "/var/log/rsupervisord/core-api.err"
+      stdout: "/var/log/supervisord/core-api.log"
+      stderr: "/var/log/supervisord/core-api.err"
       max_bytes: "20MB"
       backups: 3
 
@@ -494,7 +494,7 @@ programs:
     pre_stop: "sh -c 'echo Flushing backup locks...'"
     hook_timeout_secs: 15
     logs:
-      stdout: "/var/log/rsupervisord/backup.log"
+      stdout: "/var/log/supervisord/backup.log"
       redirect_stderr: true
 ```
 
@@ -536,7 +536,7 @@ rsupervisord/
 │   ├── main.rs                      # Daemon entry point and Tokio runtime builder
 │   ├── lib.rs                       # Core library exports and lifecycle builder
 │   ├── bin/
-│   │   └── rsupervisorctl.rs        # Standalone rsupervisorctl CLI binary
+│   │   └── supervisorctl.rs        # Standalone supervisorctl CLI binary
 │   ├── cli/                         # CLI client implementation
 │   │   ├── mod.rs
 │   │   ├── client.rs                # UDS / Named Pipe / HTTP client transport
@@ -597,7 +597,7 @@ rsupervisord/
 ### Milestone 1: Core Process Monitoring & DAG Orchestration Engine (Core MVP)
 
 - [x] Establish `Cargo.toml` dependencies and project modular structure.
-- [x] Implement `rsupervisord.yaml` strict parsing, `program_defaults` parameter inheritance, and environment variable substitution.
+- [x] Implement `supervisord.yaml` strict parsing, `program_defaults` parameter inheritance, and environment variable substitution.
 - [x] Enforce `priority` within `[0, 99]`; build DAG cycle detection and topological sorting.
 - [x] Define `Program` Trait; implement `ProcessProgram` spawn, stop, and exit detection.
 - [x] Encapsulate Linux (`nix`) process group/de-escalation and Windows (`windows-sys`) **Job Objects**.
@@ -614,7 +614,7 @@ rsupervisord/
 - [x] Launch Axum HTTP engine hosting full RESTful JSON APIs.
 - [x] Implement native cross-platform UDS (`AF_UNIX`) bindings (Windows 10/11 & Linux).
 - [x] Implement strict caller privilege checks (Unix UID/GID compatibility, Windows `is_admin` token matching).
-- [x] Build `rsupervisorctl` CLI supporting both synchronous (blocking confirmation) and asynchronous (`--async`) modes.
+- [x] Build `supervisorctl` CLI supporting both synchronous (blocking confirmation) and asynchronous (`--async`) modes.
 
 ### Milestone 4: Embedded Web Dashboard & Health Probes
 

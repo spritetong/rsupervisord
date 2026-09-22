@@ -8,7 +8,7 @@
 
 ## 1. Core Design Tenets
 
-To fundamentally eliminate high CPU consumption, orphan process leaks, lock contention, and deadlocks commonly found in traditional supervisor engines (such as `ochinchina/supervisord`), `rsupervisord` enforces five rigid architectural constraints:
+To fundamentally eliminate high CPU consumption, orphan process leaks, lock contention, and deadlocks commonly found in traditional supervisor engines (such as `ochinchina/supervisord`), `supervisord` enforces five rigid architectural constraints:
 
 1. **Task-Based Actor Model**:
    - Both the `Manager` and every managed `Program` are designed as asynchronous tasks (`async task`) with independent lifecycles.
@@ -268,7 +268,7 @@ pub enum ProgramCommand {
 
 Traditional supervisor implementations rely on point-to-point mesh invocation or tight coupling across server routes and worker actors. Furthermore, frontends are forced to poll `/status` continuously.
 
-To resolve these issues while maintaining minimal latency and zero wasted allocations, `rsupervisord` adopts a **Star-Topology Dual-Track Event Bus**:
+To resolve these issues while maintaining minimal latency and zero wasted allocations, `supervisord` adopts a **Star-Topology Dual-Track Event Bus**:
 
 ```mermaid
 flowchart TD
@@ -288,7 +288,7 @@ flowchart TD
     subgraph Consumers ["Consumers"]
         WebSSE_Events["Web UI: System Events SSE\n(/api/v1/events)"]
         WebSSE_Logs["Web UI: Live Logs Drawer & Aggregated Stream\n(/api/v1/programs/:name/logs/stream & /api/v1/logs/stream)"]
-        CLIMonitor["CLI Real-Time Monitor & Tail\n(rsupervisorctl events & tail -f all)"]
+        CLIMonitor["CLI Real-Time Monitor & Tail\n(supervisorctl events & tail -f all)"]
         InternalWait["Internal Reactive State Sync\n(wait_for_state zero-polling listener)"]
     end
 
@@ -548,7 +548,7 @@ flowchart LR
 2. **Rotating Storage (`file-rotate`)**: Automatically rotates based on size (`max_bytes`) or schedule (`rotate: daily`), retaining `backups` historical archives.
 3. **Persistent LogRotators**: Rotator instances are created once per configured program actor and shared across child process generations, preserving sequential log rotation and avoiding reopening files or losing sequence on process restarts.
 4. **High-Throughput Buffering**: Log lines are appended to the rotation writer without synchronous per-line flush calls, maximizing I/O throughput while guaranteeing explicit flushes on stream EOF and process exit.
-5. **RingBuffer**: Bounded circular buffer (`parking_lot::Mutex<VecDeque<String>>`) allowing instant replay upon `rsupervisorctl tail -f` or Web UI log drawer opening.
+5. **RingBuffer**: Bounded circular buffer (`parking_lot::Mutex<VecDeque<String>>`) allowing instant replay upon `supervisorctl tail -f` or Web UI log drawer opening.
 
 ---
 
@@ -639,12 +639,12 @@ The HTTP engine supports both Bearer tokens and HTTP Basic Authentication:
 
 ## 11. Windows IPC Architecture: Named Pipe & UDS Dual-Listening
 
-On Windows platforms, `rsupervisord` provides concurrent dual IPC listening to maximize compatibility and performance:
+On Windows platforms, `supervisord` provides concurrent dual IPC listening to maximize compatibility and performance:
 
 ```mermaid
 flowchart TD
     subgraph WindowsClient ["Windows Clients"]
-        CLI_Pipe["rsupervisorctl (Default: Named Pipe)"]
+        CLI_Pipe["supervisorctl (Default: Named Pipe)"]
         ReverseProxy["Caddy / Nginx Reverse Proxy"]
     end
 
@@ -657,7 +657,7 @@ flowchart TD
         AxumRouter["Axum REST API & Web UI Router"]
     end
 
-    CLI_Pipe -->|\\\\.\\pipe\\rsupervisord| PipeListener
+    CLI_Pipe -->|\\\\.\\pipe\\supervisord| PipeListener
     ReverseProxy -->|AF_UNIX Socket| UdsListener
     PipeListener --> AxumRouter
     UdsListener --> AxumRouter
@@ -671,7 +671,7 @@ flowchart TD
    - Binds `<config_dir>/<cmd_name>.sock` using `uds_windows::UnixListener` converted into `hyper_util::rt::TokioIo`.
    - Enables zero-port reverse proxy integration with Caddy and Nginx without exposing local TCP ports.
 3. **Automatic Client Transport Selection**:
-   - `rsupervisorctl` automatically attempts Named Pipe connection on Windows by default, gracefully falling back to UDS or TCP.
+   - `supervisorctl` automatically attempts Named Pipe connection on Windows by default, gracefully falling back to UDS or TCP.
 
 ---
 
@@ -762,7 +762,7 @@ flowchart TD
 
 - `worker_threads: 1` automatically switches Tokio to `new_current_thread()`, reducing memory footprint to 2~4MB.
 - Supports CLI `--worker-threads` and `TOKIO_WORKER_THREADS` environment variable overrides.
-- `rsupervisorctl` CLI client defaults to `current_thread`.
+- `supervisorctl` CLI client defaults to `current_thread`.
 
 ### 15.6 Zero-Allocation Broadcast Guard
 
@@ -787,14 +787,14 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   Environment variable expansion (`${VAR}` and `${VAR:-default}`) processes configuration text line-by-line while keeping comment lines starting with `#` untouched, preventing unset variables in comments from corrupting text.
 - **Dynamic Workload vs. Static Infrastructure Boundaries**:
   - *Dynamic Workloads (`programs.*`, `program_defaults.*`)*: Fully hot-reloadable with zero downtime for unchanged programs. Program commands, arguments, environment variables, priority tiers, health checks, and log rotation parameters update dynamically.
-  - *Static Daemon Infrastructure (`server.*`, `logging.*`, `metrics.*`, `worker_threads`)*: These sections configure the core supervisor process, binding OS sockets (UDS/TCP), setting tracing subscriber targets, and spinning up the Tokio multi-thread runtime. Because runtime infrastructure cannot be reallocated on the fly without terminating active listener sockets and in-flight control connections, modifying these sections requires restarting the `rsupervisord` daemon.
+  - *Static Daemon Infrastructure (`server.*`, `logging.*`, `metrics.*`, `worker_threads`)*: These sections configure the core supervisor process, binding OS sockets (UDS/TCP), setting tracing subscriber targets, and spinning up the Tokio multi-thread runtime. Because runtime infrastructure cannot be reallocated on the fly without terminating active listener sockets and in-flight control connections, modifying these sections requires restarting the `supervisord` daemon.
 
 ### 15.10 Cross-Platform Process Isolation Semantics
 
 - **Unix/Linux Privilege Dropping**:
-  On Unix systems, subprocess isolation executes in strict POSIX sequence: `chdir` -> `setpgid` -> `umask` -> `setgroups` -> `setgid` -> `setuid` -> `execve`. When `user` is specified without an explicit `:gid`, `rsupervisord` looks up the user's primary GID and explicitly clears supplementary groups via `setgroups(&[primary_gid])`, ensuring complete privilege dropping from root.
+  On Unix systems, subprocess isolation executes in strict POSIX sequence: `chdir` -> `setpgid` -> `umask` -> `setgroups` -> `setgid` -> `setuid` -> `execve`. When `user` is specified without an explicit `:gid`, `supervisord` looks up the user's primary GID and explicitly clears supplementary groups via `setgroups(&[primary_gid])`, ensuring complete privilege dropping from root.
 - **Windows Security Context**:
-  POSIX `user` and `umask` attributes are not applicable to native Windows process creation (which relies on Win32 Access Tokens and ACLs). When `user` or `umask` are specified in a configuration executed on Windows, `rsupervisord` emits a clear warning (`tracing::warn!`) and safely executes the process within the supervisor's existing security context without failing or halting.
+  POSIX `user` and `umask` attributes are not applicable to native Windows process creation (which relies on Win32 Access Tokens and ACLs). When `user` or `umask` are specified in a configuration executed on Windows, `supervisord` emits a clear warning (`tracing::warn!`) and safely executes the process within the supervisor's existing security context without failing or halting.
 
 ### 15.11 Zero-Panic Duration Bounds & Remote Crash Elimination
 
@@ -807,7 +807,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 
 - **Dynamic `cmd_name` Derivation**:
   Derives `cmd_name = <argv[0] basename without ext> replaces tailing "ctl" with "d"`.
-  When executed directly or via symlink (e.g. `myctl -> rsupervisord`), the process automatically detects whether it was invoked as a control tool (`stem.ends_with("ctl")`), routing to CLI execution with `cmd_name = "myd"`.
+  When executed directly or via symlink (e.g. `myctl -> supervisord`), the process automatically detects whether it was invoked as a control tool (`stem.ends_with("ctl")`), routing to CLI execution with `cmd_name = "myd"`.
 - **Multi-Tier Configuration Search Order**:
   When `-c / --config` is not explicitly provided, the supervisor searches for configuration files in priority order:
   1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG`
@@ -824,7 +824,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 ### 15.13 System Service Integration (Windows Service & Linux Systemd)
 
 - **First-Class Windows Service Control Manager (SCM) Integration**:
-  - Implemented using the `windows-service` crate, supporting the `service install/uninstall/start/stop/restart` subcommand (shared by `rsupervisord` and `rsupervisorctl`), and internal `--service`.
+  - Implemented using the `windows-service` crate, supporting the `service install/uninstall/start/stop/restart` subcommand (shared by `supervisord` and `supervisorctl`), and internal `--service`.
   - Dynamically registers the service under the canonical `cmd_name` (derived from `argv[0]`), ensuring custom-named binaries (e.g. `myd`) install and run under matching service identities.
   - SCM control events (`ServiceControl::Stop`, `ServiceControl::Shutdown`) are handled by reporting `ServiceState::StopPending` with a 30-second bounded timeout, followed by cooperative broadcast cancellation via `tokio_util::sync::CancellationToken`.
   - Supervised child processes are gracefully terminated inside Win32 Job Objects before the service transitions to `ServiceState::Stopped`.
@@ -852,7 +852,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   - Group start/stop operations resolve the sub-graph of programs belonging to the target group and execute them adhering to their mutual DAG dependencies and `priority` tiers.
   - Group stop executes in strict reverse DAG priority order.
 - **Unified Control Plane Integration**:
-  - CLI: Supports `<group>:*` and `<group>:` syntax (e.g. `rsupervisorctl start web:*`).
+  - CLI: Supports `<group>:*` and `<group>:` syntax (e.g. `supervisorctl start web:*`).
   - REST API: Dedicated endpoints under `/api/v1/groups/:group/(start|stop|restart|status)`.
   - Web UI: Group tabs and filter views.
 
@@ -929,7 +929,7 @@ To achieve strict architectural decoupling, service management is abstracted und
 - Service operations are uniformly dispatched via `crate::platform::native_platform().service()`.
 
 ### 16.2 Windows SCM Service Stability & Fault Hardening
-Running as an NT Service under the Windows Service Control Manager (SCM) entails specific constraints and failure modes. `rsupervisord` applies a comprehensive defense-in-depth design:
+Running as an NT Service under the Windows Service Control Manager (SCM) entails specific constraints and failure modes. `supervisord` applies a comprehensive defense-in-depth design:
 
 1. **FFI Panic Barrier (`catch_unwind`)**:
    - `my_service_main` wraps the service execution loop in `std::panic::catch_unwind(AssertUnwindSafe(...))`.
@@ -988,7 +988,7 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 ## 18. File and Binary Change Monitoring & Debounced Auto-Restart (`WatchService`)
 
 ### 18.1 Go Supervisord Compatibility & Evolution
-`rsupervisord` models its file change detection and binary change restart after Go's `ochinchina/supervisord`, while eliminating its race conditions and excessive polling:
+`supervisord` models its file change detection and binary change restart after Go's `ochinchina/supervisord`, while eliminating its race conditions and excessive polling:
 - `restart_when_binary_changed: bool` (default: `false`): Automatically detects modifications to the target executable binary.
 - `restart_signal_when_binary_changed: Option<StopSignal>`: If specified, sends a graceful reload signal (e.g. `SIGHUP`) instead of stopping and restarting the process.
 - `restart_cmd_when_binary_changed: Option<String>`: Custom restart command executed when the binary changes.
@@ -1000,7 +1000,7 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 
 ### 18.2 Inode-Resilient Directory Watching & Atomic Renames
 Directly watching an executable binary file via OS filesystem notifications (inotify on Linux, ReadDirectoryChangesW on Windows) suffers from inode invalidation: modern compilers (Rust, Go, C++) write into temporary files and perform atomic renames (`rename` or `MoveFileExW`) to replace the target executable.
-`rsupervisord` solves this by:
+`supervisord` solves this by:
 1. Resolving the true binary location using `PlatformBackend::resolve_executable` (evaluating relative directories, executable extensions, and PATH).
 2. Registering the **parent directory** with `notify::RecommendedWatcher`.
 3. Filtering raw filesystem events strictly by canonicalized path comparison or wildcard filename matching.
@@ -1019,7 +1019,7 @@ Compilers and package managers write large binaries in chunks over several secon
 
 ## 19. Compatibility Translation Layer & Protocol Adapter (`src/compat/`)
 
-To preserve clean separation between `rsupervisord`'s modern actor runtime and external legacy protocols, all translation, fault mapping, and serialization logic are encapsulated inside a dedicated `compat` crate module (`src/compat/`). The core engine exposes minimal interface adapters.
+To preserve clean separation between `supervisord`'s modern actor runtime and external legacy protocols, all translation, fault mapping, and serialization logic are encapsulated inside a dedicated `compat` crate module (`src/compat/`). The core engine exposes minimal interface adapters.
 
 ```mermaid
 flowchart LR

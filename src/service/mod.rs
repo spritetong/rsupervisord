@@ -8,8 +8,8 @@ use crate::daemon::DaemonArgs;
 use clap::Subcommand;
 use std::path::{Path, PathBuf};
 
-/// Service lifecycle operations shared by `rsupervisord service ...` and
-/// `rsupervisorctl service ...`.
+/// Service lifecycle operations shared by `supervisord service ...` and
+/// `supervisorctl service ...`.
 #[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceOp {
     /// Install as a system service
@@ -26,8 +26,8 @@ pub enum ServiceOp {
 
 /// Executes a service lifecycle operation.
 ///
-/// Single entry point shared by the daemon binary (`rsupervisord service ...`)
-/// and the control binary (`rsupervisorctl service ...`). Resolves the command
+/// Single entry point shared by the daemon binary (`supervisord service ...`)
+/// and the control binary (`supervisorctl service ...`). Resolves the command
 /// name, configuration path, and daemon executable through the existing
 /// `config::paths` helpers, then dispatches to the platform service backend.
 pub fn run_service_op(op: ServiceOp, explicit_config: Option<&Path>) -> anyhow::Result<()> {

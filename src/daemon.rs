@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 /// Command-line arguments for the rsupervisord daemon.
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "rsupervisord",
+    name = "supervisord",
     version,
     about = "Next-generation process supervision daemon"
 )]

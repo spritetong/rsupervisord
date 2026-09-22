@@ -18,15 +18,15 @@ use tokio::net::TcpListener;
 
 #[test]
 fn test_cli_args_parsing() {
-    let args = CliArgs::parse_from(["rsupervisorctl", "status"]);
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
     assert!(matches!(args.command, Some(CliCommand::Status { names }) if names.is_empty()));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "status", "web", "api"]);
+    let args = CliArgs::parse_from(["supervisorctl", "status", "web", "api"]);
     assert!(
         matches!(args.command, Some(CliCommand::Status { names }) if names == vec!["web", "api"])
     );
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "start", "web", "--async", "-t", "15"]);
+    let args = CliArgs::parse_from(["supervisorctl", "start", "web", "--async", "-t", "15"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Start {
@@ -36,7 +36,7 @@ fn test_cli_args_parsing() {
         }) if names == vec!["web"]
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "stop", "api", "-a"]);
+    let args = CliArgs::parse_from(["supervisorctl", "stop", "api", "-a"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Stop {
@@ -46,7 +46,7 @@ fn test_cli_args_parsing() {
         }) if names == vec!["api"]
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "tail", "web", "-f", "-n", "50"]);
+    let args = CliArgs::parse_from(["supervisorctl", "tail", "web", "-f", "-n", "50"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Tail {
@@ -57,7 +57,7 @@ fn test_cli_args_parsing() {
         }) if name == "web"
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "tail", "all", "-f"]);
+    let args = CliArgs::parse_from(["supervisorctl", "tail", "all", "-f"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Tail {
@@ -67,22 +67,22 @@ fn test_cli_args_parsing() {
         }) if name == "all"
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "events"]);
+    let args = CliArgs::parse_from(["supervisorctl", "events"]);
     assert!(matches!(args.command, Some(CliCommand::Events)));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "stdin", "web", "command_line\n"]);
+    let args = CliArgs::parse_from(["supervisorctl", "stdin", "web", "command_line\n"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Stdin { name, chars }) if name == "web" && chars == "command_line\n"
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "send-stdin", "worker", "echo ping"]);
+    let args = CliArgs::parse_from(["supervisorctl", "send-stdin", "worker", "echo ping"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Stdin { name, chars }) if name == "worker" && chars == "echo ping"
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "service", "install"]);
+    let args = CliArgs::parse_from(["supervisorctl", "service", "install"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Service {
@@ -90,7 +90,7 @@ fn test_cli_args_parsing() {
         })
     ));
 
-    let args = CliArgs::parse_from(["rsupervisorctl", "service", "stop", "-c", "/etc/cfg.yaml"]);
+    let args = CliArgs::parse_from(["supervisorctl", "service", "stop", "-c", "/etc/cfg.yaml"]);
     assert!(matches!(
         args.command,
         Some(CliCommand::Service {
@@ -103,7 +103,7 @@ fn test_cli_args_parsing() {
     );
 
     // Bare `service` requires an operation.
-    assert!(CliArgs::try_parse_from(["rsupervisorctl", "service"]).is_err());
+    assert!(CliArgs::try_parse_from(["supervisorctl", "service"]).is_err());
 }
 
 #[tokio::test]
@@ -115,8 +115,8 @@ async fn test_cli_help_bridges_to_clap() {
     assert_eq!(code, 0);
 
     // Per-command help, including alias-only names, with a bin_name override
-    // (the `rsupervisord ctl ...` invocation form).
-    let code = rsupervisord::cli::commands::handle_help(Some("status"), Some("rsupervisord ctl"))
+    // (the `supervisord ctl ...` invocation form).
+    let code = rsupervisord::cli::commands::handle_help(Some("status"), Some("supervisord ctl"))
         .await
         .unwrap();
     assert_eq!(code, 0);

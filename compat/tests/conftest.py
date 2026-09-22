@@ -3,9 +3,9 @@
 Two run targets are supported, selected by ``SUPERVISOR_TARGET``:
 
 ``rsupervisord`` (default)
-    Launches the **compiled Rust binary** (``target/<profile>/rsupervisord``)
+    Launches the **compiled Rust binary** (``target/<profile>/supervisord``)
     with the YAML fixture ``compat/conf/rsupervisord.yaml``.  The
-    ``rsupervisorctl`` binary is used for the native tests; the stock
+    ``supervisorctl`` binary is used for the native tests; the stock
     supervisorctl/XML-RPC oracle tests are *capability gated* and reported as
     xfail until the corresponding features exist (see ``compat/docs/XMLRPC_COMPAT.md``).
 
@@ -60,11 +60,11 @@ STRICT = os.environ.get("SUPERVISOR_STRICT", "").strip().lower() not in (
 RSD_FORMAT = os.environ.get("SUPERVISOR_RSD_FORMAT", "yaml").strip().lower() or "yaml"
 PROFILE = os.environ.get("RSUPERVISORD_PROFILE", "debug").strip() or "debug"
 RSD_BIN = Path(
-    os.environ.get("RSUPERVISORD_BIN") or REPO_ROOT / "target" / PROFILE / "rsupervisord"
+    os.environ.get("RSUPERVISORD_BIN") or REPO_ROOT / "target" / PROFILE / "supervisord"
 )
 RCTL_BIN = Path(
     os.environ.get("RSUPERVISORCTL_BIN")
-    or REPO_ROOT / "target" / PROFILE / "rsupervisorctl"
+    or REPO_ROOT / "target" / PROFILE / "supervisorctl"
 )
 
 # [unix_http_server]/[inet_http_server] credentials for the python target.
@@ -158,7 +158,7 @@ class Instance:
         )
 
     def rctl(self, *args: str, timeout: float = 60.0) -> subprocess.CompletedProcess:
-        """Run the native rsupervisorctl (rsupervisord target only)."""
+        """Run the native supervisorctl (rsupervisord target only)."""
         cmd = [str(RCTL_BIN), "-s", str(self.uds), *args]
         env = {**os.environ, "NO_COLOR": "1"}
         return subprocess.run(
@@ -452,5 +452,5 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers", "oracle: stock supervisorctl / XML-RPC oracle tests"
     )
     config.addinivalue_line(
-        "markers", "native: rsupervisorctl-native tests (rsupervisord target only)"
+        "markers", "native: supervisorctl-native tests (rsupervisord target only)"
     )

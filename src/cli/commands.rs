@@ -137,7 +137,7 @@ pub async fn handle_status(client: &SupervisorClient, names: &[String]) -> Resul
 
     println!(
         " {}",
-        "─── rsupervisorctl ──────────────────────────────────────────────────────────"
+        "─── supervisorctl ───────────────────────────────────────────────────────────"
             .cyan()
             .dimmed()
     );
@@ -384,7 +384,7 @@ pub async fn handle_pid(client: &SupervisorClient, names: &[String]) -> Result<i
         if !is_tty {
             println!("{}", pid_str);
         } else {
-            println!("rsupervisord PID: {}", pid_str.cyan().bold());
+            println!("supervisord PID: {}", pid_str.cyan().bold());
         }
         return Ok(0);
     }
@@ -602,7 +602,7 @@ pub async fn handle_shutdown(client: &SupervisorClient) -> Result<i32> {
 
 /// Executes the 'version' command.
 pub async fn handle_version() -> Result<i32> {
-    println!("rsupervisorctl 0.1.0 (protocol supervisor 4.2.5)");
+    println!("supervisorctl 0.1.0 (protocol supervisor 4.2.5)");
     Ok(0)
 }
 

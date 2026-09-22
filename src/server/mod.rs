@@ -19,7 +19,7 @@ use crate::manager::ManagerHandle;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
-/// Orchestrates local IPC and optional TCP listeners for the rsupervisord daemon.
+/// Orchestrates local IPC and optional TCP listeners for the supervisord daemon.
 pub struct ServerEngine {
     ipc_state: AppState,
     tcp_state: AppState,

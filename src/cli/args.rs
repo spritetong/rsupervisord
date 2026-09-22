@@ -8,12 +8,12 @@ use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Command-line arguments for rsupervisorctl.
+/// Command-line arguments for supervisorctl.
 #[derive(Parser, Debug)]
 #[command(
-    name = "rsupervisorctl",
+    name = "supervisorctl",
     version,
-    about = "Control and monitor processes managed by rsupervisord",
+    about = "Control and monitor processes managed by supervisord",
     disable_help_subcommand = true
 )]
 pub struct CliArgs {
@@ -21,7 +21,7 @@ pub struct CliArgs {
     #[arg(short = 's', long = "server", alias = "serverurl", global = true)]
     pub server: Option<String>,
 
-    /// Path to rsupervisord.yaml configuration file
+    /// Path to supervisord.yaml configuration file
     #[arg(short = 'c', long = "config", alias = "configuration", global = true)]
     pub config: Option<PathBuf>,
 
@@ -45,7 +45,7 @@ pub struct CliArgs {
     pub command: Option<CliCommand>,
 }
 
-/// Available subcommands for rsupervisorctl.
+/// Available subcommands for supervisorctl.
 #[derive(Subcommand, Debug, Clone)]
 pub enum CliCommand {
     /// Show current status of managed programs
@@ -114,14 +114,14 @@ pub enum CliCommand {
         /// Target program name(s) or 'all'
         names: Vec<String>,
     },
-    /// Shut down the remote rsupervisord daemon
+    /// Shut down the remote supervisord daemon
     Shutdown,
     /// Manage the local system service (install/uninstall/start/stop/restart)
     Service {
         #[command(subcommand)]
         op: ServiceOp,
     },
-    /// Display rsupervisorctl and protocol version
+    /// Display supervisorctl and protocol version
     Version,
     /// Display help information for commands
     Help {
@@ -187,7 +187,7 @@ pub enum CliCommand {
         /// Target group name(s)
         names: Vec<String>,
     },
-    /// Connect to a different rsupervisord server URL for current session
+    /// Connect to a different supervisord server URL for current session
     Open {
         /// Server URL (http:// or unix://)
         url: String,

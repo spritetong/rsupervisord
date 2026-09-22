@@ -233,7 +233,7 @@ impl PlatformProcessGuard for WindowsProcessGuard {
 /// Posts WM_CLOSE to all top-level windows belonging to the given process ID.
 /// Returns the number of windows to which WM_CLOSE was posted.
 pub fn post_wm_close_to_process(pid: u32) -> usize {
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
     };
@@ -243,7 +243,7 @@ pub fn post_wm_close_to_process(pid: u32) -> usize {
         posted_count: usize,
     }
 
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         let ctx = unsafe { &mut *(lparam as *mut EnumContext) };
         let mut proc_id: u32 = 0;
         unsafe {

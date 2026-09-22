@@ -36,7 +36,7 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
   - Daemon level: `logging.enabled: false` or `level: "off"` completely mutes tracing.
 - 🧵 **Flexible Threading & Single-Thread CurrentThread Mode**:
   - Configurable worker threads (`worker_threads`). Set to `1` to run a lightweight `current_thread` single-core event loop (2~4MB memory baseline), ideal for edge devices and resource-constrained nodes.
-  - CLI client (`rsupervisorctl`) defaults to `current_thread` for instantaneous sub-millisecond execution.
+  - CLI client (`supervisorctl`) defaults to `current_thread` for instantaneous sub-millisecond execution.
 - 🌐 **Modern IPC & Embedded Web Dashboard**:
   - Local cross-platform Unix Domain Sockets (native `AF_UNIX` on both Linux and Windows 10/11) for zero-port Caddy/Nginx reverse proxy integration.
   - Single-binary embedded Web UI powered by production single-file Vue 3 (`rust-embed`, zero NPM dependencies) with real-time SSE live logs, batch controls, and diff modals.
@@ -52,7 +52,7 @@ Designed as a modern alternative to legacy tools like Python Supervisor and Go `
 
 ```text
                +-------------------------------------------+
-               |  CLI: rsupervisorctl  |  Web UI: Browser  |
+               |  CLI: supervisorctl  |  Web UI: Browser  |
                +-------------------------------------------+
                                      |
                           [UDS / AF_UNIX / HTTP JSON]
@@ -92,18 +92,18 @@ cd rsupervisord
 cargo build --release
 
 # Binaries located at:
-#   target/release/rsupervisord      (Daemon engine)
-#   target/release/rsupervisorctl    (CLI client)
+#   target/release/supervisord      (Daemon engine)
+#   target/release/supervisorctl    (CLI client)
 ```
 
-### 2. Configuration Example (`rsupervisord.yaml`)
+### 2. Configuration Example (`supervisord.yaml`)
 
 ```yaml
 # Tokio worker threads (1 activates current_thread single-thread mode)
 worker_threads: 2
 
 server:
-  uds_path: "/var/run/rsupervisord.sock"
+  uds_path: "/var/run/supervisord.sock"
   http_bind: "127.0.0.1:9001"
   auth_token: ""
 
@@ -129,7 +129,7 @@ programs:
     command: "mysqld --console"
     priority: 10
     logs:
-      stdout: "/var/log/rsupervisord/db.log"
+      stdout: "/var/log/supervisord/db.log"
 
   api-server:
     command: "./server --port 8080"
@@ -146,11 +146,11 @@ See [config-example.yaml](config-example.yaml) for full configuration parameters
 
 ### 3. Running the Daemon & Dynamic Path Conventions
 
-`rsupervisord` dynamically derives `cmd_name` from `argv[0]` by taking the basename without extension and replacing trailing `ctl` with `d`. If invoked via a symlink ending in `ctl` (e.g. `ln -s rsupervisord myctl`), it automatically executes in CLI mode with `cmd_name = "myd"`.
+`supervisord` dynamically derives `cmd_name` from `argv[0]` by taking the basename without extension and replacing trailing `ctl` with `d`. If invoked via a symlink ending in `ctl` (e.g. `ln -s supervisord myctl`), it automatically executes in CLI mode with `cmd_name = "myd"`.
 
 #### Configuration File Search Order
 When `-c / --config` is not explicitly specified on the command line, the daemon searches for the first existing configuration file in this order:
-1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG` (e.g. `RSUPERVISORD_CONFIG`, `MYD_CONFIG`)
+1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG` (e.g. `SUPERVISORD_CONFIG`, `MYD_CONFIG`)
 2. `<executable path>/<cmd_name>.yaml` (and symlink parent directory)
 3. `<executable path>/<cmd_name>/config.yaml`
 4. OS-specific system path:
@@ -171,43 +171,43 @@ When `-c / --config` is not explicitly specified on the command line, the daemon
 
 ```bash
 # Run daemon (auto-detects configuration file)
-./target/release/rsupervisord
+./target/release/supervisord
 
 # Run daemon with explicit configuration
-./target/release/rsupervisord -c config.yaml
+./target/release/supervisord -c config.yaml
 
 # Run with single-threaded event loop (ultra-lightweight)
-./target/release/rsupervisord -c config.yaml --worker-threads 1
+./target/release/supervisord -c config.yaml --worker-threads 1
 ```
 
-### 4. CLI Control (`rsupervisorctl`)
+### 4. CLI Control (`supervisorctl`)
 
 ```bash
 # Check status (formatted table)
-./target/release/rsupervisorctl status
+./target/release/supervisorctl status
 
 # Start, stop, or restart programs (Synchronous mode with status confirmation)
-./target/release/rsupervisorctl start api-server
-./target/release/rsupervisorctl stop api-server
-./target/release/rsupervisorctl restart api-server
+./target/release/supervisorctl start api-server
+./target/release/supervisorctl stop api-server
+./target/release/supervisorctl restart api-server
 
 # Asynchronous command (fire-and-return)
-./target/release/rsupervisorctl start api-server --async
+./target/release/supervisorctl start api-server --async
 
 # Tail real-time logs with automatic history replay
-./target/release/rsupervisorctl tail -f api-server --lines 50
+./target/release/supervisorctl tail -f api-server --lines 50
 
 # Hot-reload configuration with zero downtime
-./target/release/rsupervisorctl reload
+./target/release/supervisorctl reload
 ```
 
 ### 5. System Service Management (Windows Service & Linux Systemd)
 
-`rsupervisord` provides built-in, cross-platform system service lifecycle management without requiring external wrappers.
+`supervisord` provides built-in, cross-platform system service lifecycle management without requiring external wrappers.
 
 #### `service` Subcommand
-Available on both `rsupervisord` and `rsupervisorctl` (the ctl form locates the daemon executable next to itself):
-- `service install`: Installs `rsupervisord` as an auto-starting system service (Windows Service via SCM, or Linux systemd unit). An optional `-c / --config <path>` embeds an explicit configuration path.
+Available on both `supervisord` and `supervisorctl` (the ctl form locates the daemon executable next to itself):
+- `service install`: Installs `supervisord` as an auto-starting system service (Windows Service via SCM, or Linux systemd unit). An optional `-c / --config <path>` embeds an explicit configuration path.
 - `service uninstall`: Stops the running service (if active) and removes it from the service database.
 - `service start`: Starts the registered system service.
 - `service stop`: Gracefully stops the registered system service and drains all supervised child processes.
@@ -219,16 +219,16 @@ Open **PowerShell** or **Command Prompt** as Administrator:
 
 ```powershell
 # Install Windows Service with auto-start (uses default config path if -c is omitted)
-rsupervisord.exe service install
+supervisord.exe service install
 
 # Install with explicit configuration file
-rsupervisord.exe service install -c C:\rsupervisord\config.yaml
+supervisord.exe service install -c C:\supervisord\config.yaml
 
 # Manage service lifecycle
-rsupervisord.exe service start
-rsupervisord.exe service stop
-rsupervisord.exe service restart
-rsupervisord.exe service uninstall
+supervisord.exe service start
+supervisord.exe service stop
+supervisord.exe service restart
+supervisord.exe service uninstall
 ```
 
 When running as a Windows Service, SCM control requests (`Stop`, `Shutdown`) signal cooperative cancellation via `tokio_util::sync::CancellationToken`, cleanly terminating all supervised processes within native Win32 Job Objects before reporting `ServiceState::Stopped`.
@@ -238,20 +238,20 @@ On Linux systems, run with root privileges:
 
 ```bash
 # Install and enable systemd service (/etc/systemd/system/<cmd_name>.service)
-sudo rsupervisord service install
+sudo supervisord service install
 
 # Install with explicit configuration path
-sudo rsupervisord service install -c /etc/rsupervisord/config.yaml
+sudo supervisord service install -c /etc/supervisord/config.yaml
 
-# Manage service lifecycle via rsupervisord (or rsupervisorctl)
-sudo rsupervisord service start
-sudo rsupervisord service stop
-sudo rsupervisord service restart
-sudo rsupervisord service uninstall
+# Manage service lifecycle via supervisord (or supervisorctl)
+sudo supervisord service start
+sudo supervisord service stop
+sudo supervisord service restart
+sudo supervisord service uninstall
 
 # Or manage directly via native systemctl
-sudo systemctl status rsupervisord
-sudo systemctl restart rsupervisord
+sudo systemctl status supervisord
+sudo systemctl restart supervisord
 ```
 
 ### 6. Accessing the Web Dashboard

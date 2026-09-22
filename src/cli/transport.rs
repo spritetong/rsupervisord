@@ -14,7 +14,7 @@ use std::str::FromStr;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Target endpoint address for connecting to the rsupervisord daemon.
+/// Target endpoint address for connecting to the supervisord daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
     /// Unix Domain Socket / AF_UNIX local IPC.

@@ -6,7 +6,7 @@
 #   bash compat/run.sh                       # default target: compiled rsupervisord
 #   SUPERVISOR_TARGET=python bash compat/run.sh   # stock Python oracle
 #   SUPERVISOR_STRICT=1 bash compat/run.sh   # unsupported => hard failures
-#   bash compat/run.sh -m native             # only native rsupervisorctl tests
+#   bash compat/run.sh -m native             # only native supervisorctl tests
 #   bash compat/run.sh -k xmlrpc             # subset
 #
 set -euo pipefail

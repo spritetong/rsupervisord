@@ -1,4 +1,4 @@
-"""rsupervisorctl-native smoke tests against the compiled rsupervisord binary.
+"""supervisorctl-native smoke tests against the compiled supervisord binary.
 
 These exercise the **contract surface** only — exit codes and stdout shapes
 that are machine-consumable (see ``compat/docs/CLI_COMPAT.md`` §2.1/§10).

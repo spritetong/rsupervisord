@@ -19,9 +19,9 @@ worker_threads: 2
 # ------------------------------------------------------------------------------
 server:
   # Local IPC socket path (Unix Domain Socket on Unix, Named Pipe / UDS on Windows)
-  # Default on Unix: /var/run/rsupervisord.sock (or /tmp/rsupervisord.sock)
-  # Default on Windows: \\.\pipe\rsupervisord (or C:/run/rsupervisord.sock for Caddy UDS)
-  uds_path: "${RSUPERVISORD_IPC_PATH:-/var/run/rsupervisord.sock}"
+  # Default on Unix: /var/run/supervisord.sock (or /tmp/supervisord.sock)
+  # Default on Windows: \\.\pipe\supervisord (or C:/run/supervisord.sock for Caddy UDS)
+  uds_path: "${SUPERVISORD_IPC_PATH:-/var/run/supervisord.sock}"
 
   # Optional TCP HTTP listener for the Embedded Web UI and REST API.
   # If omitted, server will only listen on the local IPC socket.
@@ -45,7 +45,7 @@ logging:
   enabled: true
 
   # Daemon self-log file destination. If omitted, logs to stdout/stderr.
-  file: "logs/rsupervisord.log"
+  file: "logs/supervisord.log"
 
   # Log verbosity level: trace, debug, info, warn, error (default: info)
   level: "info"
@@ -114,7 +114,7 @@ program_defaults:
 # 4. Process Groups (Supervisor compatible)
 # ------------------------------------------------------------------------------
 # Organize multiple programs into named groups for batch status, start, stop,
-# and restart operations (e.g. `rsupervisorctl start web:*`).
+# and restart operations (e.g. `supervisorctl start web:*`).
 groups:
   web:
     programs:

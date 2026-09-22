@@ -19,7 +19,7 @@ use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsString;
 use std::path::Path;
 
-/// Entry point for the standalone `rsupervisorctl` binary.
+/// Entry point for the standalone `supervisorctl` binary.
 ///
 /// The usage/help name is derived from `argv[0]`, mirroring clap's default.
 pub fn run() -> Result<()> {
@@ -31,11 +31,11 @@ pub fn run() -> Result<()> {
     run_from(argv, bin_name.as_deref())
 }
 
-/// Single shared entry used by both `rsupervisorctl` and `rsupervisord ctl ...`.
+/// Single shared entry used by both `supervisorctl` and `supervisord ctl ...`.
 ///
 /// Argument parsing, `--help` rendering, and the Tokio runtime construction are
 /// defined exactly once here. `bin_name` overrides the usage/help program name
-/// (e.g. `"rsupervisord ctl"`) so help text reflects the actual invocation.
+/// (e.g. `"supervisord ctl"`) so help text reflects the actual invocation.
 pub fn run_from<I, T>(argv: I, bin_name: Option<&str>) -> Result<()>
 where
     I: IntoIterator<Item = T>,
