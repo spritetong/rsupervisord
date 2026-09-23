@@ -974,7 +974,7 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 5. **Crash Recovery & Auto-Restart Actions (`SC_ACTION_RESTART`)**:
    - During service installation, SCM is configured with progressive restart delays (5s, 10s, 30s) and `ServiceFailureResetPeriod::After(Duration::from_secs(86400))` (1 day).
    - `set_failure_actions_on_non_crash_failures(true)` ensures recovery actions also trigger if the daemon terminates with a non-zero exit code without an unhandled OS crash.
-   - Auto-start is configured with `delayed_auto_start = true` so system dependencies (network, disk) are fully ready.
+   - Auto-start uses `ServiceStartType::AutoStart` (immediate, not delayed) so the service starts as soon as SCM runs auto-start services at boot.
 
 6. **Automatic Working Directory Correction**:
    - Under `NT AUTHORITY\SYSTEM`, the default working directory is `C:\Windows\System32`.

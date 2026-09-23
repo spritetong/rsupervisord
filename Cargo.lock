@@ -1260,6 +1260,7 @@ dependencies = [
  "file-rotate",
  "futures-util",
  "getrandom 0.4.3",
+ "heck",
  "hyper",
  "hyper-util",
  "libc",

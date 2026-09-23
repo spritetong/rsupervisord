@@ -603,7 +603,10 @@ pub async fn handle_shutdown(client: &SupervisorClient) -> Result<i32> {
 
 /// Executes the 'version' command.
 pub fn handle_version() -> Result<i32> {
-    println!("supervisorctl 0.1.0 (protocol supervisor 4.2.5)");
+    println!(
+        "supervisorctl {} (protocol supervisor 4.2.5)",
+        env!("CARGO_PKG_VERSION")
+    );
     Ok(0)
 }
 

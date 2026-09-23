@@ -4,13 +4,16 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::config::SupervisorConfig;
+use crate::daemon::DaemonArgs;
+use crate::platform::traits::PlatformService;
+use heck::ToPascalCase;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-
 use tokio_util::sync::CancellationToken;
 use windows_service::define_windows_service;
 use windows_service::service::{
@@ -24,10 +27,6 @@ use windows_service::service_control_handler::{
 };
 use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-
-use crate::config::SupervisorConfig;
-use crate::daemon::DaemonArgs;
-use crate::platform::traits::PlatformService;
 
 pub struct WindowsService;
 
@@ -323,7 +322,7 @@ pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> a
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )?;
 
-    let display_name = format!("{} Process Supervisor", cmd_name);
+    let display_name = format!("{} Process Supervisor", cmd_name.to_pascal_case());
     let service_info = ServiceInfo {
         name: OsString::from(cmd_name),
         display_name: OsString::from(&display_name),
@@ -346,19 +345,14 @@ pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> a
         Ok(s) => s,
         Err(windows_service::Error::Winapi(ref e)) if e.raw_os_error() == Some(1073) => {
             anyhow::bail!(
-                "Windows service '{}' already exists. Uninstall it first or use --restart.",
+                "Windows service '{}' already exists. Run 'service uninstall' first to reinstall, or 'service restart' to restart it.",
                 cmd_name
             );
         }
         Err(e) => return Err(e.into()),
     };
 
-    let _ = service.set_description(
-        "High-performance asynchronous process supervision daemon with DAG orchestration",
-    );
-
-    // Configure delayed auto-start so dependencies finish loading before service start
-    let _ = service.set_delayed_auto_start(true);
+    let _ = service.set_description(env!("CARGO_PKG_DESCRIPTION"));
 
     // Configure SC_ACTION_RESTART crash recovery actions (restart after 5s, 10s, 30s)
     let actions: Vec<ServiceAction> = SC_FAILURE_RESTART_DELAYS

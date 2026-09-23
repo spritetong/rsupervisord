@@ -14,7 +14,7 @@ use std::path::PathBuf;
 #[command(
     name = "supervisorctl",
     version,
-    about = "Control and monitor processes managed by supervisord",
+    about = env!("CARGO_PKG_DESCRIPTION"),
     disable_help_subcommand = true
 )]
 pub struct CliArgs {

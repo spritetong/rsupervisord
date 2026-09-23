@@ -86,6 +86,7 @@ smart-default = "0.7"
 compact_str = { version = "0.10.0", features = ["serde"] }
 notify = "8"
 quick-xml = "0.42.0"
+heck = "0.5"
 
 # Platform abstractions
 [target.'cfg(unix)'.dependencies]

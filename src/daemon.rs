@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 #[command(
     name = "supervisord",
     version,
-    about = "Next-generation process supervision daemon"
+    about = env!("CARGO_PKG_DESCRIPTION")
 )]
 pub struct DaemonArgs {
     /// Path to YAML configuration file

@@ -31,7 +31,9 @@ pub async fn handle_supervisor_method(
         "supervisor.getAPIVersion" | "supervisor.getVersion" => {
             Ok(Value::String("3.0".to_string()))
         }
-        "supervisor.getSupervisorVersion" => Ok(Value::String("4.2.5".to_string())),
+        "supervisor.getSupervisorVersion" => {
+            Ok(Value::String(env!("CARGO_PKG_VERSION").to_string()))
+        }
         "supervisor.getIdentification" => {
             Ok(Value::String(ctx.manager.server_identifier().to_string()))
         }

@@ -110,7 +110,7 @@ programs:
     let req = "<methodCall><methodName>supervisor.getSupervisorVersion</methodName></methodCall>";
     let (status, body) = call_rpc(&app, req, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("<string>4.2.5</string>"));
+    assert!(body.contains(&format!("<string>{}</string>", env!("CARGO_PKG_VERSION"))));
 
     // 4. getIdentification
     let req = "<methodCall><methodName>supervisor.getIdentification</methodName></methodCall>";
