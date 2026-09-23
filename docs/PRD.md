@@ -281,9 +281,12 @@ The `supervisord` daemon enforces strict caller privilege and identity validatio
     - On Named Pipes: verifies caller token via `ImpersonateNamedPipeClient` and `TokenElevation`.
     - On Windows AF_UNIX sockets: verifies peer process token via `SIO_AF_UNIX_GETPEERPID` and `TokenElevation`.
     - Unelevated callers are rejected unless `server.allow_unelevated` is enabled.
-- **HTTP Authentication (Bearer Token & Basic Auth)**:
-  - Bearer Token: Validated against `server.auth_token`.
-  - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.username` and either plaintext `server.password` or SHA-1 hashed password (supporting `{SHA}...`).
+- **HTTP Authentication (Bearer Token, Basic Auth, Session Cookie)**:
+  - **Unified OR rule** on every listener (TCP + IPC) for REST, SSE, and `/RPC2`: pass if either basic or token matches; if neither is configured, access is open.
+  - Bearer Token: Validated against `server.auth_token` (`Authorization: Bearer`, raw value, or `?token=` query).
+  - Basic Authentication: Validates `Authorization: Basic <base64>` against `server.username`/`server.uds_username` and either plaintext password or SHA-1 hashed password (supporting `{SHA}...`).
+  - **Path tiers**: static Web UI shell and `/api/v1/auth/{config,login,logout}` are public; all other `/api/v1/*` and `/RPC2` are protected. API 401s are bare JSON (no `WWW-Authenticate`); only `/RPC2` carries the Basic challenge.
+  - **Web UI session**: `POST /api/v1/auth/login` issues an HttpOnly `SameSite=Strict` session cookie (7-day sliding TTL). Credentials are never stored in the browser.
   - CLI Standalone Connectivity: `supervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
 
 #### 3.3.3 Core RESTful JSON API Specification
@@ -307,6 +310,9 @@ The `supervisord` daemon enforces strict caller privilege and identity validatio
 | `GET` | `/api/v1/programs/:name/logs/stream` | **SSE (Server-Sent Events)** real-time live log stream for a specific program |
 | `GET` | `/api/v1/events` | **SSE System Events Stream**: Real-time lifecycle events (`StateChanged`, `HealthChanged`, `ConfigReloaded`, `CronTriggered`, `ProcessPreStart`, `ProcessPreStartFailed`, `ProcessPreStop`, `ProcessPreStopFailed`, `DaemonLifecycle`) |
 | `GET` | `/api/v1/logs/stream` | **SSE Aggregated Log Stream**: Real-time global log stream across all managed programs |
+| `GET` | `/api/v1/auth/config` | **Public**: reports `{basic, token, session}` so the Web UI knows which login fields to show |
+| `POST` | `/api/v1/auth/login` | **Public**: exchange username/password and/or token for an HttpOnly session cookie |
+| `POST` | `/api/v1/auth/logout` | **Public**: invalidate the current session and clear the cookie |
 
 #### 3.3.4 Activity-Aware Adaptive Metrics Sampling
 
@@ -360,7 +366,7 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
   - Batch operations with multi-select checkboxes (Batch Start/Stop/Restart, Start All, Stop All).
   - Zero-downtime hot reload trigger with modal diff breakdown.
   - SSE real-time terminal log drawer with scroll locking and buffer clearing.
-  - Bearer token & Basic Auth credentials with local storage persistence.
+  - Config-driven sign-in modal (username/password and/or bearer token) exchanging credentials for an HttpOnly session cookie; secrets are never persisted in the browser.
 
 ---
 
@@ -595,7 +601,7 @@ rsupervisord/
 │   └── server/                      # Communication server layer
 │       ├── mod.rs
 │       ├── api.rs                   # Axum REST JSON routing, group APIs, activity middleware
-│       ├── auth.rs                  # Multi-scheme Bearer and Basic Auth (plaintext/SHA1)
+│       ├── auth.rs                  # Unified authorize (basic/token/session), path-tier middleware, SessionStore
 │       ├── uds.rs                   # Cross-platform native UDS listener
 │       └── embedded_ui.rs           # rust-embed static asset handler and SPA routing
 └── tests/                           # Integration and unit test suite

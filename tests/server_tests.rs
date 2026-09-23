@@ -655,76 +655,120 @@ programs: {{}}
 
     let tcp_endpoint = Endpoint::Tcp(format!("127.0.0.1:{}", port));
 
-    // 1. Raw TCP HTTP request without credentials -> 401 with WWW-Authenticate header
-    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+    // 1. Static shell is public so the login page can load without a browser
+    //    native basic-auth dialog.
+    {
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .expect("connect tcp");
+        tokio::io::AsyncWriteExt::write_all(
+            &mut stream,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
         .await
-        .expect("connect tcp");
-    tokio::io::AsyncWriteExt::write_all(
-        &mut stream,
-        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    )
-    .await
-    .expect("send get");
-    let mut resp = Vec::new();
-    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
-        .await
-        .expect("read resp");
-    let resp_str = String::from_utf8_lossy(&resp);
-    assert!(
-        resp_str.contains("401 Unauthorized"),
-        "Expected 401: {}",
-        resp_str
-    );
-    assert!(
-        resp_str
-            .to_lowercase()
-            .contains("www-authenticate: basic realm=\"supervisor\""),
-        "Expected WWW-Authenticate header: {}",
-        resp_str
-    );
+        .expect("send get");
+        let mut resp = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
+            .await
+            .expect("read resp");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.contains("200 OK"),
+            "Static shell must stay public, got: {}",
+            resp_str
+        );
+        assert!(
+            !resp_str.to_lowercase().contains("www-authenticate:"),
+            "Static shell must not trigger native basic auth dialog: {}",
+            resp_str
+        );
+    }
 
-    // 2. Client with wrong password -> fails with 401
+    // 2. Protected API without credentials -> bare 401, no WWW-Authenticate
+    //    (browser must never pop the native dialog for fetch() calls).
+    {
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .expect("connect tcp");
+        tokio::io::AsyncWriteExt::write_all(
+            &mut stream,
+            b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("send get status");
+        let mut resp = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
+            .await
+            .expect("read resp");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.contains("401 Unauthorized"),
+            "Expected 401: {}",
+            resp_str
+        );
+        assert!(
+            !resp_str.to_lowercase().contains("www-authenticate:"),
+            "API 401 must not carry WWW-Authenticate: {}",
+            resp_str
+        );
+    }
+
+    // 3. Client with wrong password -> fails with 401
     let wrong_client = SupervisorClient::new(tcp_endpoint.clone(), None)
         .with_basic_auth("admin".to_string(), "wrong_pass".to_string());
     let err_res = wrong_client.status(&[]).await;
     assert!(err_res.is_err());
     assert!(err_res.unwrap_err().to_string().contains("401"));
 
-    // 3. Client with correct basic auth -> 200 OK
+    // 4. Client with correct basic auth -> 200 OK
     let valid_client = SupervisorClient::new(tcp_endpoint.clone(), None)
         .with_basic_auth("admin".to_string(), "secret123".to_string());
     let ok_res = valid_client.status(&[]).await;
     assert!(ok_res.is_ok());
 
-    // 4. Raw TCP HTTP request with valid Authorization header to Web UI (/) -> 200 OK
-    use base64::Engine;
-    let b64_auth = base64::engine::general_purpose::STANDARD.encode("admin:secret123");
-    let mut stream_auth = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+    // 5. Auth endpoints are public: config report works without credentials
+    {
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .expect("connect tcp");
+        tokio::io::AsyncWriteExt::write_all(
+            &mut stream,
+            b"GET /api/v1/auth/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
         .await
-        .expect("connect tcp");
-    let auth_req = format!(
-        "GET / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n",
-        b64_auth
-    );
-    tokio::io::AsyncWriteExt::write_all(&mut stream_auth, auth_req.as_bytes())
-        .await
-        .expect("send auth req");
-    let mut resp_auth = Vec::new();
-    tokio::io::AsyncReadExt::read_to_end(&mut stream_auth, &mut resp_auth)
-        .await
-        .expect("read resp auth");
-    let resp_auth_str = String::from_utf8_lossy(&resp_auth);
+        .expect("send auth config");
+        let mut resp = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
+            .await
+            .expect("read resp");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.contains("200 OK"),
+            "auth/config must be public, got: {}",
+            resp_str
+        );
+        assert!(
+            resp_str.contains("\"basic\":true"),
+            "auth/config should report basic=true: {}",
+            resp_str
+        );
+    }
+
+    // 6. IPC is also protected (uds credentials auto-fill from username/password)
+    //    matching stock supervisor unix_http_server behavior.
+    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
+    let ipc_unauth = SupervisorClient::new(ipc_endpoint.clone(), None);
+    let ipc_err = ipc_unauth.status(&[]).await;
+    assert!(ipc_err.is_err(), "IPC without credentials must be rejected");
     assert!(
-        resp_auth_str.contains("200 OK"),
-        "Expected 200 OK for authenticated web UI request: {}",
-        resp_auth_str
+        ipc_err.unwrap_err().to_string().contains("401"),
+        "IPC without credentials must return 401"
     );
 
-    // 5. Local IPC client (without basic auth) continues to work
-    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
-    let ipc_client = SupervisorClient::new(ipc_endpoint, None);
-    let ipc_res = ipc_client.status(&[]).await;
-    assert!(ipc_res.is_ok());
+    let ipc_authed = SupervisorClient::new(ipc_endpoint, None)
+        .with_basic_auth("admin".to_string(), "secret123".to_string());
+    let ipc_ok = ipc_authed.status(&[]).await;
+    assert!(ipc_ok.is_ok(), "IPC with valid basic auth must succeed");
 
     server_cancel.cancel();
     let _ = server_task.await;
@@ -971,6 +1015,353 @@ programs:
     assert!(
         err_res.is_err(),
         "client.send_stdin to unknown program should fail"
+    );
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+/// Performs a raw HTTP/1.1 request over TCP and returns the full response text.
+async fn raw_http(port: u16, request: &str) -> String {
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .expect("connect tcp");
+    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
+        .await
+        .expect("write request");
+    let mut resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut resp)
+        .await
+        .expect("read response");
+    String::from_utf8_lossy(&resp).to_string()
+}
+
+/// Reads only the status line (for long-lived streams like SSE that never close).
+async fn raw_http_status(port: u16, request: &str) -> String {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .expect("connect tcp");
+    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
+        .await
+        .expect("write request");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .expect("status line timeout")
+        .expect("read status line");
+    line
+}
+
+#[tokio::test]
+async fn test_web_session_login_flow_with_basic() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("session_login");
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+  username: "admin"
+  password: "secret123"
+
+programs: {{}}
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+    );
+    std::fs::write(&config_path, &yaml).expect("write config");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager.handle(),
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // auth/config is public and reports basic=true, session=false
+    let cfg = raw_http(
+        port,
+        "GET /api/v1/auth/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(cfg.contains("200 OK"), "auth/config public: {}", cfg);
+    assert!(cfg.contains("\"basic\":true"), "basic flag: {}", cfg);
+    assert!(cfg.contains("\"session\":false"), "no session yet: {}", cfg);
+
+    // Bad login -> 401, no session cookie
+    let bad_body = r#"{"username":"admin","password":"wrong"}"#;
+    let bad_req = format!(
+        "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        bad_body.len(),
+        bad_body
+    );
+    let bad = raw_http(port, &bad_req).await;
+    assert!(bad.contains("401 Unauthorized"), "bad login: {}", bad);
+    assert!(
+        !bad.to_lowercase()
+            .contains("set-cookie: rsupervisord_session="),
+        "bad login must not issue cookie: {}",
+        bad
+    );
+
+    // Good login -> 200 + Set-Cookie
+    let good_body = r#"{"username":"admin","password":"secret123"}"#;
+    let good_req = format!(
+        "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        good_body.len(),
+        good_body
+    );
+    let good = raw_http(port, &good_req).await;
+    assert!(good.contains("200 OK"), "good login: {}", good);
+    assert!(
+        good.to_lowercase()
+            .contains("set-cookie: rsupervisord_session="),
+        "login must issue session cookie: {}",
+        good
+    );
+
+    // Extract session cookie value
+    let cookie_line = good
+        .lines()
+        .find(|l| {
+            l.to_lowercase()
+                .starts_with("set-cookie: rsupervisord_session=")
+        })
+        .expect("set-cookie header")
+        .to_string();
+    let session_value = cookie_line
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .split('=')
+        .nth(1)
+        .expect("cookie value")
+        .to_string();
+    assert!(!session_value.is_empty());
+    let cookie_header = format!("Cookie: rsupervisord_session={}", session_value);
+
+    // Session cookie authorizes protected API
+    let authed = raw_http(
+        port,
+        &format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{}\r\nConnection: close\r\n\r\n",
+            cookie_header
+        ),
+    )
+    .await;
+    assert!(authed.contains("200 OK"), "cookie API access: {}", authed);
+
+    // auth/config now reports session=true
+    let cfg2 = raw_http(
+        port,
+        &format!(
+            "GET /api/v1/auth/config HTTP/1.1\r\nHost: localhost\r\n{}\r\nConnection: close\r\n\r\n",
+            cookie_header
+        ),
+    )
+    .await;
+    assert!(cfg2.contains("\"session\":true"), "session flag: {}", cfg2);
+
+    // SSE accepts the session cookie (status line only; stream stays open)
+    let sse = raw_http_status(
+        port,
+        &format!(
+            "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\n{}\r\nAccept: text/event-stream\r\n\r\n",
+            cookie_header
+        ),
+    )
+    .await;
+    assert!(sse.contains("200 OK"), "cookie SSE access: {}", sse);
+
+    // Logout clears the session
+    let logout_req = format!(
+        "POST /api/v1/auth/logout HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        cookie_header
+    );
+    let out = raw_http(port, &logout_req).await;
+    assert!(out.contains("200 OK"), "logout: {}", out);
+
+    let after = raw_http(
+        port,
+        &format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{}\r\nConnection: close\r\n\r\n",
+            cookie_header
+        ),
+    )
+    .await;
+    assert!(
+        after.contains("401 Unauthorized"),
+        "session invalidated after logout: {}",
+        after
+    );
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_xmlrpc_or_semantics_basic_and_token_over_tcp() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("xmlrpc_token_or");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+  auth_token: "tok123"
+  username: "admin"
+  password: "secret123"
+
+programs: {{}}
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+    );
+    std::fs::write(&config_path, &yaml).expect("write config");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager.handle(),
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let xml = r#"<methodCall><methodName>supervisor.getAPIVersion</methodName></methodCall>"#;
+    let rpc_noauth = format!(
+        "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        xml.len(),
+        xml
+    );
+    use base64::Engine;
+    let basic_b64 = base64::engine::general_purpose::STANDARD.encode("admin:secret123");
+    let rpc_basic = format!(
+        "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nAuthorization: Basic {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        basic_b64,
+        xml.len(),
+        xml
+    );
+    let rpc_token = format!(
+        "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nAuthorization: Bearer tok123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        xml.len(),
+        xml
+    );
+    let rpc_wrong = format!(
+        "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nAuthorization: Bearer nope\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        xml.len(),
+        xml
+    );
+
+    // No credentials -> 401 with supervisor realm challenge
+    let r1 = raw_http(port, &rpc_noauth).await;
+    assert!(r1.contains("401 Unauthorized"), "no creds: {}", r1);
+    assert!(
+        r1.to_lowercase()
+            .contains("www-authenticate: basic realm=\"supervisor\""),
+        "RPC challenge realm: {}",
+        r1
+    );
+
+    // Valid basic -> 200 (OR leg 1)
+    let r2 = raw_http(port, &rpc_basic).await;
+    assert!(r2.contains("200 OK"), "basic leg: {}", r2);
+    assert!(r2.contains("<string>3.0</string>"), "basic body: {}", r2);
+
+    // Valid token -> 200 (OR leg 2; previously broken when basic was also set)
+    let r3 = raw_http(port, &rpc_token).await;
+    assert!(r3.contains("200 OK"), "token leg: {}", r3);
+    assert!(r3.contains("<string>3.0</string>"), "token body: {}", r3);
+
+    // Wrong token -> 401
+    let r4 = raw_http(port, &rpc_wrong).await;
+    assert!(r4.contains("401 Unauthorized"), "wrong token: {}", r4);
+
+    // IPC enforces the same rules (uds basic auto-filled from username/password)
+    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
+    let ipc_unauth = SupervisorClient::new(ipc_endpoint.clone(), None);
+    assert!(
+        ipc_unauth.status(&[]).await.is_err(),
+        "IPC without credentials must be rejected"
+    );
+    let ipc_authed = SupervisorClient::new(ipc_endpoint, None)
+        .with_basic_auth("admin".to_string(), "secret123".to_string());
+    assert!(
+        ipc_authed.status(&[]).await.is_ok(),
+        "IPC with valid basic auth must succeed"
+    );
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_token_only_ipc_enforced() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let ipc_path = get_test_ipc_path("token_only_ipc");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  auth_token: "ipc_secret_token"
+
+programs: {{}}
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+    );
+    std::fs::write(&config_path, &yaml).expect("write config");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager.handle(),
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let ipc_endpoint = Endpoint::parse(&ipc_path.to_string_lossy());
+
+    // Without token -> 401 (previously IPC token-only was wide open)
+    let unauth = SupervisorClient::new(ipc_endpoint.clone(), None);
+    let err = unauth.status(&[]).await;
+    assert!(err.is_err(), "IPC without token must be rejected");
+    assert!(
+        err.unwrap_err().to_string().contains("401"),
+        "IPC without token must return 401"
+    );
+
+    // With token -> OK
+    let authed = SupervisorClient::new(ipc_endpoint, Some("ipc_secret_token".to_string()));
+    assert!(
+        authed.status(&[]).await.is_ok(),
+        "IPC with valid token must succeed"
     );
 
     server_cancel.cancel();

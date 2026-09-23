@@ -16,36 +16,16 @@ use crate::compat::xmlrpc::wire::{MethodCall, Value, serialize_response};
 use crate::server::api::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 
 /// Axum route handler for POST `/RPC2`.
-pub async fn xmlrpc_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    // 1. Verify HTTP Basic Authentication if configured
-    if let Some(ref basic) = state.basic_auth {
-        let authorized = headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(crate::server::auth::extract_basic_auth)
-            .map(|(u, p)| basic.verify(&u, &p))
-            .unwrap_or(false);
-
-        if !authorized {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(WWW_AUTHENTICATE, "Basic realm=\"default\"")],
-                "Unauthorized\n",
-            )
-                .into_response();
-        }
-    }
-
-    // 2. Decode raw XML request body
+///
+/// Authentication is enforced by the unified middleware in `build_router`;
+/// this handler only decodes and dispatches the XML-RPC call.
+pub async fn xmlrpc_handler(State(state): State<AppState>, body: Bytes) -> Response {
+    // 1. Decode raw XML request body
     let xml_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {

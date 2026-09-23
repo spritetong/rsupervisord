@@ -569,8 +569,8 @@ event_listeners:
 - **`worker_threads`** (*整型*, 默认: `None` / CPU 核心数): Tokio 异步线程池核心线程数。设为 `1` 时进入超轻量单线程模式。
 - **`server.uds_path`** (*路径字符串*): 本地 IPC 监听套接字路径。Windows 下原生支持 `AF_UNIX` 文件路径或 `\\.\pipe\name` 命名管道。
 - **`server.http_bind`** (*字符串*, 默认: 无): TCP 监听网络地址与端口。提供 REST API 与 Web 控制台。未配置则不开放 TCP 端口。
-- **`server.auth_token`** (*字符串*, 可选): REST API 访问令牌（HTTP 请求头 `Authorization: Bearer <token>`）。
-- **`server.username` / `server.password`** (*字符串*, 可选): HTTP Basic Auth 访问凭据。密码支持 `{SHA}` 前缀哈希值。
+- **`server.auth_token`** (*字符串*, 可选): REST/XMLRPC/SSE 访问令牌（`Authorization: Bearer <token>` 或 `?token=`）。与 basic 凭据同时配置时二者均可通过（OR 语义），TCP 与 IPC 监听器同时生效。
+- **`server.username` / `server.password`** (*字符串*, 可选): HTTP Basic Auth 访问凭据。密码支持 `{SHA}` 前缀哈希值。IPC 使用 `uds_username`/`uds_password`（缺省时从本对自动填充）。Web UI 通过登录弹窗换取 HttpOnly 会话 Cookie，浏览器中不保存任何明文凭据。
 - **`server.identifier`** (*字符串*, 可选): 守护节点名称，默认为主机名。
 - **`server.path_translation`** (*布尔值*, 默认: `true`): 是否在解析配置时统一将所有相对路径转为绝对路径（以配置文件所在目录为基准）。
 - **`server.allow_unelevated`** (*布尔值*, 默认: `false`): 当守护进程以 root 或 Administrator 特权身份运行时，是否允许非特权客户端连接本地 IPC（Unix UDS / Windows 命名管道与 AF_UNIX）。默认关闭以保障安全基线。

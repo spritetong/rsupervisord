@@ -800,13 +800,13 @@
           <span>Reload Config</span>
         </button>
 
-        <!-- Auth token button -->
-        <button class="btn btn-outline" @click="openAuthModal" :style="authToken ? 'border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;' : ''">
+        <!-- Sign in / Sign out button -->
+        <button class="btn btn-outline" @click="onAuthButtonClick" :style="authSession ? 'border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;' : ''">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
             <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
           </svg>
-          <span>{{ authToken ? 'Token Active' : 'Auth Token' }}</span>
+          <span>{{ authSession ? 'Sign Out' : 'Sign In' }}</span>
         </button>
       </div>
     </header>
@@ -1264,27 +1264,33 @@
       </div>
     </div>
 
-    <!-- Auth Token Modal -->
-    <div class="modal-backdrop" v-if="authModalOpen" @click.self="authModalOpen = false">
+    <!-- Login Modal -->
+    <div class="modal-backdrop" v-if="authModalOpen">
       <div class="modal-card" style="max-width: 440px;">
         <div class="modal-header">
-          <div class="modal-title">API Bearer Token</div>
-          <button class="btn btn-outline btn-icon" @click="authModalOpen = false">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
+          <div class="modal-title">Sign in</div>
         </div>
         <div class="modal-body">
           <p style="color: var(--text-muted); margin-bottom: 14px;">
-            Enter the authorization token configured in <code>server.auth_token</code> if required by the daemon.
+            Authentication is required to access this instance. Credentials are
+            exchanged for an HttpOnly session cookie and are never stored in the browser.
           </p>
-          <input type="password" class="input-text" v-model="tokenInput" placeholder="Enter bearer token..." style="width: 100%; font-family: var(--font-mono); padding-left: 12px;">
+          <div v-if="authBasic" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
+            <input type="text" class="input-text" v-model="loginUsername" placeholder="Username" autocomplete="username" style="width: 100%; padding-left: 12px;">
+            <input type="password" class="input-text" v-model="loginPassword" placeholder="Password" autocomplete="current-password" @keyup.enter="submitLogin" style="width: 100%; padding-left: 12px;">
+          </div>
+          <div v-if="authTokenEnabled">
+            <input type="password" class="input-text" v-model="loginToken" placeholder="Bearer token (server.auth_token)" autocomplete="off" @keyup.enter="submitLogin" style="width: 100%; font-family: var(--font-mono); padding-left: 12px;">
+          </div>
+          <div v-if="!authBasic && !authTokenEnabled" style="color: var(--text-muted);">
+            No authentication is configured on the server.
+          </div>
+          <div v-if="loginError" style="color: #f87171; margin-top: 12px; font-size: 13px;">{{ loginError }}</div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-outline" @click="clearAuthToken">Clear</button>
-          <button class="btn btn-primary" @click="saveAuthToken">Save Token</button>
+          <button class="btn btn-primary" :disabled="loginPending" @click="submitLogin">
+            {{ loginPending ? 'Signing in...' : 'Sign In' }}
+          </button>
         </div>
       </div>
     </div>
@@ -1318,10 +1324,17 @@
         const sseConnected = ref(false);
         let systemEventSource = null;
 
-        // Auth
-        const authToken = ref(localStorage.getItem('rsupervisord_auth_token') || '');
+        // Auth (server-driven capabilities + HttpOnly session cookie)
         const authModalOpen = ref(false);
-        const tokenInput = ref('');
+        const authBasic = ref(false);
+        const authTokenEnabled = ref(false);
+        const authSession = ref(false);
+        const authBlocked = ref(false);
+        const loginUsername = ref('');
+        const loginPassword = ref('');
+        const loginToken = ref('');
+        const loginError = ref('');
+        const loginPending = ref(false);
 
         // Details Modal
         const detailsModalOpen = ref(false);
@@ -1352,13 +1365,27 @@
           }, 3500);
         }
 
-        // Headers helper with Authorization
+        // Headers helper (session cookie is sent automatically same-origin)
         function getHeaders() {
-          const headers = { 'Content-Type': 'application/json' };
-          if (authToken.value) {
-            headers['Authorization'] = 'Bearer ' + authToken.value;
+          return { 'Content-Type': 'application/json' };
+        }
+
+        // Central 401 handler: stop polling and require sign-in
+        function handleUnauthorized() {
+          if (timer) {
+            clearInterval(timer);
+            timer = null;
           }
-          return headers;
+          if (systemEventSource) {
+            systemEventSource.close();
+            systemEventSource = null;
+          }
+          sseConnected.value = false;
+          authBlocked.value = true;
+          if (!authModalOpen.value) {
+            showToast('Authentication required (401 Unauthorized)', 'error');
+          }
+          authModalOpen.value = true;
         }
 
         // Fetch process status
@@ -1370,8 +1397,7 @@
             });
 
             if (res.status === 401) {
-              showToast('Authentication required (401 Unauthorized)', 'error');
-              openAuthModal();
+              handleUnauthorized();
               return;
             }
 
@@ -1714,7 +1740,7 @@
         async function confirmReloadConfig() {
           try {
             isReloading.value = true;
-            const res = await fetch('/api/v1/reload', {
+            const res = await fetch('/api/v1/config/reload', {
               method: 'POST',
               headers: getHeaders()
             });
@@ -1778,12 +1804,11 @@
             logLines.value = ['[Subscribing to aggregated log stream across all programs...]'];
           }
 
-          // 2. Stream live updates via SSE
+          // 2. Stream live updates via SSE (session cookie attached automatically)
           try {
-            const tokenParam = authToken.value ? '?token=' + encodeURIComponent(authToken.value) : '';
             const sseUrl = name === 'all'
-              ? `/api/v1/logs/stream${tokenParam}`
-              : `/api/v1/programs/${encodeURIComponent(name)}/logs/stream${tokenParam}`;
+              ? `/api/v1/logs/stream`
+              : `/api/v1/programs/${encodeURIComponent(name)}/logs/stream`;
 
             logEventSource = new EventSource(sseUrl);
             logEventSource.onopen = () => {
@@ -1863,8 +1888,7 @@
             systemEventSource = null;
           }
           try {
-            const tokenParam = authToken.value ? '?token=' + encodeURIComponent(authToken.value) : '';
-            const url = `/api/v1/events${tokenParam}`;
+            const url = `/api/v1/events`;
             systemEventSource = new EventSource(url);
 
             systemEventSource.onopen = () => {
@@ -1915,6 +1939,11 @@
             systemEventSource.addEventListener('system', handleEvent);
 
             systemEventSource.onerror = () => {
+              // A closed stream while blocked means the session expired.
+              if (authBlocked.value) {
+                authModalOpen.value = true;
+                return;
+              }
               if (sseConnected.value) {
                 sseConnected.value = false;
                 setupTimer();
@@ -1926,29 +1955,117 @@
           }
         }
 
-        // Auth Modal
+        // Auth: load server capability flags and session state
+        async function loadAuthConfig() {
+          try {
+            const res = await fetch('/api/v1/auth/config');
+            const data = await res.json();
+            if (data.success && data.data) {
+              authBasic.value = !!data.data.basic;
+              authTokenEnabled.value = !!data.data.token;
+              authSession.value = !!data.data.session;
+              return data.data;
+            }
+          } catch (e) {
+            console.error('Failed to load auth config:', e);
+          }
+          return { basic: false, token: false, session: false };
+        }
+
         function openAuthModal() {
-          tokenInput.value = authToken.value;
+          loginError.value = '';
           authModalOpen.value = true;
         }
 
-        function saveAuthToken() {
-          const val = tokenInput.value.trim();
-          authToken.value = val;
-          if (val) {
-            localStorage.setItem('rsupervisord_auth_token', val);
+        function onAuthButtonClick() {
+          if (authSession.value) {
+            logout();
           } else {
-            localStorage.removeItem('rsupervisord_auth_token');
+            openAuthModal();
           }
-          authModalOpen.value = false;
-          showToast('Authentication token saved', 'success');
-          setupSystemEvents();
-          fetchStatus();
         }
 
-        function clearAuthToken() {
-          tokenInput.value = '';
-          saveAuthToken();
+        async function submitLogin() {
+          loginPending.value = true;
+          loginError.value = '';
+          try {
+            const body = {};
+            if (authBasic.value) {
+              if (loginUsername.value) body.username = loginUsername.value;
+              if (loginPassword.value) body.password = loginPassword.value;
+            }
+            if (authTokenEnabled.value && loginToken.value) {
+              body.token = loginToken.value;
+            }
+            const res = await fetch('/api/v1/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body)
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) {
+              loginError.value = data.error || 'Invalid credentials';
+              return;
+            }
+            authSession.value = true;
+            authBlocked.value = false;
+            authModalOpen.value = false;
+            loginPassword.value = '';
+            loginToken.value = '';
+            showToast('Signed in', 'success');
+            bootApp();
+          } catch (e) {
+            loginError.value = e.message || String(e);
+          } finally {
+            loginPending.value = false;
+          }
+        }
+
+        async function logout() {
+          try {
+            await fetch('/api/v1/auth/logout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            });
+          } catch (e) {
+            console.error('Logout failed:', e);
+          }
+          authSession.value = false;
+          if (timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+          if (systemEventSource) {
+            systemEventSource.close();
+            systemEventSource = null;
+          }
+          if (logEventSource) {
+            logEventSource.close();
+            logEventSource = null;
+          }
+          sseConnected.value = false;
+          showToast('Signed out', 'info');
+          // Re-evaluate auth so the login dialog reappears when required.
+          initializeAuth();
+        }
+
+        async function initializeAuth() {
+          const cfg = await loadAuthConfig();
+          const needsLogin = (cfg.basic || cfg.token) && !cfg.session;
+          if (needsLogin) {
+            authBlocked.value = true;
+            authModalOpen.value = true;
+            return false;
+          }
+          authBlocked.value = false;
+          bootApp();
+          return true;
+        }
+
+        function bootApp() {
+          fetchStatus();
+          setupSystemEvents();
+          setupTimer();
         }
 
         // Format helpers
@@ -1996,9 +2113,7 @@
         }
 
         onMounted(() => {
-          fetchStatus();
-          setupSystemEvents();
-          setupTimer();
+          initializeAuth();
         });
 
         onUnmounted(() => {
@@ -2021,9 +2136,15 @@
           isReloading,
           isActionPending,
           lastUpdated,
-          authToken,
           authModalOpen,
-          tokenInput,
+          authBasic,
+          authTokenEnabled,
+          authSession,
+          loginUsername,
+          loginPassword,
+          loginToken,
+          loginError,
+          loginPending,
           detailsModalOpen,
           currentDetails,
           reloadModalOpen,
@@ -2060,8 +2181,9 @@
           copyLogs,
           classifyLogLine,
           openAuthModal,
-          saveAuthToken,
-          clearAuthToken,
+          submitLogin,
+          logout,
+          onAuthButtonClick,
           getStateBadgeClass,
           getHealthBadgeClass,
           formatUptime

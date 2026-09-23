@@ -315,7 +315,7 @@ flowchart TD
 3. **Purely Reactive `wait_for_state`**:
    Internal commands waiting for state settling (e.g. synchronous CLI operations) subscribe to the `EventHub` rather than executing busy sleep loops (`tokio::time::sleep(50ms)`), achieving instant reaction upon state mutation.
 4. **Server-Sent Events (SSE) & Adaptive Web UI Heartbeat**:
-   The HTTP server exposes `GET /api/v1/events` and `GET /api/v1/logs/stream` (with optional `?token=` query parameter authentication for browsers). The embedded Web UI connects to `/api/v1/events` for millisecond-level state reflection, backing off the legacy polling timer to a 30-second fallback heartbeat.
+   The HTTP server exposes `GET /api/v1/events` and `GET /api/v1/logs/stream` (authenticated via the unified middleware: session cookie for the browser, `Authorization` header, or `?token=` query for machine clients). The embedded Web UI connects to `/api/v1/events` for millisecond-level state reflection, backing off the legacy polling timer to a 30-second fallback heartbeat.
 
 ---
 
@@ -607,19 +607,25 @@ pub fn is_current_process_elevated() -> bool {
 }
 ```
 
-### 9.2 Multi-Scheme Authentication (`src/server/auth.rs`)
+### 9.2 Unified Multi-Scheme Authentication (`src/server/auth.rs`)
 
-The HTTP engine supports both Bearer tokens and HTTP Basic Authentication:
+A **single** authorize function guards every input surface (TCP REST, IPC REST, XML-RPC `/RPC2`, SSE) on **both** listeners. The middleware is mounted inside `build_router`, so no listener can forget it.
 
-1. **Bearer Token Authentication**:
-   - Compares the `Authorization: Bearer <token>` header or `?token=<token>` query param against `server.auth_token`.
-2. **HTTP Basic Authentication**:
-   - Parses the `Authorization: Basic <base64(user:pass)>` header and validates against `server.user`.
-   - **Password Verification**:
-     - *Plaintext match*: Compares against `server.password`.
-     - *SHA-1 hash match*: When `server.password_sha1` is configured (supports `{SHA}<base64>` or raw 40-character hex string), computes `sha1::Sha1` of the input and performs constant-time comparison.
-3. **CLI Standalone Connectivity**:
-   - CLI flags `--key <token>` or `--user <user>` / `--password <pass>` enable direct connection to local or remote daemons even when no local configuration file exists.
+1. **Core rule (`ServerAuthState::authorize`)** — evaluated as OR:
+   1. Neither basic nor token configured (empty token normalized to `None`) → open access.
+   2. Valid Web UI session cookie (`rsupervisord_session`, HttpOnly, SameSite=Strict, 7-day sliding TTL) → pass.
+   3. Token matches `server.auth_token` (`Authorization: Bearer <t>`, raw header, or `?token=<t>` query) → pass.
+   4. Basic credentials verify against `server.username` / `server.password` (plaintext or `{SHA}`) → pass.
+   5. Otherwise → `401`.
+2. **Path tiers**:
+   - **Public**: static shell (anything outside `/api/` and `/RPC2`) + `GET /api/v1/auth/config` + `POST /api/v1/auth/login` + `POST /api/v1/auth/logout`.
+   - **Protected**: remaining `/api/v1/*` and `/RPC2`.
+3. **401 shape**: bare JSON `{"success":false,...}` for `/api/v1/*` (never `WWW-Authenticate`, so browsers never open the native basic-auth dialog). `/RPC2` additionally carries `WWW-Authenticate: Basic realm="supervisor"` when basic is configured (Supervisor compatibility).
+4. **Per-listener basic credentials**: TCP uses `server.username`/`server.password`; IPC uses `server.uds_username`/`server.uds_password` (auto-filled from the TCP pair by schema defaults when omitted — matching `.ini` `[inet_http_server]`/`[unix_http_server]` semantics). The shared `auth_token` applies to both listeners.
+5. **INI vs YAML parity**: `.ini` configs never set `auth_token`, so they degrade to pure basic — bit-for-bit stock Supervisor behavior. YAML may set token, basic, or both (OR).
+6. **Session login**: `POST /api/v1/auth/login` accepts `{"username","password"}` and/or `{"token"}` and reuses the same OR authorize; success issues the session cookie (with `Secure` when the request arrived over HTTPS / `X-Forwarded-Proto: https`). Failure sleeps ~300ms as a light brute-force delay.
+7. **CLI Standalone Connectivity**:
+   - CLI flags `--key <token>` or `--user <user>` / `--password <pass>` enable direct connection to local or remote daemons even when no local configuration file exists. Machine clients keep using Basic/Bearer; the session cookie is only for the browser.
 
 ---
 
@@ -694,7 +700,7 @@ flowchart TD
 2. **Batch Controls**: Multi-select actions (Start, Stop, Restart selected) and global controls.
 3. **Hot Reload Modal**: Visual breakdown of configuration diffs (Added, Removed, Modified, Unchanged).
 4. **SSE Live Log Drawer**: Real-time terminal styling with scroll lock and buffer clear.
-5. **Token Auth**: Bearer token storage in browser `localStorage`.
+5. **Session Login**: Config-driven login modal (username/password and/or bearer token) posts to `POST /api/v1/auth/login` and receives an **HttpOnly session cookie**. Credentials are never persisted in `localStorage`; same-origin `fetch`/`EventSource` attach the cookie automatically. On boot the UI calls public `GET /api/v1/auth/config` to decide whether to show the modal. Any API `401` stops polling and reopens the modal.
 
 ---
 
@@ -1025,7 +1031,7 @@ To preserve clean separation between `supervisord`'s modern actor runtime and ex
 flowchart LR
     Client["supervisorctl / Python XML-RPC Client"]
     Router["Axum HTTP Router (/RPC2)"]
-    Handler["xmlrpc_handler (Basic Auth & Request Validation)"]
+    Handler["xmlrpc_handler (Request Validation; auth via unified middleware)"]
     Wire["Pure Rust XML-RPC Parser & CVE-2017-11610 Validator"]
     Dispatcher["Method Dispatcher (system.* / supervisor.*)"]
     Adapter["ManagerHandle Adapter & Fault Translator"]
@@ -1047,7 +1053,7 @@ flowchart LR
 4. **Hardened Security Protections**:
    - **CVE-2017-11610 Enforcement**: Validates that all incoming method names contain exactly two dot-separated segments (`namespace.method`) with no leading underscores (`_`), preventing remote code execution and traversal attacks.
    - **Non-Recursive Multicall**: Rejects nested `system.multicall` invocations with Fault 2 (`INCORRECT_PARAMETERS`).
-   - **Integrated Basic Authentication**: Enforces HTTP Basic Auth credentials from `[inet_http_server]`, returning `401 Unauthorized` with `WWW-Authenticate` challenge headers.
+   - **Unified Authentication (no handler-local checks)**: `/RPC2` is guarded by the same path-tier middleware as REST (`ServerAuthState::authorize`, OR of basic/token/session). On failure it returns `401 Unauthorized` with `WWW-Authenticate: Basic realm="supervisor"` when basic auth is configured, satisfying stock Supervisor XML-RPC challenge expectations.
 
 ---
 

@@ -27,11 +27,18 @@ server:
   # If omitted, server will only listen on the local IPC socket.
   http_bind: "127.0.0.1:8500"
 
-  # Optional Bearer Token authentication for the REST API and Web UI.
+  # Optional Bearer Token authentication for the REST API, XML-RPC, SSE, and Web UI.
+  # Applied on BOTH TCP and IPC listeners. If username/password are also set,
+  # either credential is accepted (OR semantics) — identical to stock Supervisor
+  # behavior when only basic credentials exist (.ini never sets auth_token).
   # Leave blank or omit if authentication is not required for local access.
   auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
 
-  # Optional HTTP Basic Authentication for the TCP HTTP listener (Supervisor compatible).
+  # Optional HTTP Basic Authentication (Supervisor compatible).
+  # TCP listener uses username/password; IPC uses uds_username/uds_password
+  # (auto-filled from this pair when omitted).
+  # The Web UI shows a login modal and stores an HttpOnly session cookie —
+  # credentials are never saved in the browser.
   # Supports cleartext password or SHA-1 hash prefixed with {SHA}
   # e.g. "{SHA}82ab876d1387bfafe46cc1c8a2ef074eae50cb1d"
   username: "${SUPERVISOR_HTTP_USER:-}"

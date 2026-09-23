@@ -12,14 +12,20 @@ use crate::control::protocol::{
 use crate::error::ProgramError;
 use crate::manager::ManagerHandle;
 use crate::program::state::ProgramState;
+use crate::server::auth::{
+    AuthAttempts, ServerAuthState, SessionStore, clear_session_cookie, http_auth_middleware,
+    issue_session_cookie, session_id_from_headers,
+};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{StatusCode, Uri};
 use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -31,6 +37,7 @@ pub struct AppState {
     pub config_path: Option<PathBuf>,
     pub auth_token: Option<String>,
     pub basic_auth: Option<crate::server::auth::BasicAuthConfig>,
+    pub sessions: Arc<SessionStore>,
 }
 
 impl AppState {
@@ -45,6 +52,7 @@ impl AppState {
             config_path,
             auth_token,
             basic_auth,
+            sessions: Arc::new(SessionStore::default()),
         }
     }
 
@@ -80,13 +88,17 @@ fn default_log_lines() -> usize {
     100
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct AuthQuery {
-    pub token: Option<String>,
-}
-
 /// Builds the complete Axum router with all v1 REST API endpoints and embedded Web UI.
+///
+/// The unified auth middleware guards `/api/v1/*` (except the public
+/// `/api/v1/auth/*` surface) and `/RPC2` on every listener, while the static
+/// shell stays public so the login page can load without a browser native dialog.
 pub fn build_router(state: AppState) -> Router {
+    let auth_state = ServerAuthState::new(
+        state.basic_auth.clone(),
+        state.auth_token.clone(),
+        state.sessions.clone(),
+    );
     Router::new()
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/programs/{name}", get(get_program_details))
@@ -107,11 +119,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/programs/{name}/logs", get(read_logs))
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
         .route("/api/v1/programs/{name}/stdin", post(send_stdin))
+        .route("/api/v1/auth/config", get(auth_config))
+        .route("/api/v1/auth/login", post(auth_login))
+        .route("/api/v1/auth/logout", post(auth_logout))
         .route("/RPC2", post(crate::compat::xmlrpc::xmlrpc_handler))
         .fallback(crate::server::web::static_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             record_activity_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            http_auth_middleware,
         ))
         .with_state(state)
 }
@@ -126,50 +145,112 @@ async fn record_activity_middleware(
     next.run(req).await
 }
 
-/// Validates optional bearer token or basic authentication.
-fn check_auth(headers: &HeaderMap, state: &AppState) -> Result<(), StatusCode> {
-    check_auth_with_query(headers, state, None)
+/// Auth capability flags reported to the Web UI before login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfigDto {
+    pub basic: bool,
+    pub token: bool,
+    pub session: bool,
 }
 
-/// Validates optional authentication from Authorization header (Bearer or Basic) or query parameter.
-fn check_auth_with_query(
-    headers: &HeaderMap,
-    state: &AppState,
-    query_token: Option<&str>,
-) -> Result<(), StatusCode> {
-    // 1. If basic auth is provided in Authorization header, verify it
-    if let Some(auth_val) = headers.get("Authorization").and_then(|v| v.to_str().ok())
-        && let Some((u, p)) = crate::server::auth::extract_basic_auth(auth_val)
-        && let Some(ref basic) = state.basic_auth
-    {
-        if basic.verify(&u, &p) {
-            return Ok(());
-        } else {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+/// JSON body accepted by `POST /api/v1/auth/login`.
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub token: Option<String>,
+}
+
+/// GET /api/v1/auth/config — public; tells the UI which login fields to show
+/// and whether the current session cookie is already valid.
+async fn auth_config(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<ApiResponse<AuthConfigDto>> {
+    let auth = ServerAuthState::new(
+        state.basic_auth.clone(),
+        state.auth_token.clone(),
+        state.sessions.clone(),
+    );
+    let session = session_id_from_headers(&headers)
+        .map(|sid| state.sessions.validate_session(&sid))
+        .unwrap_or(false);
+    Json(ApiResponse::ok(AuthConfigDto {
+        basic: state.basic_auth.is_some(),
+        token: auth.auth_token.is_some(),
+        session,
+    }))
+}
+
+/// POST /api/v1/auth/login — public; validates credentials via the unified
+/// OR authorize path and issues an HttpOnly session cookie on success.
+async fn auth_login(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    uri: Uri,
+    Json(payload): Json<LoginRequest>,
+) -> Response {
+    let auth = ServerAuthState::new(
+        state.basic_auth.clone(),
+        state.auth_token.clone(),
+        state.sessions.clone(),
+    );
+
+    let attempts = AuthAttempts {
+        basic: match (payload.username, payload.password) {
+            (Some(u), Some(p)) => Some((u, p)),
+            _ => None,
+        },
+        token: payload.token.filter(|t| !t.is_empty()),
+        session: None,
+    };
+
+    if !auth.authorize(&attempts) {
+        // Lightweight delay to slow online brute-force attempts.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<()>::err("Unauthorized: Invalid credentials")),
+        )
+            .into_response();
     }
 
-    // 2. If auth_token is configured, verify bearer token
-    if let Some(ref expected_token) = state.auth_token
-        && !expected_token.is_empty()
-    {
-        if let Some(q) = query_token
-            && q == expected_token
-        {
-            return Ok(());
+    // When nothing is configured the middleware already allows everything;
+    // still issue a session so the UI can treat login as a no-op success.
+    match state.sessions.create_session() {
+        Some(sid) => {
+            let cookie = issue_session_cookie(&sid, &headers, &uri);
+            (
+                StatusCode::OK,
+                [cookie],
+                Json(ApiResponse::ok(serde_json::json!({ "session": true }))),
+            )
+                .into_response()
         }
-        let auth_header = headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let expected_bearer = format!("Bearer {}", expected_token);
-        if auth_header == expected_bearer || auth_header == expected_token {
-            return Ok(());
-        }
-        return Err(StatusCode::UNAUTHORIZED);
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<()>::err("Failed to create session")),
+        )
+            .into_response(),
     }
+}
 
-    Ok(())
+/// POST /api/v1/auth/logout — public; drops the session and clears the cookie.
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    uri: Uri,
+) -> Response {
+    if let Some(sid) = session_id_from_headers(&headers) {
+        state.sessions.invalidate_session(&sid);
+    }
+    let cookie = clear_session_cookie(&headers, &uri);
+    (
+        StatusCode::OK,
+        [cookie],
+        Json(ApiResponse::ok(serde_json::json!({ "session": false }))),
+    )
+        .into_response()
 }
 
 /// Formats duration seconds into human readable format (e.g. 45s, 12m 30s, 1h 45m).
@@ -186,10 +267,7 @@ fn format_duration_secs(secs: u64) -> String {
 /// GET /api/v1/status
 async fn get_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<ProgramStatusDto>>>, StatusCode> {
-    check_auth(&headers, &state)?;
-
     let statuses = state
         .manager
         .get_all_status()
@@ -236,11 +314,8 @@ async fn get_status(
 /// GET /api/v1/programs/:name
 async fn get_program_details(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<(StatusCode, Json<ApiResponse<ProgramDetailsDto>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let status = match state.manager.get_status(&name).await {
         Ok(s) => s,
         Err(e) => {
@@ -294,12 +369,9 @@ async fn get_program_details(
 /// POST /api/v1/programs/:name/start
 async fn start_program(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let start_time = Instant::now();
     if let Err(e) = state.manager.start_program(&name).await {
         let status_code = match &e {
@@ -408,12 +480,9 @@ async fn start_program(
 /// POST /api/v1/programs/:name/stop
 async fn stop_program(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let start_time = Instant::now();
     let timeout_secs = query.timeout.min(86400);
     let grace = Some(Duration::from_secs(timeout_secs));
@@ -497,12 +566,9 @@ async fn stop_program(
 /// POST /api/v1/programs/:name/restart
 async fn restart_program(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<ActionResponse>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let start_time = Instant::now();
     let timeout_secs = query.timeout.min(86400);
     let grace = Some(Duration::from_secs(timeout_secs));
@@ -590,11 +656,9 @@ async fn restart_program(
 /// POST /api/v1/groups/:group/start
 async fn start_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(group): Path<String>,
     Query(_query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state)?;
     let start_time = Instant::now();
     let procs = match state.manager.start_group(&group).await {
         Ok(p) => p,
@@ -630,11 +694,9 @@ async fn start_group(
 /// POST /api/v1/groups/:group/stop
 async fn stop_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(group): Path<String>,
     Query(_query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state)?;
     let start_time = Instant::now();
     let procs = match state.manager.stop_group(&group, None).await {
         Ok(p) => p,
@@ -670,11 +732,9 @@ async fn stop_group(
 /// POST /api/v1/groups/:group/restart
 async fn restart_group(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(group): Path<String>,
     Query(_query): Query<ActionQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state)?;
     let start_time = Instant::now();
     let procs = match state.manager.restart_group(&group, None).await {
         Ok(p) => p,
@@ -714,10 +774,7 @@ async fn restart_group(
 /// POST /api/v1/all/start
 async fn start_all(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let start_time = Instant::now();
     if let Err(e) = state.manager.start_all().await {
         return Ok((
@@ -745,10 +802,7 @@ async fn start_all(
 /// POST /api/v1/all/stop
 async fn stop_all(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ActionResponse>>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let start_time = Instant::now();
     if let Err(e) = state.manager.stop_all(None).await {
         return Ok((
@@ -776,10 +830,7 @@ async fn stop_all(
 /// POST /api/v1/reload
 async fn reload_config(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<ReloadResponse>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let config_path = match state.config_path {
         Some(ref p) => p.clone(),
         None => {
@@ -824,10 +875,7 @@ async fn reload_config(
 /// POST /api/v1/reload or POST /api/v1/restart
 async fn restart_daemon(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiResponse<String>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let config_path = match state.config_path {
         Some(ref p) => p.clone(),
         None => {
@@ -865,12 +913,9 @@ async fn restart_daemon(
 /// GET /api/v1/programs/:name/logs
 async fn read_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<LogLinesResponse>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     match state.manager.read_logs(&name, Some(query.lines)).await {
         Ok(lines) => Ok((
             StatusCode::OK,
@@ -892,12 +937,8 @@ async fn read_logs(
 /// GET /api/v1/programs/:name/logs/stream
 async fn stream_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
-    Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
-
     let rx = state
         .manager
         .subscribe_logs(&name)
@@ -919,11 +960,7 @@ async fn stream_logs(
 /// GET /api/v1/events
 async fn stream_system_events(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
-
     let rx = state.manager.subscribe_events();
     let stream_guard = state.manager.activity_tracker().enter_stream();
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
@@ -944,11 +981,7 @@ async fn stream_system_events(
 /// GET /api/v1/logs/stream
 async fn stream_all_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    check_auth_with_query(&headers, &state, auth_query.token.as_deref())?;
-
     let rx = state.manager.subscribe_all_logs();
     let stream_guard = state.manager.activity_tracker().enter_stream();
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
@@ -975,12 +1008,9 @@ pub struct SendStdinPayload {
 /// POST /api/v1/programs/{name}/stdin
 async fn send_stdin(
     Path(name): Path<String>,
-    headers: HeaderMap,
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), StatusCode> {
-    check_auth(&headers, &state)?;
-
     let input_bytes = if let Ok(payload) = serde_json::from_slice::<SendStdinPayload>(&body) {
         if let Some(c) = payload.chars {
             c.into_bytes()

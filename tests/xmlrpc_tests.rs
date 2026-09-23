@@ -375,9 +375,78 @@ programs:
     // 5. CVE-2017-11610 protection: 3 segments
     let req_sub = "<methodCall><methodName>supervisor.sub.method</methodName></methodCall>";
     let (status, body) = call_rpc(&app, req_sub, Some("Basic YWRtaW46c2VjcmV0MTIz")).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK); // XML-RPC faults return 200 OK
     let (code, _) = parse_fault(&body);
     assert_eq!(code, FaultCode::UnknownMethod.code());
+}
+
+#[tokio::test]
+async fn test_xmlrpc_token_only_requires_token() {
+    let yaml = r#"
+programs:
+  dummy:
+    command: "echo dummy"
+    autostart: false
+"#;
+    let config: SupervisorConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let state = AppState::new(manager.handle(), None, Some("rpc_token".to_string()), None);
+    let app = build_router(state);
+
+    let req = "<methodCall><methodName>supervisor.getAPIVersion</methodName></methodCall>";
+
+    // Without token -> 401 (previously the handler ignored auth_token entirely)
+    let (status, _) = call_rpc(&app, req, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With wrong token -> 401
+    let (status, _) = call_rpc(&app, req, Some("Bearer wrong")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With correct Bearer token -> 200
+    let (status, body) = call_rpc(&app, req, Some("Bearer rpc_token")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<string>3.0</string>"));
+
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_xmlrpc_or_semantics_basic_or_token() {
+    let yaml = r#"
+programs:
+  dummy:
+    command: "echo dummy"
+    autostart: false
+"#;
+    let config: SupervisorConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let basic_auth = BasicAuthConfig::new(Some("admin".to_string()), Some("secret123".to_string()));
+    let state = AppState::new(
+        manager.handle(),
+        None,
+        Some("either_tok".to_string()),
+        basic_auth,
+    );
+    let app = build_router(state);
+
+    let req = "<methodCall><methodName>supervisor.getAPIVersion</methodName></methodCall>";
+
+    // Right basic + wrong token -> pass (OR)
+    let (status, body) = call_rpc(&app, req, Some("Basic YWRtaW46c2VjcmV0MTIz")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<string>3.0</string>"));
+
+    // Wrong basic only -> 401
+    let (status, _) = call_rpc(&app, req, Some("Basic YWRtaW46d3Jvbmc=")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Right token -> 200 even though basic is also configured
+    let (status, body) = call_rpc(&app, req, Some("Bearer either_tok")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<string>3.0</string>"));
+
+    manager.shutdown().await.unwrap();
 }
 
 #[tokio::test]

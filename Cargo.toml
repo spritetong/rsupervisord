@@ -72,6 +72,7 @@ rust-embed = "8.5"
 mime_guess = "2.0"
 base64 = "0.23"
 sha1 = "0.11"
+getrandom = "0.3"
 strum = { version = "0.28.0", features = ["derive"] }
 derive_more = { version = "2.1.1", features = ["full"] }
 dashmap = "6.2.1"

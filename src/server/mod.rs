@@ -10,7 +10,7 @@ pub mod uds;
 pub mod web;
 
 pub use api::{AppState, build_router};
-pub use auth::{BasicAuthConfig, ServerAuthState, inet_http_auth_middleware};
+pub use auth::{BasicAuthConfig, ServerAuthState, SessionStore, http_auth_middleware};
 pub use uds::run_ipc_listener;
 pub use web::WebAssets;
 
@@ -42,6 +42,7 @@ impl ServerEngine {
             server_config.username.clone(),
             server_config.password.clone(),
         );
+        let sessions = std::sync::Arc::new(SessionStore::default());
 
         Self {
             ipc_state: AppState {
@@ -49,12 +50,14 @@ impl ServerEngine {
                 config_path: config_path.clone(),
                 auth_token: auth_token.clone(),
                 basic_auth: uds_basic_auth,
+                sessions: sessions.clone(),
             },
             tcp_state: AppState {
                 manager,
                 config_path,
                 auth_token,
                 basic_auth: inet_basic_auth,
+                sessions,
             },
             server_config,
         }
@@ -80,20 +83,9 @@ impl ServerEngine {
             });
         }
 
-        // 2. Optional TCP listener
+        // 2. Optional TCP listener (auth middleware is applied inside build_router)
         if let Some(ref bind_addr) = self.server_config.http_bind {
-            let auth_state = ServerAuthState {
-                basic_auth: self.tcp_state.basic_auth.clone(),
-                auth_token: self.tcp_state.auth_token.clone(),
-            };
-            let tcp_router =
-                self.tcp_state
-                    .clone()
-                    .into_router()
-                    .layer(axum::middleware::from_fn_with_state(
-                        auth_state,
-                        inet_http_auth_middleware,
-                    ));
+            let tcp_router = self.tcp_state.clone().into_router();
             let tcp_token = cancel_token.clone();
             let addr = bind_addr.clone();
             set.spawn(async move {

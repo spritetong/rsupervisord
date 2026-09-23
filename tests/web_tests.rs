@@ -19,6 +19,7 @@ fn create_test_app_state() -> AppState {
         config_path: None,
         auth_token: None,
         basic_auth: None,
+        sessions: Default::default(),
     }
 }
 

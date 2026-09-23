@@ -543,8 +543,8 @@ event_listeners:
 - **`worker_threads`** (*integer*, default: `None` / CPU cores): Number of worker threads for Tokio async runtime. Setting to `1` activates lightweight single-threaded `current_thread` mode.
 - **`server.uds_path`** (*path string*): Path for local IPC listening socket. Supports `AF_UNIX` file paths or Windows Named Pipes (`\\.\pipe\name`).
 - **`server.http_bind`** (*string*, optional): TCP bind address and port. Serves REST API and Web Dashboard. TCP listening is disabled if omitted.
-- **`server.auth_token`** (*string*, optional): Bearer token for HTTP REST API (`Authorization: Bearer <token>`).
-- **`server.username` / `server.password`** (*string*, optional): HTTP Basic Auth credentials. Passwords support cleartext or `{SHA}` hashed format.
+- **`server.auth_token`** (*string*, optional): Bearer token for HTTP REST/XMLRPC/SSE (`Authorization: Bearer <token>` or `?token=`). When basic credentials are also configured, **either** may be used (OR). Applied on both TCP and IPC listeners.
+- **`server.username` / `server.password`** (*string*, optional): HTTP Basic Auth credentials. Passwords support cleartext or `{SHA}` hashed format. IPC uses `uds_username`/`uds_password` (auto-filled from this pair when omitted). The Web UI signs in via a login modal and keeps an HttpOnly session cookie — secrets are never stored in the browser.
 - **`server.identifier`** (*string*, optional): Node identifier, defaults to system hostname.
 - **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary.
 - **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC.

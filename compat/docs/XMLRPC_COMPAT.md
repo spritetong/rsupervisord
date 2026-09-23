@@ -11,7 +11,7 @@
 Question answered: **To let a stock `supervisorctl` (Python 4.2.5) connect directly to rsupervisord, which XML-RPC capabilities must be implemented and what on-the-wire behavior must be achieved.**
 
 - **Authoritative baseline**: `supervisor/rpcinterface.py` (method surface) and `supervisor/xmlrpc.py` (wire protocol / Faults / namespaces / `multicall`) of Python Supervisor **4.2.5**.
-- **Current state baseline**: `src/server/api.rs` (REST routes + `AppState`), `src/server/auth.rs` (Basic auth), `src/manager/supervisor.rs` (`ManagerHandle` + `ManagerCommand`).
+- **Current state baseline**: `src/server/api.rs` (REST routes + `AppState`), `src/server/auth.rs` (unified authorize + path-tier middleware + `SessionStore`), `src/manager/supervisor.rs` (`ManagerHandle` + `ManagerCommand`).
 - **Related**: CLI-side arguments/exit codes see [`CLI_COMPAT.md`](./CLI_COMPAT.md); log byte-offset degradation see [`SUPERVISORD_COMPAT.md`](./SUPERVISORD_COMPAT.md) §7 #8; process groups/events see §7 #4/#6.
 
 **Core conclusion (preview)**: XML-RPC is a **pure adaptation layer** — a new `src/server/xrpc.rs` mounts on the existing Axum route `/RPC2`, reuses `AppState`/`ManagerHandle`/Basic auth, and translates XML-RPC calls into the existing `ManagerCommand`. **No changes to the execution core are required**; the main work is **encode/decode, Fault mapping, name semantics (namespec/group), and log degradation**.
@@ -38,7 +38,7 @@ Question answered: **To let a stock `supervisorctl` (Python 4.2.5) connect direc
 | Request body | `<methodCall><methodName>ns.m</methodName><params><param><value>…</value></param></params></methodCall>` | Match; allow zero-argument calls **without `<params>`** |
 | Response body | `<methodResponse><params><param><value>…</value></param></params></methodResponse>` | Match |
 | Fault | `<methodResponse><fault><value><struct>{faultCode:int,faultString:string}</struct></value></fault></methodResponse>`, HTTP still **200** | Match; Fault codes see §4 |
-| Authentication | HTTP **Basic** (`[inet_http_server]` username/password); also applies to UDS | Reuse `BasicAuthConfig` / `inet_http_auth_middleware` from `src/server/auth.rs` |
+| Authentication | Unified middleware (`ServerAuthState::authorize`, OR of Basic / Bearer token / session cookie); `WWW-Authenticate: Basic realm="supervisor"` challenge on 401 | Reuse `ServerAuthState` / `http_auth_middleware` from `src/server/auth.rs` (mounted inside `build_router`) |
 | Integer | 32-bit `i4`; timestamps saturated via `capped_int` to `MININT/MAXINT` (2038 problem) | Must saturate; `getProcessInfo.start/stop/now` use `i4` |
 | Boolean | `<boolean>1</boolean>` / `0` | Match |
 | base64 | Used for the binary chars of `sendProcessStdin` | Match |
@@ -214,7 +214,7 @@ Python returns a **configuration snapshot** per program (groups flattened), keys
 ## 8. Architecture Placement
 
 - **New module**: `src/server/xrpc.rs`, exporting `pub fn xrpc_router() -> Router`, registered in `src/server/mod.rs`, and `merge`d in `build_router(state)` (path `/RPC2`, coexisting with `/api/v1/*`).
-- **Reuse**: `AppState { manager: ManagerHandle, basic_auth, .. }`; Basic auth reuses `src/server/auth.rs`.
+- **Reuse**: `AppState { manager: ManagerHandle, basic_auth, auth_token, sessions, .. }`; auth enforced by `http_auth_middleware` (not in the handler).
 - **Encode/decode**: introduce a pure-Rust XML-RPC codec (self-implemented or a lightweight crate), **no Python dependency**; Faults as enum constants (§4).
 - **State bits**: add a supervisor mood (`RUNNING/SHUTDOWN/RESTARTING/FATAL`) to support `getState`/`restart`/`SHUTDOWN_STATE`.
 - **Name semantics**: implement `namespec` parsing (`group:name`, `group:*`, bare name), aligned with [`CLI_COMPAT.md`](./CLI_COMPAT.md) §4.3.
@@ -224,7 +224,7 @@ Python returns a **configuration snapshot** per program (groups flattened), keys
 ## 9. Priority Checklist (Summary)
 
 **P0 (make stock supervisorctl usable)**
-1. `/RPC2` route + XML-RPC codec + Basic auth + Faults mapping + 2-segment method name validation.
+1. `/RPC2` route + XML-RPC codec + unified middleware auth (Basic OR token OR session) + Faults mapping + 2-segment method name validation.
 2. `getAPIVersion`/`getVersion`, `getSupervisorVersion`, `getIdentification`, `getState`, `getPID`.
 3. `getAllProcessInfo`, `getProcessInfo` (all fields per §6).
 4. `startProcess`/`stopProcess` + group + all; `signalProcess`.
