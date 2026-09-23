@@ -34,7 +34,7 @@ fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> 
 /// not-found/refused advance to the next candidate.
 /// Unix / other: preserves existing single-endpoint behavior
 /// (TCP if `http_bind` set, else IPC path, else default local).
-async fn resolve_endpoint_candidates(
+fn resolve_endpoint_candidates(
     args: &CliArgs,
 ) -> Result<(
     Vec<EndpointCandidate>,
@@ -50,8 +50,8 @@ async fn resolve_endpoint_candidates(
     if let Some(ref path) = cfg_path
         && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
     {
-        let uds_basic = basic_pair(cfg.server.uds_username, cfg.server.uds_password);
         let tcp_basic = basic_pair(cfg.server.username, cfg.server.password);
+        let uds_basic = basic_pair(cfg.server.uds_username, cfg.server.uds_password);
         let token = cfg.server.auth_token;
 
         #[cfg(windows)]
@@ -171,7 +171,7 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
             None,
         )
     } else {
-        resolve_endpoint_candidates(&args).await?
+        resolve_endpoint_candidates(&args)?
     };
 
     // CLI -u/-p override config-derived basic auth for all candidates.

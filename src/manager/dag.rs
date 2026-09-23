@@ -118,8 +118,8 @@ impl DependencyGraph {
             for l in 0..=max_layer {
                 if let Some(mut progs) = layers_map.remove(&l) {
                     progs.sort_by(|a, b| {
-                        let prio_a = programs.get(a).map(|c| c.priority).unwrap_or(50);
-                        let prio_b = programs.get(b).map(|c| c.priority).unwrap_or(50);
+                        let prio_a = programs.get(a).map(|c| c.priority).unwrap_or(crate::consts::DEFAULT_PRIORITY);
+                        let prio_b = programs.get(b).map(|c| c.priority).unwrap_or(crate::consts::DEFAULT_PRIORITY);
                         prio_a.cmp(&prio_b).then_with(|| a.cmp(b))
                     });
                     start_layers.push(progs);
@@ -132,8 +132,8 @@ impl DependencyGraph {
         stop_layers.reverse();
         for layer in &mut stop_layers {
             layer.sort_by(|a, b| {
-                let prio_a = programs.get(a).map(|c| c.priority).unwrap_or(50);
-                let prio_b = programs.get(b).map(|c| c.priority).unwrap_or(50);
+                let prio_a = programs.get(a).map(|c| c.priority).unwrap_or(crate::consts::DEFAULT_PRIORITY);
+                let prio_b = programs.get(b).map(|c| c.priority).unwrap_or(crate::consts::DEFAULT_PRIORITY);
                 prio_b.cmp(&prio_a).then_with(|| a.cmp(b))
             });
         }

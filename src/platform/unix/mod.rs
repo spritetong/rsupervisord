@@ -362,7 +362,9 @@ impl UnixIpcListener {
         // Restrict umask during bind so the socket is never group/world-accessible
         // before set_permissions applies the configured mode (parity with Windows
         // pipe first-instance SECURITY_ATTRIBUTES; closes the bind→chmod race).
-        let previous_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let previous_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(
+            crate::consts::BIND_UMASK,
+        ));
         let bind_result = tokio::net::UnixListener::bind(path);
         nix::sys::stat::umask(previous_umask);
         let listener = bind_result?;

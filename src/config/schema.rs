@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::*;
 use crate::error::ProgramError;
 use crate::program::config::{
     AutoRestartPolicy, HealthCheckConfig, ProgramConfig, ProgramLogsConfig, StopSignal,
@@ -41,7 +42,7 @@ pub struct ServerConfig {
     /// config file directory at the parse boundary. When false, relative paths are
     /// preserved and interpretated relative to the daemon working directory, matching
     /// python supervisor behavior.
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub path_translation: bool,
     /// When true, allows non-elevated (non-root on Unix, non-admin on Windows) callers
     /// to connect via local IPC when the daemon is running elevated. Default is false.
@@ -86,7 +87,7 @@ pub fn parse_chmod(s: &str) -> Result<u32, ProgramError> {
         .or_else(|| trimmed.strip_prefix("0O"))
         .unwrap_or(trimmed);
     u32::from_str_radix(digits, 8)
-        .map(|mode| mode & 0o7777)
+        .map(|mode| mode & CHMOD_MASK)
         .map_err(|e| ProgramError::ConfigError(format!("Invalid octal mode '{}': {}", trimmed, e)))
 }
 
@@ -104,18 +105,11 @@ impl ServerConfig {
 
     fn default_uds_chmod(&self) -> u32 {
         if self.allow_unelevated {
-            0o777
+            UDS_CHMOD_UNELEVATED
         } else {
             // Windows: owner may be SYSTEM (service); include Administrators so an
             // elevated admin CLI can pass the OS authorization layer.
-            #[cfg(windows)]
-            {
-                0o770
-            }
-            #[cfg(not(windows))]
-            {
-                0o700
-            }
+            UDS_CHMOD
         }
     }
 }
@@ -145,7 +139,7 @@ pub fn normalize_http_bind(bind: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub enabled: bool,
     #[serde(default)]
     pub file: Option<PathBuf>,
@@ -153,38 +147,18 @@ pub struct LoggingConfig {
     pub level: String,
     #[serde(default)]
     pub max_bytes: Option<String>,
-    #[serde(default = "default_backups")]
+    #[serde(default = "usize_value::<DEFAULT_LOG_BACKUPS>")]
     pub backups: usize,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_backups() -> usize {
-    3
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_metrics_idle_timeout() -> u64 {
-    30
-}
-
-fn default_metrics_interval() -> u64 {
-    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub enabled: bool,
-    #[serde(default = "default_metrics_idle_timeout")]
+    #[serde(default = "u64_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>")]
     pub idle_timeout_secs: u64,
-    #[serde(default = "default_metrics_interval")]
+    #[serde(default = "u64_value::<DEFAULT_METRICS_INTERVAL_SECS>")]
     pub interval_secs: u64,
 }
 
@@ -192,8 +166,8 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            idle_timeout_secs: default_metrics_idle_timeout(),
-            interval_secs: default_metrics_interval(),
+            idle_timeout_secs: DEFAULT_METRICS_IDLE_TIMEOUT_SECS,
+            interval_secs: DEFAULT_METRICS_INTERVAL_SECS,
         }
     }
 }
@@ -204,8 +178,8 @@ impl Default for LoggingConfig {
             enabled: true,
             file: None,
             level: default_log_level(),
-            max_bytes: Some("20MB".to_string()),
-            backups: default_backups(),
+            max_bytes: Some(DEFAULT_LOG_MAX_BYTES_HUMAN.to_string()),
+            backups: DEFAULT_LOG_BACKUPS,
         }
     }
 }
@@ -545,8 +519,8 @@ impl SupervisorConfig {
             let priority = raw
                 .priority
                 .or(self.program_defaults.priority)
-                .unwrap_or(50);
-            if priority > 999 {
+                .unwrap_or(DEFAULT_PRIORITY);
+            if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 999]",
                     name, priority
@@ -555,8 +529,8 @@ impl SupervisorConfig {
             let stop_wait = raw
                 .stop_wait_secs
                 .or(self.program_defaults.stop_wait_secs)
-                .unwrap_or(10);
-            if stop_wait > 86400 {
+                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
+            if stop_wait > MAX_TIMEOUT.as_secs() {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' stop_wait_secs {} exceeds maximum 86400",
                     name, stop_wait
@@ -604,7 +578,7 @@ impl SupervisorConfig {
 
         for (group_name, group_cfg) in &self.groups {
             if let Some(p) = group_cfg.priority
-                && p > 999
+                && p > MAX_PRIORITY
             {
                 return Err(ProgramError::ConfigError(format!(
                     "Group '{}' priority {} must be in range [0, 999]",
@@ -719,8 +693,8 @@ impl SupervisorConfig {
             let priority = raw
                 .priority
                 .or(self.program_defaults.priority)
-                .unwrap_or(50);
-            if priority > 999 {
+                .unwrap_or(DEFAULT_PRIORITY);
+            if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 999]",
                     base_name, priority
@@ -740,12 +714,12 @@ impl SupervisorConfig {
             let start_secs = raw
                 .start_secs
                 .or(self.program_defaults.start_secs)
-                .unwrap_or(1);
+                .unwrap_or(DEFAULT_START_SECS);
 
             let start_retries = raw
                 .start_retries
                 .or(self.program_defaults.start_retries)
-                .unwrap_or(3);
+                .unwrap_or(DEFAULT_START_RETRIES);
 
             let stop_signal = raw
                 .stop_signal
@@ -755,9 +729,9 @@ impl SupervisorConfig {
             let stop_wait_secs = raw
                 .stop_wait_secs
                 .or(self.program_defaults.stop_wait_secs)
-                .unwrap_or(10);
+                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
 
-            let exit_codes = raw.exit_codes.clone().unwrap_or_else(|| vec![0]);
+            let exit_codes = raw.exit_codes.clone().unwrap_or_else(default_exit_codes);
 
             let pre_start_ignore_failure = raw
                 .pre_start_ignore_failure
@@ -767,7 +741,7 @@ impl SupervisorConfig {
             let hook_timeout_secs = raw
                 .hook_timeout_secs
                 .or(self.program_defaults.hook_timeout_secs)
-                .unwrap_or(15);
+                .unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
 
             let group = if let Some(ref g) = raw.group {
                 g.clone()
@@ -786,7 +760,7 @@ impl SupervisorConfig {
                 .groups
                 .get(&group)
                 .and_then(|g| g.priority)
-                .unwrap_or(999);
+                .unwrap_or(DEFAULT_GROUP_PRIORITY);
 
             // Expand depends_on: map multi-instance program dependencies to all their instances
             let mut resolved_depends_on = Vec::new();
@@ -1055,7 +1029,7 @@ impl SupervisorConfig {
                 let restart_debounce_secs = raw
                     .restart_debounce_secs
                     .or(self.program_defaults.restart_debounce_secs)
-                    .unwrap_or(5);
+                    .unwrap_or(crate::consts::DEFAULT_RESTART_DEBOUNCE_SECS);
 
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
@@ -1120,10 +1094,10 @@ impl SupervisorConfig {
             };
             let autostart = raw.autostart.unwrap_or(true);
             let autorestart = raw.autorestart.unwrap_or_default();
-            let start_secs = raw.start_secs.unwrap_or(1);
-            let start_retries = raw.start_retries.unwrap_or(3);
+            let start_secs = raw.start_secs.unwrap_or(DEFAULT_START_SECS);
+            let start_retries = raw.start_retries.unwrap_or(DEFAULT_START_RETRIES);
             let stop_signal = raw.stop_signal.unwrap_or_default();
-            let stop_wait_secs = raw.stop_wait_secs.unwrap_or(10);
+            let stop_wait_secs = raw.stop_wait_secs.unwrap_or(DEFAULT_STOP_WAIT_SECS);
             let group_priority = 0;
 
             let mut instances = Vec::with_capacity(numprocs);
@@ -1251,7 +1225,7 @@ impl SupervisorConfig {
                     start_retries,
                     stop_signal,
                     stop_wait_secs,
-                    exit_codes: vec![0],
+                    exit_codes: default_exit_codes(),
                     umask: raw.umask,
                     logs,
                     health_check: None,
@@ -1262,7 +1236,7 @@ impl SupervisorConfig {
                     pre_start: None,
                     pre_stop: None,
                     pre_start_ignore_failure: false,
-                    hook_timeout_secs: 15,
+                    hook_timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
                     restart_when_binary_changed: false,
                     restart_signal_when_binary_changed: None,
                     restart_cmd_when_binary_changed: None,
@@ -1270,7 +1244,7 @@ impl SupervisorConfig {
                     restart_file_pattern: None,
                     restart_signal_when_file_changed: None,
                     restart_cmd_when_file_changed: None,
-                    restart_debounce_secs: 5,
+                    restart_debounce_secs: crate::consts::DEFAULT_RESTART_DEBOUNCE_SECS,
                     event_listener,
                 };
 

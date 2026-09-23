@@ -353,7 +353,7 @@ pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> a
         },
     ];
     let failure_actions = ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
+        reset_period: ServiceFailureResetPeriod::After(crate::consts::MAX_TIMEOUT),
         reboot_msg: None,
         command: None,
         actions: Some(actions),

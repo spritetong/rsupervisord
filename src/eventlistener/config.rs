@@ -4,6 +4,10 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{
+    DEFAULT_EVENTLISTENER_PRIORITY, DEFAULT_EVENT_BUFFER_SIZE, default_result_handler, i32_value,
+    usize_value,
+};
 use crate::error::ProgramError;
 use crate::program::config::{AutoRestartPolicy, StopSignal};
 use serde::{Deserialize, Serialize};
@@ -77,18 +81,6 @@ pub fn validate_event_list(events: &[String]) -> Result<(), ProgramError> {
     Ok(())
 }
 
-fn default_buffer_size() -> usize {
-    10
-}
-
-fn default_result_handler() -> String {
-    "supervisor.dispatchers:default_handler".to_string()
-}
-
-fn default_eventlistener_priority() -> i32 {
-    -1
-}
-
 /// Raw representation of `[eventlistener:x]` from INI or YAML configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventListenerConfigRaw {
@@ -97,11 +89,11 @@ pub struct EventListenerConfigRaw {
     pub args: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,
-    #[serde(default = "default_buffer_size")]
+    #[serde(default = "usize_value::<DEFAULT_EVENT_BUFFER_SIZE>")]
     pub buffer_size: usize,
     #[serde(default = "default_result_handler")]
     pub result_handler: String,
-    #[serde(default = "default_eventlistener_priority")]
+    #[serde(default = "i32_value::<DEFAULT_EVENTLISTENER_PRIORITY>")]
     pub priority: i32,
     #[serde(default)]
     pub numprocs: Option<usize>,

@@ -139,8 +139,9 @@ impl SupervisorDaemon {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 let max_bytes = match &config.logging.max_bytes {
-                    Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
-                    None => 20 * 1024 * 1024,
+                    Some(s) => crate::logging::parse_byte_size(s)
+                        .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES),
+                    None => crate::consts::DEFAULT_LOG_MAX_BYTES,
                 };
                 let file_rotator = file_rotate::FileRotate::new(
                     log_file,

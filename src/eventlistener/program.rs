@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{DRAIN_TIMEOUT, SHORT_RETRY_DELAY};
 use crate::error::ProgramError;
 use crate::eventlistener::pool::EventListenerPool;
 use crate::eventlistener::protocol::{EventEnvelope, ListenerState, evaluate_result};
@@ -177,7 +178,7 @@ impl Program for EventListenerProgram {
 
     async fn shutdown(&mut self) -> Result<(), ProgramError> {
         self.cancel_token.cancel();
-        let _ = self.stop(Duration::from_secs(2)).await;
+        let _ = self.stop(DRAIN_TIMEOUT).await;
         Ok(())
     }
 
@@ -314,7 +315,7 @@ impl EventListenerActor {
 
                     // Check autorestart
                     if self.config.autorestart.should_restart(exit_code.unwrap_or(-1), &self.config.exit_codes) {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(SHORT_RETRY_DELAY).await;
                         if let Ok(c) = self.spawn_child().await {
                             child_process = Some(c);
                         }
@@ -555,7 +556,7 @@ impl EventListenerActor {
             let _ = child_info.platform_guard.force_kill();
             let _ = child_info.child.kill().await;
             let _ = tokio::time::timeout(
-                Duration::from_secs(2),
+                DRAIN_TIMEOUT,
                 child_info.platform_guard.wait_exit(&mut child_info.child),
             )
             .await;

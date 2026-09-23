@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{DEFAULT_ACTION_TIMEOUT_SECS, bool_value, u64_value};
 use crate::program::state::ProgramState;
 use serde::{Deserialize, Serialize};
 use tabled::Tabled;
@@ -97,25 +98,17 @@ pub struct ProgramDetailsDto {
 /// Request parameters for lifecycle operations (start, stop, restart).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionRequest {
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub sync: bool,
-    #[serde(default = "default_timeout")]
+    #[serde(default = "u64_value::<DEFAULT_ACTION_TIMEOUT_SECS>")]
     pub timeout_secs: u64,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_timeout() -> u64 {
-    30
 }
 
 impl Default for ActionRequest {
     fn default() -> Self {
         Self {
             sync: true,
-            timeout_secs: 30,
+            timeout_secs: DEFAULT_ACTION_TIMEOUT_SECS,
         }
     }
 }

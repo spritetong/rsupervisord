@@ -120,7 +120,7 @@ impl ServerEngine {
         set.abort_all();
 
         // Bounded drain window for gracefully completing in-flight handlers
-        let drain_timeout = std::time::Duration::from_secs(2);
+        let drain_timeout = crate::consts::DRAIN_TIMEOUT;
         let _ = tokio::time::timeout(drain_timeout, async {
             while (set.join_next().await).is_some() {}
         })

@@ -806,7 +806,7 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
             .max_bytes
             .as_deref()
             .and_then(|s| crate::logging::parse_byte_size(s).ok())
-            .unwrap_or(50 * 1024 * 1024);
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         map.insert(
             "stdout_logfile_maxbytes".to_string(),
             Value::Int(stdout_maxbytes as i32),
@@ -816,7 +816,10 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
             Value::Int(stdout_maxbytes as i32),
         );
 
-        let backups = cfg.logs.backups.unwrap_or(10) as i32;
+        let backups = cfg
+            .logs
+            .backups
+            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS) as i32;
         map.insert("stdout_logfile_backups".to_string(), Value::Int(backups));
         map.insert("stderr_logfile_backups".to_string(), Value::Int(backups));
 

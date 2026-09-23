@@ -6,6 +6,10 @@
 
 use crate::config::diff::ConfigDiff;
 use crate::config::schema::SupervisorConfig;
+use crate::consts::{
+    AWAIT_ACTION, AWAIT_BULK, AWAIT_GROUP, AWAIT_QUERY, AWAIT_STDIN, DEFAULT_PRIORITY,
+    DEFAULT_STOP_WAIT_SECS, MAX_TIMEOUT, RESTART_GRACE_EXTRA, STOP_GRACE_EXTRA,
+};
 use crate::error::ProgramError;
 use crate::eventlistener::pool::EventListenerPool;
 use crate::eventlistener::program::EventListenerProgram;
@@ -191,7 +195,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(30);
+        let timeout_dur = AWAIT_ACTION;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -221,9 +225,9 @@ impl ManagerHandle {
             })?;
 
         let timeout_dur = grace_period
-            .unwrap_or(Duration::from_secs(10))
-            .checked_add(Duration::from_secs(15))
-            .unwrap_or(Duration::from_secs(86400));
+            .unwrap_or(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))
+            .checked_add(STOP_GRACE_EXTRA)
+            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -253,9 +257,9 @@ impl ManagerHandle {
             })?;
 
         let timeout_dur = grace_period
-            .unwrap_or(Duration::from_secs(10))
-            .checked_add(Duration::from_secs(25))
-            .unwrap_or(Duration::from_secs(86400));
+            .unwrap_or(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))
+            .checked_add(RESTART_GRACE_EXTRA)
+            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -284,7 +288,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -308,7 +312,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(60);
+        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -337,7 +341,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(60);
+        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -366,7 +370,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -387,7 +391,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -411,7 +415,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -438,7 +442,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(60);
+        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -462,7 +466,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -487,7 +491,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(60);
+        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -512,7 +516,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -537,7 +541,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -559,7 +563,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -588,7 +592,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -615,7 +619,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -644,7 +648,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(15);
+        let timeout_dur = AWAIT_STDIN;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -668,7 +672,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -689,7 +693,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -708,7 +712,7 @@ impl ManagerHandle {
             .send(ManagerCommand::Shutdown { reply: reply_tx })
             .await;
 
-        let timeout_dur = Duration::from_secs(120);
+        let timeout_dur = AWAIT_BULK;
         let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
         self.cancel_token.cancel();
         Ok(())
@@ -1228,7 +1232,7 @@ impl ManagerActor {
                 name: format!("group '{}'", group),
             });
         }
-        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(50));
+        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(DEFAULT_PRIORITY));
         for name in &targets {
             if let Some(prog) = self.programs.get_mut(name) {
                 prog.start().await?;
@@ -1251,13 +1255,13 @@ impl ManagerActor {
                 name: format!("group '{}'", group),
             });
         }
-        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(50));
+        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(DEFAULT_PRIORITY));
         for name in targets.iter().rev() {
             let default_wait = self
                 .configs
                 .get(name)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(10);
+                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
             let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
             if let Some(prog) = self.programs.get_mut(name) {
                 prog.stop(period).await?;
@@ -1307,7 +1311,7 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(10);
+                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
             let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.stop(period).await?;
@@ -1332,7 +1336,7 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(10);
+                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
             let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.restart(period).await?;
@@ -1375,7 +1379,7 @@ impl ManagerActor {
                     .configs
                     .get(name)
                     .map(|c| c.stop_wait_secs)
-                    .unwrap_or(5);
+                    .unwrap_or(DEFAULT_STOP_WAIT_SECS);
                 let dur = grace_period.unwrap_or_else(|| Duration::from_secs(wait_secs));
                 if let Some(prog) = self.programs.get(name) {
                     let state = prog.status().state;
@@ -1419,7 +1423,7 @@ impl ManagerActor {
         // 1. Removed programs: gracefully stop, clean up and unregister
         for name in &diff.removed {
             if let Some(mut prog) = self.programs.remove(name) {
-                let _ = prog.stop(Duration::from_secs(5)).await;
+                let _ = prog.stop(Duration::from_secs(DEFAULT_STOP_WAIT_SECS)).await;
                 let _ = prog.shutdown().await;
             }
             self.configs.remove(name);
@@ -1615,7 +1619,7 @@ impl ManagerActor {
 
         for name in &active {
             if let Some(mut prog) = self.programs.remove(name) {
-                let _ = prog.stop(Duration::from_secs(5)).await;
+                let _ = prog.stop(Duration::from_secs(DEFAULT_STOP_WAIT_SECS)).await;
                 let _ = prog.shutdown().await;
             }
             self.configs.remove(name);

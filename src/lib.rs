@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod compat;
 pub mod config;
+pub mod consts;
 pub mod control;
 pub mod daemon;
 pub mod error;

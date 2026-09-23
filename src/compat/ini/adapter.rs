@@ -13,6 +13,9 @@ use crate::config::schema::{
     GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw, SupervisorConfig,
     normalize_http_bind,
 };
+use crate::consts::{
+    DEFAULT_EVENTLISTENER_PRIORITY, DEFAULT_EVENT_BUFFER_SIZE, default_result_handler,
+};
 use crate::error::ProgramError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -439,7 +442,7 @@ fn parse_event_listener_config(
                 pool_name, e
             ))
         })?
-        .unwrap_or(10);
+        .unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
     if buffer_size < 1 {
         return Err(ProgramError::ConfigError(format!(
             "EventListener '{}' buffer_size must be >= 1",
@@ -461,7 +464,7 @@ fn parse_event_listener_config(
     let result_handler = sec
         .get("result_handler")
         .cloned()
-        .unwrap_or_else(|| "supervisor.dispatchers:default_handler".to_string());
+        .unwrap_or_else(default_result_handler);
 
     let priority = sec
         .get("priority")
@@ -473,7 +476,7 @@ fn parse_event_listener_config(
                 pool_name, e
             ))
         })?
-        .unwrap_or(-1);
+        .unwrap_or(DEFAULT_EVENTLISTENER_PRIORITY);
 
     let autostart = sec
         .get("autostart")

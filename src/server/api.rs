@@ -5,6 +5,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::SupervisorConfig;
+use crate::consts::{
+    DEFAULT_ACTION_TIMEOUT_SECS, DEFAULT_LOG_LINES, SSE_KEEPALIVE, bool_value, u64_value,
+    usize_value,
+};
 use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
     ReloadResponse,
@@ -64,28 +68,16 @@ impl AppState {
 
 #[derive(Debug, Deserialize)]
 pub struct ActionQuery {
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub sync: bool,
-    #[serde(default = "default_timeout")]
+    #[serde(default = "u64_value::<DEFAULT_ACTION_TIMEOUT_SECS>")]
     pub timeout: u64,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_timeout() -> u64 {
-    30
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LogsQuery {
-    #[serde(default = "default_log_lines")]
+    #[serde(default = "usize_value::<DEFAULT_LOG_LINES>")]
     pub lines: usize,
-}
-
-fn default_log_lines() -> usize {
-    100
 }
 
 /// Builds the complete Axum router with all v1 REST API endpoints and embedded Web UI.
@@ -975,7 +967,7 @@ async fn stream_system_events(
     });
 
     Ok(Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::default().interval(Duration::from_secs(15))))
+        .keep_alive(axum::response::sse::KeepAlive::default().interval(SSE_KEEPALIVE)))
 }
 
 /// GET /api/v1/logs/stream
@@ -996,7 +988,7 @@ async fn stream_all_logs(
     });
 
     Ok(Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::default().interval(Duration::from_secs(15))))
+        .keep_alive(axum::response::sse::KeepAlive::default().interval(SSE_KEEPALIVE)))
 }
 
 #[derive(Debug, Deserialize)]

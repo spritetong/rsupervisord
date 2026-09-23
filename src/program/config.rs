@@ -4,6 +4,13 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{
+    DEFAULT_GROUP_PRIORITY, DEFAULT_HEALTH_FAILURE_THRESHOLD, DEFAULT_HEALTH_INITIAL_DELAY_SECS,
+    DEFAULT_HEALTH_INTERVAL_SECS, DEFAULT_HEALTH_TIMEOUT_SECS, DEFAULT_HOOK_TIMEOUT_SECS,
+    DEFAULT_HTTP_EXPECTED_STATUS, DEFAULT_PRIORITY, DEFAULT_RESTART_DEBOUNCE_SECS,
+    DEFAULT_START_RETRIES, DEFAULT_START_SECS, DEFAULT_STOP_WAIT_SECS, bool_value,
+    default_exit_codes, u16_value, u32_value, u64_value,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -133,7 +140,7 @@ impl Default for StopSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramLogsConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub enabled: bool,
     #[serde(default)]
     pub stdout: Option<PathBuf>,
@@ -208,21 +215,21 @@ pub struct ProgramConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub environment: HashMap<String, String>,
-    #[serde(default = "default_priority")]
+    #[serde(default = "u32_value::<DEFAULT_PRIORITY>")]
     pub priority: u32,
     #[serde(default)]
     pub depends_on: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "bool_value::<true>")]
     pub autostart: bool,
     #[serde(default)]
     pub autorestart: AutoRestartPolicy,
-    #[serde(default = "default_start_secs")]
+    #[serde(default = "u64_value::<DEFAULT_START_SECS>")]
     pub start_secs: u64,
-    #[serde(default = "default_start_retries")]
+    #[serde(default = "u32_value::<DEFAULT_START_RETRIES>")]
     pub start_retries: u32,
     #[serde(default)]
     pub stop_signal: StopSignal,
-    #[serde(default = "default_stop_wait_secs")]
+    #[serde(default = "u64_value::<DEFAULT_STOP_WAIT_SECS>")]
     pub stop_wait_secs: u64,
     #[serde(default = "default_exit_codes")]
     pub exit_codes: Vec<i32>,
@@ -234,7 +241,7 @@ pub struct ProgramConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub group: String,
-    #[serde(default = "default_group_priority")]
+    #[serde(default = "u32_value::<DEFAULT_GROUP_PRIORITY>")]
     pub group_priority: u32,
     #[serde(default)]
     pub cron: Option<String>,
@@ -246,7 +253,7 @@ pub struct ProgramConfig {
     pub pre_stop: Option<String>,
     #[serde(default)]
     pub pre_start_ignore_failure: bool,
-    #[serde(default = "default_hook_timeout_secs")]
+    #[serde(default = "u64_value::<DEFAULT_HOOK_TIMEOUT_SECS>")]
     pub hook_timeout_secs: u64,
     #[serde(default)]
     pub restart_when_binary_changed: bool,
@@ -262,18 +269,10 @@ pub struct ProgramConfig {
     pub restart_signal_when_file_changed: Option<StopSignal>,
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
-    #[serde(default = "default_restart_debounce_secs")]
+    #[serde(default = "u64_value::<DEFAULT_RESTART_DEBOUNCE_SECS>")]
     pub restart_debounce_secs: u64,
     #[serde(default)]
     pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
-}
-
-fn default_group_priority() -> u32 {
-    999
-}
-
-fn default_restart_debounce_secs() -> u64 {
-    5
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,7 +280,7 @@ fn default_restart_debounce_secs() -> u64 {
 pub enum HealthCheckType {
     Http {
         url: String,
-        #[serde(default = "default_http_expected_status")]
+        #[serde(default = "u16_value::<DEFAULT_HTTP_EXPECTED_STATUS>")]
         expected_status: u16,
     },
     Tcp {
@@ -292,66 +291,18 @@ pub enum HealthCheckType {
     },
 }
 
-fn default_http_expected_status() -> u16 {
-    200
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheckConfig {
     #[serde(flatten)]
     pub check_type: HealthCheckType,
-    #[serde(default = "default_health_interval_secs")]
+    #[serde(default = "u64_value::<DEFAULT_HEALTH_INTERVAL_SECS>")]
     pub interval_secs: u64,
-    #[serde(default = "default_health_timeout_secs")]
+    #[serde(default = "u64_value::<DEFAULT_HEALTH_TIMEOUT_SECS>")]
     pub timeout_secs: u64,
-    #[serde(default = "default_health_failure_threshold")]
+    #[serde(default = "u32_value::<DEFAULT_HEALTH_FAILURE_THRESHOLD>")]
     pub failure_threshold: u32,
-    #[serde(default = "default_health_initial_delay_secs")]
+    #[serde(default = "u64_value::<DEFAULT_HEALTH_INITIAL_DELAY_SECS>")]
     pub initial_delay_secs: u64,
-}
-
-fn default_health_interval_secs() -> u64 {
-    10
-}
-
-fn default_health_timeout_secs() -> u64 {
-    2
-}
-
-fn default_health_failure_threshold() -> u32 {
-    3
-}
-
-fn default_health_initial_delay_secs() -> u64 {
-    0
-}
-
-fn default_priority() -> u32 {
-    50
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_start_secs() -> u64 {
-    1
-}
-
-fn default_start_retries() -> u32 {
-    3
-}
-
-fn default_stop_wait_secs() -> u64 {
-    10
-}
-
-fn default_exit_codes() -> Vec<i32> {
-    vec![0]
-}
-
-pub fn default_hook_timeout_secs() -> u64 {
-    15
 }
 
 impl ProgramConfig {
@@ -359,21 +310,21 @@ impl ProgramConfig {
         let n = name.into();
         Self {
             group: n.clone(),
-            group_priority: default_group_priority(),
+            group_priority: DEFAULT_GROUP_PRIORITY,
             name: n,
             command: command.into(),
             args: Vec::new(),
             directory: None,
             user: None,
             environment: HashMap::new(),
-            priority: default_priority(),
+            priority: DEFAULT_PRIORITY,
             depends_on: Vec::new(),
-            autostart: default_true(),
+            autostart: true,
             autorestart: AutoRestartPolicy::default(),
-            start_secs: default_start_secs(),
-            start_retries: default_start_retries(),
+            start_secs: DEFAULT_START_SECS,
+            start_retries: DEFAULT_START_RETRIES,
             stop_signal: StopSignal::default(),
-            stop_wait_secs: default_stop_wait_secs(),
+            stop_wait_secs: DEFAULT_STOP_WAIT_SECS,
             exit_codes: default_exit_codes(),
             umask: None,
             logs: ProgramLogsConfig::default(),
@@ -383,7 +334,7 @@ impl ProgramConfig {
             pre_start: None,
             pre_stop: None,
             pre_start_ignore_failure: false,
-            hook_timeout_secs: default_hook_timeout_secs(),
+            hook_timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
             restart_when_binary_changed: false,
             restart_signal_when_binary_changed: None,
             restart_cmd_when_binary_changed: None,
@@ -391,7 +342,7 @@ impl ProgramConfig {
             restart_file_pattern: None,
             restart_signal_when_file_changed: None,
             restart_cmd_when_file_changed: None,
-            restart_debounce_secs: default_restart_debounce_secs(),
+            restart_debounce_secs: DEFAULT_RESTART_DEBOUNCE_SECS,
             event_listener: None,
         }
     }

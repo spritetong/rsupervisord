@@ -215,7 +215,7 @@ impl WatchService {
 
                                 if !is_readable && trigger.consecutive_checks < 5 {
                                     trigger.consecutive_checks += 1;
-                                    trigger.deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+                                    trigger.deadline = tokio::time::Instant::now() + crate::consts::SHORT_RETRY_DELAY;
                                     pending_triggers.insert(key, trigger);
                                     continue;
                                 }

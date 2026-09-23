@@ -4,6 +4,10 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{
+    AWAIT_QUERY, DRAIN_TIMEOUT, MAX_TIMEOUT, PROCESS_RESTART_GRACE_EXTRA, PROCESS_STOP_GRACE_EXTRA,
+    SHORT_RETRY_DELAY,
+};
 use crate::error::ProgramError;
 use crate::logging::RingBuffer;
 use crate::platform::PlatformProcessGuard;
@@ -209,7 +213,7 @@ impl Program for ProcessProgram {
                 name: self.config.name.clone(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -234,8 +238,8 @@ impl Program for ProcessProgram {
             })?;
 
         let timeout_dur = grace_period
-            .checked_add(Duration::from_secs(5))
-            .unwrap_or(Duration::from_secs(86400));
+            .checked_add(PROCESS_STOP_GRACE_EXTRA)
+            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -260,8 +264,8 @@ impl Program for ProcessProgram {
             })?;
 
         let timeout_dur = grace_period
-            .checked_add(Duration::from_secs(10))
-            .unwrap_or(Duration::from_secs(86400));
+            .checked_add(PROCESS_RESTART_GRACE_EXTRA)
+            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -311,7 +315,7 @@ impl Program for ProcessProgram {
                 name: self.config.name.clone(),
             })?;
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -334,7 +338,7 @@ impl Program for ProcessProgram {
             });
         };
 
-        let timeout_dur = Duration::from_secs(10);
+        let timeout_dur = AWAIT_QUERY;
         match tokio::time::timeout(timeout_dur, tx.send(data)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_closed)) => Err(ProgramError::NotRunning {
@@ -404,7 +408,7 @@ fn spawn_stdin_writer(
 
         // Best-effort drain of remaining buffer before dropping pipe (bounded by 500ms)
         if !buffer.is_empty() && !cancel_token.is_cancelled() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            let _ = tokio::time::timeout(SHORT_RETRY_DELAY, async {
                 while !buffer.is_empty() {
                     match child_stdin.write(&buffer[..]).await {
                         Ok(0) | Err(_) => break,
@@ -448,7 +452,7 @@ impl RunningChild {
         let out_abort = out.as_ref().map(|h| h.abort_handle());
         let err_abort = err.as_ref().map(|h| h.abort_handle());
 
-        let hard_deadline = tokio::time::timeout(Duration::from_secs(2), async {
+        let hard_deadline = tokio::time::timeout(DRAIN_TIMEOUT, async {
             if let Some(w) = stdin_w {
                 let _ = w.await;
             }
@@ -538,10 +542,11 @@ impl ProgramActor {
         let (health_tx, health_rx) = mpsc::channel(16);
 
         let max_bytes = match &config.logs.max_bytes {
-            Some(s) => crate::logging::parse_byte_size(s).unwrap_or(20 * 1024 * 1024),
-            None => 20 * 1024 * 1024,
+            Some(s) => crate::logging::parse_byte_size(s)
+                .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES),
+            None => crate::consts::DEFAULT_LOG_MAX_BYTES,
         };
-        let backups = config.logs.backups.unwrap_or(3);
+        let backups = config.logs.backups.unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS);
         let stdout_disabled = config.logs.is_stdout_disabled();
         let stderr_disabled = config.logs.is_stderr_disabled();
 
@@ -1140,7 +1145,7 @@ impl ProgramActor {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
                     let post_kill_wait = tokio::time::timeout(
-                        Duration::from_secs(2),
+                        DRAIN_TIMEOUT,
                         child_info.platform_guard.wait_exit(&mut child_info.child),
                     )
                     .await;
