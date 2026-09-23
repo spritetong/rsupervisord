@@ -33,6 +33,29 @@ pub struct WindowsService;
 
 static SERVICE_CONTEXT: OnceLock<(DaemonArgs, PathBuf, String)> = OnceLock::new();
 
+// ---------------------------------------------------------------------------
+// Windows Service Control Manager (SCM) timing
+// ---------------------------------------------------------------------------
+
+/// Wait hint reported for StopPending so SCM allows child process drain.
+const SCM_STOP_WAIT_HINT: Duration = Duration::from_secs(45);
+/// Wait hint reported for StartPending until the Tokio runtime is built.
+const SCM_START_WAIT_HINT: Duration = Duration::from_secs(30);
+/// Checkpoint heartbeat interval while StopPending is reported to SCM.
+const SCM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+/// Crash-recovery `SC_ACTION_RESTART` delays written at install time.
+const SC_FAILURE_RESTART_DELAYS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+];
+/// How long start/restart wait for the service to reach Running.
+const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long stop/uninstall wait for the service to reach Stopped.
+const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Status query poll interval inside [`wait_for_state`].
+const STATE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 define_windows_service!(ffi_service_main, my_service_main);
 
 /// Entry point called by the Windows Service Control Manager on a background thread.
@@ -106,7 +129,7 @@ fn run_service_loop() -> anyhow::Result<()> {
                         controls_accepted: ServiceControlAccept::empty(),
                         exit_code: ServiceExitCode::Win32(0),
                         checkpoint: 1,
-                        wait_hint: Duration::from_secs(45),
+                        wait_hint: SCM_STOP_WAIT_HINT,
                         process_id: None,
                     });
                 }
@@ -130,7 +153,7 @@ fn run_service_loop() -> anyhow::Result<()> {
         controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 1,
-        wait_hint: Duration::from_secs(30),
+        wait_hint: SCM_START_WAIT_HINT,
         process_id: None,
     });
 
@@ -191,7 +214,7 @@ fn run_service_loop() -> anyhow::Result<()> {
             .spawn(move || {
                 let mut checkpoint = 2u32;
                 while !hb_terminated_clone.load(Ordering::SeqCst) {
-                    thread::sleep(Duration::from_secs(3));
+                    thread::sleep(SCM_HEARTBEAT_INTERVAL);
                     if hb_terminated_clone.load(Ordering::SeqCst) {
                         break;
                     }
@@ -205,7 +228,7 @@ fn run_service_loop() -> anyhow::Result<()> {
                             controls_accepted: ServiceControlAccept::empty(),
                             exit_code: ServiceExitCode::Win32(0),
                             checkpoint,
-                            wait_hint: Duration::from_secs(45),
+                            wait_hint: SCM_STOP_WAIT_HINT,
                             process_id: None,
                         });
                         checkpoint = checkpoint.saturating_add(1);
@@ -338,20 +361,13 @@ pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> a
     let _ = service.set_delayed_auto_start(true);
 
     // Configure SC_ACTION_RESTART crash recovery actions (restart after 5s, 10s, 30s)
-    let actions = vec![
-        ServiceAction {
+    let actions: Vec<ServiceAction> = SC_FAILURE_RESTART_DELAYS
+        .into_iter()
+        .map(|delay| ServiceAction {
             action_type: ServiceActionType::Restart,
-            delay: Duration::from_secs(5),
-        },
-        ServiceAction {
-            action_type: ServiceActionType::Restart,
-            delay: Duration::from_secs(10),
-        },
-        ServiceAction {
-            action_type: ServiceActionType::Restart,
-            delay: Duration::from_secs(30),
-        },
-    ];
+            delay,
+        })
+        .collect();
     let failure_actions = ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(crate::consts::MAX_TIMEOUT),
         reboot_msg: None,
@@ -385,7 +401,7 @@ pub fn uninstall_service(cmd_name: &str) -> anyhow::Result<()> {
     {
         println!("Stopping service '{}' before uninstallation...", cmd_name);
         let _ = service.stop();
-        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(15));
+        let _ = wait_for_state(&service, ServiceState::Stopped, SERVICE_STOP_TIMEOUT);
     }
 
     service.delete()?;
@@ -415,7 +431,7 @@ pub fn start_service(cmd_name: &str) -> anyhow::Result<()> {
     println!("Starting service '{}'...", cmd_name);
     service.start(&[] as &[&OsStr])?;
 
-    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(15))? {
+    if wait_for_state(&service, ServiceState::Running, SERVICE_START_TIMEOUT)? {
         println!("Service '{}' started successfully.", cmd_name);
     } else {
         println!("Service start requested, but service state is still pending.");
@@ -446,7 +462,7 @@ pub fn stop_service(cmd_name: &str) -> anyhow::Result<()> {
     println!("Stopping service '{}'...", cmd_name);
     service.stop()?;
 
-    if wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(30))? {
+    if wait_for_state(&service, ServiceState::Stopped, SERVICE_STOP_TIMEOUT)? {
         println!("Service '{}' stopped successfully.", cmd_name);
     } else {
         println!("Service stop requested, but service state is still pending.");
@@ -474,13 +490,13 @@ pub fn restart_service(cmd_name: &str) -> anyhow::Result<()> {
     if status.current_state != ServiceState::Stopped {
         println!("Stopping service '{}'...", cmd_name);
         let _ = service.stop();
-        let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(30));
+        let _ = wait_for_state(&service, ServiceState::Stopped, SERVICE_STOP_TIMEOUT);
     }
 
     println!("Starting service '{}'...", cmd_name);
     service.start(&[] as &[&OsStr])?;
 
-    if wait_for_state(&service, ServiceState::Running, Duration::from_secs(15))? {
+    if wait_for_state(&service, ServiceState::Running, SERVICE_START_TIMEOUT)? {
         println!("Service '{}' restarted successfully.", cmd_name);
     } else {
         println!("Service restart requested, but service state is still pending.");
@@ -497,7 +513,7 @@ fn wait_for_state(
 ) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(STATE_POLL_INTERVAL);
         let status = service.query_status()?;
         if status.current_state == target {
             return Ok(true);
