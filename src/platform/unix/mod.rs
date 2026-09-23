@@ -116,35 +116,33 @@ impl PlatformProcessGuard for UnixProcessGuard {
 
         // 2. Read /proc/{pid}/stat for CPU times (fields 14 utime and 15 stime)
         let stat_path = format!("/proc/{}/stat", self.pid);
-        if let Ok(content) = std::fs::read_to_string(&stat_path) {
-            if let Some(last_paren_idx) = content.rfind(')') {
-                let rest = &content[last_paren_idx + 1..];
-                let fields: Vec<&str> = rest.split_whitespace().collect();
-                if fields.len() > 12 {
-                    let utime = fields[11].parse::<u64>().unwrap_or(0);
-                    let stime = fields[12].parse::<u64>().unwrap_or(0);
-                    let total_ticks = utime + stime;
-                    let now = std::time::Instant::now();
+        if let Ok(content) = std::fs::read_to_string(&stat_path)
+            && let Some(last_paren_idx) = content.rfind(')')
+        {
+            let rest = &content[last_paren_idx + 1..];
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() > 12 {
+                let utime = fields[11].parse::<u64>().unwrap_or(0);
+                let stime = fields[12].parse::<u64>().unwrap_or(0);
+                let total_ticks = utime + stime;
+                let now = std::time::Instant::now();
 
-                    if let Ok(mut lock) = self.last_cpu_sample.lock() {
-                        if let Some((prev_instant, prev_ticks)) = *lock {
-                            let delta_ticks = total_ticks.saturating_sub(prev_ticks);
-                            let elapsed_secs = now.duration_since(prev_instant).as_secs_f64();
-                            if elapsed_secs > 0.0 {
-                                let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-                                let ticks_per_sec =
-                                    if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
-                                let cpus = std::thread::available_parallelism()
-                                    .map(|n| n.get())
-                                    .unwrap_or(1) as f64;
-                                let pct = (delta_ticks as f64 / ticks_per_sec / elapsed_secs)
-                                    * 100.0
-                                    / cpus;
-                                cpu_percent = (pct as f32).max(0.0);
-                            }
+                if let Ok(mut lock) = self.last_cpu_sample.lock() {
+                    if let Some((prev_instant, prev_ticks)) = *lock {
+                        let delta_ticks = total_ticks.saturating_sub(prev_ticks);
+                        let elapsed_secs = now.duration_since(prev_instant).as_secs_f64();
+                        if elapsed_secs > 0.0 {
+                            let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+                            let ticks_per_sec = if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
+                            let cpus = std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(1) as f64;
+                            let pct =
+                                (delta_ticks as f64 / ticks_per_sec / elapsed_secs) * 100.0 / cpus;
+                            cpu_percent = (pct as f32).max(0.0);
                         }
-                        *lock = Some((now, total_ticks));
                     }
+                    *lock = Some((now, total_ticks));
                 }
             }
         }
@@ -274,10 +272,10 @@ impl PlatformBackend for UnixPlatformBackend {
     }
 
     fn hostname(&self) -> String {
-        if let Ok(h) = nix::unistd::gethostname() {
-            if let Ok(s) = h.into_string() {
-                return s;
-            }
+        if let Ok(h) = nix::unistd::gethostname()
+            && let Ok(s) = h.into_string()
+        {
+            return s;
         }
         std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
     }
@@ -361,9 +359,15 @@ impl UnixIpcListener {
         }
         let _ = std::fs::remove_file(path);
 
-        let listener = tokio::net::UnixListener::bind(path)?;
+        // Restrict umask during bind so the socket is never group/world-accessible
+        // before set_permissions applies the configured mode (parity with Windows
+        // pipe first-instance SECURITY_ATTRIBUTES; closes the bind→chmod race).
+        let previous_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let bind_result = tokio::net::UnixListener::bind(path);
+        nix::sys::stat::umask(previous_umask);
+        let listener = bind_result?;
+
         // Apply configured mode after bind, before any accept: authorization layer.
-        // Umask cannot widen the mode beyond what bind created; set_permissions is authoritative.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
         let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_unix_ipc as fn(PathBuf));
         Ok(Self {
@@ -371,6 +375,33 @@ impl UnixIpcListener {
             _cleanup: cleanup,
             allow_unelevated,
         })
+    }
+}
+
+/// Returns the peer UID for a connected Unix stream.
+///
+/// Linux/Android: `SO_PEERCRED`. BSD/macOS: `getpeereid(3)`.
+/// Any failure is an authorization failure (fail closed).
+fn peer_uid(stream: &tokio::net::UnixStream) -> Result<Uid, ProgramError> {
+    use std::os::fd::{AsRawFd, BorrowedFd};
+
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+        let creds = getsockopt(&borrowed_fd, PeerCredentials).map_err(|e| {
+            ProgramError::PlatformError(format!("Failed to retrieve peer credentials: {}", e))
+        })?;
+        Ok(Uid::from_raw(creds.uid()))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (uid, _gid) = nix::unistd::getpeereid(borrowed_fd).map_err(|e| {
+            ProgramError::PlatformError(format!("Failed to retrieve peer credentials: {}", e))
+        })?;
+        Ok(uid)
     }
 }
 
@@ -383,14 +414,7 @@ pub fn verify_caller_credentials(
         return Ok(());
     }
 
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    use std::os::fd::{AsRawFd, BorrowedFd};
-
-    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
-    let creds = getsockopt(&borrowed_fd, PeerCredentials).map_err(|e| {
-        ProgramError::PlatformError(format!("Failed to retrieve peer credentials: {}", e))
-    })?;
-    let caller_uid = Uid::from_raw(creds.uid());
+    let caller_uid = peer_uid(stream)?;
     let daemon_uid = nix::unistd::getuid();
 
     if daemon_uid.is_root() {

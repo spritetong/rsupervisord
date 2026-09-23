@@ -274,7 +274,7 @@ Both layers must pass; connection success = OS authorization ∧ app authenticat
 
 - **OS Authorization (File/Socket Permissions)**:
   - Configuration `server.uds_chmod` (alias `chmod`) maps an octal mode onto the IPC endpoint:
-    - Unix socket: applied via `set_permissions` after bind, before any accept.
+    - Unix socket: applied via `set_permissions` after bind, before any accept; bind runs under a temporary umask `0077` so the socket is never group/world-accessible before the mode is applied (closes the bind→chmod race).
     - Windows named pipe: baked into the first-instance `SECURITY_ATTRIBUTES` at create time (no race window).
     - Windows file-based AF_UNIX socket: applied via `SetNamedSecurityInfoW` with a protected DACL (owner/group/other + SYSTEM).
   - Mode mapping: owner → process user SID, group → Administrators, other → Everyone; SYSTEM always retains an ACE.

@@ -44,7 +44,6 @@ fn test_platform_default_uds_path_is_valid() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_unix_bind_ipc_listener_applies_mode() {
-    use rsupervisord::platform::PlatformBackend;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -60,6 +59,92 @@ async fn test_unix_bind_ipc_listener_applies_mode() {
     assert_eq!(mode, 0o700, "socket mode must be 0o700 after bind");
 
     drop(listener);
+}
+
+/// Unix: same-user connect after 0o700 bind must succeed (parity with the
+/// Windows WSAEACCES regression; owner + root always pass OS + peer checks).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_unix_same_user_connect_after_0700() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("connect-0700.sock");
+    let platform = native_platform();
+
+    let mut listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind file uds with mode 0700");
+
+    let accept = tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    });
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        platform.connect_ipc(&sock),
+    )
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!(
+            "same-user connect after 0o700 bind failed: os={:?} kind={:?} err={e}",
+            e.raw_os_error(),
+            e.kind()
+        ),
+        Err(_) => panic!("connect timed out after 0o700 bind"),
+    }
+    let _ = accept.await;
+}
+
+/// Unix: peer credential short-circuit — allow_unelevated skips SO_PEERCRED.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_unix_peer_cred_allow_unelevated_skips_check() {
+    use rsupervisord::platform::unix::verify_caller_credentials;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("peer-skip.sock");
+    let platform = native_platform();
+
+    let mut listener = platform
+        .bind_ipc_listener(&sock, true, 0o777)
+        .expect("bind with allow_unelevated");
+
+    let accept = tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    });
+
+    let stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .expect("client connect");
+    // allow_unelevated=true must not consult peer UID.
+    verify_caller_credentials(&stream, true).expect("allow_unelevated skips peer check");
+    let _ = accept.await;
+}
+
+/// Unix: with allow_unelevated=false, same-UID peer must pass SO_PEERCRED.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_unix_peer_cred_same_uid_accepted() {
+    use rsupervisord::platform::unix::verify_caller_credentials;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("peer-same.sock");
+    let platform = native_platform();
+
+    let mut listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind allow_unelevated=false");
+
+    let accept = tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    });
+
+    let stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .expect("client connect");
+    verify_caller_credentials(&stream, false)
+        .expect("same-UID peer must pass when allow_unelevated=false");
+    let _ = accept.await;
 }
 
 /// Windows: bind_ipc_listener on a named pipe path must succeed with mode

@@ -558,21 +558,29 @@ flowchart LR
 
 #### POSIX Implementation (`src/platform/unix.rs`)
 
-Extracts peer credentials via socket options:
+Extracts peer credentials via socket options (Linux `SO_PEERCRED`, BSD/macOS `getpeereid`):
 
 ```rust
 #[cfg(unix)]
-pub fn verify_caller_credentials(stream: &tokio::net::UnixStream) -> anyhow::Result<()> {
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    let creds = getsockopt(stream, PeerCredentials)?;
+pub fn verify_caller_credentials(
+    stream: &tokio::net::UnixStream,
+    allow_unelevated: bool,
+) -> Result<(), ProgramError> {
+    if allow_unelevated {
+        return Ok(());
+    }
+    let caller_uid = peer_uid(stream)?; // SO_PEERCRED / getpeereid
     let daemon_uid = nix::unistd::getuid();
-    
+
     if daemon_uid.is_root() {
-        if !creds.uid().is_root() {
-            anyhow::bail!("Access denied: Caller UID {} is not root", creds.uid());
+        if !caller_uid.is_root() {
+            return Err(...format!("Access denied: Caller UID {} is not root", caller_uid));
         }
-    } else if creds.uid() != daemon_uid && !creds.uid().is_root() {
-        anyhow::bail!("Access denied: Caller UID {} does not match daemon UID {}", creds.uid(), daemon_uid);
+    } else if caller_uid != daemon_uid && !caller_uid.is_root() {
+        return Err(...format!(
+            "Access denied: Caller UID {} does not match daemon UID {}",
+            caller_uid, daemon_uid
+        ));
     }
     Ok(())
 }
@@ -677,7 +685,11 @@ flowchart TD
    - Binds `<config_dir>/<cmd_name>.sock` using `uds_windows::UnixListener` converted into `hyper_util::rt::TokioIo`.
    - After bind, applies `server.uds_chmod` via `SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION` (prevents inheritance from the parent directory); failure is a hard bind error.
    - Enables zero-port reverse proxy integration with Caddy and Nginx without exposing local TCP ports.
-3. **Automatic Client Transport Selection (Endpoint Candidate Chain)**:
+3. **Unix AF_UNIX Listener**:
+   - Binds with a temporarily restricted umask (`0077`) so the socket is never group/world-accessible before `set_permissions` applies `server.uds_chmod` (closes the bind→chmod race; mirrors Windows pipe first-instance SA).
+   - After bind, applies mode via `set_permissions` before any accept; failure is a hard bind error.
+   - On accept, verifies peer credentials (`SO_PEERCRED` on Linux/Android, `getpeereid` on BSD/macOS) unless `allow_unelevated` is set.
+4. **Automatic Client Transport Selection (Endpoint Candidate Chain)**:
    - When `-s` is not given, `supervisorctl` builds an ordered candidate chain: default Named Pipe → config `uds_path` (if different from the pipe) → `http_bind` TCP.
    - Each candidate carries its own HTTP Basic credentials (`uds_username`/`uds_password` for IPC candidates, `username`/`password` for TCP); the bearer token is shared.
    - Candidates are tried in order with a connect timeout; **authorization errors fail closed** (never advance to the next candidate), while NotFound/refused record the error and fall through. On Unix the legacy single-endpoint behavior is preserved.
