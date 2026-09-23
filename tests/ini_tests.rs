@@ -140,6 +140,22 @@ fn test_load_compat_supervisord_conf() {
 }
 
 #[test]
+fn test_ini_chmod_maps_to_uds_chmod() {
+    let ini_str = r#"
+    [unix_http_server]
+    file = /tmp/supervisor.sock
+    chmod = 0755
+    username = alice
+    password = secret
+    "#;
+    let config = SupervisorConfig::from_ini_str(ini_str).expect("parse ini");
+
+    assert_eq!(config.server.uds_chmod.as_deref(), Some("0755"));
+    assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o755);
+    assert_eq!(config.server.uds_username.as_deref(), Some("alice"));
+}
+
+#[test]
 fn test_ini_yaml_equivalence() {
     let ini_str = r#"
     [unix_http_server]

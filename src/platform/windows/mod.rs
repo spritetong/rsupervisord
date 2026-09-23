@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod security;
 pub mod service;
 pub use service::WindowsService;
 
@@ -389,12 +390,13 @@ impl PlatformBackend for WindowsPlatformBackend {
         &self,
         path: &Path,
         allow_unelevated: bool,
+        mode: u32,
     ) -> io::Result<Box<dyn PlatformIpcListener>> {
         if path.to_string_lossy().starts_with(r"\\.\pipe\") {
-            let listener = WindowsNamedPipeListener::bind(path, allow_unelevated)?;
+            let listener = WindowsNamedPipeListener::bind(path, allow_unelevated, mode)?;
             Ok(Box::new(listener))
         } else {
-            let listener = WindowsUdsListener::bind(path, allow_unelevated)?;
+            let listener = WindowsUdsListener::bind(path, allow_unelevated, mode)?;
             Ok(Box::new(listener))
         }
     }
@@ -628,14 +630,18 @@ pub struct WindowsNamedPipeListener {
     pipe_name: String,
     is_first: bool,
     allow_unelevated: bool,
+    /// Pre-built SECURITY_DESCRIPTOR blob (sd + acl) reused for every instance create.
+    sd_blob: Vec<u8>,
 }
 
 impl WindowsNamedPipeListener {
-    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool, mode: u32) -> io::Result<Self> {
+        let sd_blob = security::build_security_descriptor(mode)?;
         Ok(Self {
             pipe_name: path.to_string_lossy().to_string(),
             is_first: true,
             allow_unelevated,
+            sd_blob,
         })
     }
 }
@@ -644,9 +650,19 @@ impl WindowsNamedPipeListener {
 impl PlatformIpcListener for WindowsNamedPipeListener {
     async fn accept(&mut self) -> io::Result<Box<dyn AsyncStream>> {
         loop {
-            let server = tokio::net::windows::named_pipe::ServerOptions::new()
-                .first_pipe_instance(self.is_first)
-                .create(&self.pipe_name)?;
+            // Scope SECURITY_ATTRIBUTES so it is dropped before the await below
+            // (raw pointers are not Send across await points).
+            let server = {
+                let mut sa = security::security_attributes_from_blob(&mut self.sd_blob);
+                unsafe {
+                    tokio::net::windows::named_pipe::ServerOptions::new()
+                        .first_pipe_instance(self.is_first)
+                        .create_with_security_attributes_raw(
+                            &self.pipe_name,
+                            &mut sa as *mut _ as *mut std::ffi::c_void,
+                        )?
+                }
+            };
             self.is_first = false;
             server.connect().await?;
 
@@ -770,7 +786,7 @@ pub struct WindowsUdsListener {
 }
 
 impl WindowsUdsListener {
-    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool, mode: u32) -> io::Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
@@ -779,6 +795,9 @@ impl WindowsUdsListener {
         let _ = std::fs::remove_file(path);
 
         let listener = uds_windows::UnixListener::bind(path)?;
+        // Apply mode immediately after bind, before any accept: authorization layer.
+        // Fail hard — a socket without the intended DACL must not accept clients.
+        security::apply_file_mode(path, mode)?;
         let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_windows_uds as fn(PathBuf));
         Ok(Self {
             listener: std::sync::Arc::new(listener),

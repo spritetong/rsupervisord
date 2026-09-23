@@ -99,6 +99,36 @@ impl FromStr for Endpoint {
     }
 }
 
+/// Returns true when the OS error means the caller is not authorized to open
+/// the endpoint. The CLI candidate chain must fail closed on these instead of
+/// falling through to the next candidate.
+pub fn is_authorization_error(err: &io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(5)    // Windows ERROR_ACCESS_DENIED
+        | Some(13) // Unix EACCES
+        | Some(1314) // Windows ERROR_PRIVILEGE_NOT_HELD
+        => true,
+        _ => err.kind() == io::ErrorKind::PermissionDenied,
+    }
+}
+
+/// Returns true when the endpoint is simply absent (pipe/file missing or
+/// connection refused). Safe to skip when walking a candidate chain.
+pub fn is_retryable_not_found(err: &io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(2)     // ERROR_FILE_NOT_FOUND / ENOENT
+        | Some(3)   // ERROR_PATH_NOT_FOUND
+        | Some(53)  // ERROR_BAD_NETPATH
+        | Some(111) // Unix ECONNREFUSED
+        | Some(10061) // WSAECONNREFUSED
+        => true,
+        _ => matches!(
+            err.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        ),
+    }
+}
+
 impl<'a> From<&'a str> for Endpoint {
     fn from(s: &'a str) -> Self {
         Self::parse(s)
@@ -191,5 +221,32 @@ mod tests {
     fn test_endpoint_default_local() {
         let ep = Endpoint::default_local();
         assert!(matches!(ep, Endpoint::NamedPipe(_) | Endpoint::Ipc(_)));
+    }
+
+    #[test]
+    fn test_is_authorization_error() {
+        // Windows ERROR_ACCESS_DENIED / Unix EACCES / PermissionDenied
+        assert!(is_authorization_error(&io::Error::from_raw_os_error(5)));
+        assert!(is_authorization_error(&io::Error::from_raw_os_error(13)));
+        assert!(is_authorization_error(&io::Error::from_raw_os_error(1314)));
+        assert!(is_authorization_error(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied"
+        )));
+        // Not-found must not be treated as authorization
+        assert!(!is_authorization_error(&io::Error::from_raw_os_error(2)));
+    }
+
+    #[test]
+    fn test_is_retryable_not_found() {
+        assert!(is_retryable_not_found(&io::Error::from_raw_os_error(2)));
+        assert!(is_retryable_not_found(&io::Error::from_raw_os_error(3)));
+        assert!(is_retryable_not_found(&io::Error::from_raw_os_error(111)));
+        assert!(is_retryable_not_found(&io::Error::from_raw_os_error(10061)));
+        assert!(is_retryable_not_found(&io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "refused"
+        )));
+        assert!(!is_retryable_not_found(&io::Error::from_raw_os_error(5)));
     }
 }

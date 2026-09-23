@@ -4,21 +4,33 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::cli::transport::Endpoint;
+use crate::cli::transport::{Endpoint, is_authorization_error, is_retryable_not_found};
 use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
     ReloadResponse,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+/// A single daemon endpoint candidate with its own config-derived basic credentials.
+#[derive(Debug, Clone)]
+pub struct EndpointCandidate {
+    pub endpoint: Endpoint,
+    pub basic: Option<(String, String)>,
+}
 
 /// HTTP REST client communicating with supervisord over local IPC or TCP.
 #[derive(Debug, Clone)]
 pub struct SupervisorClient {
-    endpoint: Endpoint,
+    /// Ordered candidate chain; the first reachable candidate wins.
+    /// Authorization failures fail closed and never fall through.
+    candidates: Vec<EndpointCandidate>,
     auth_token: Option<String>,
-    basic_auth: Option<(String, String)>,
+    /// Optional CLI-level basic auth (`-u`/`-p`) that overrides per-candidate basics.
+    basic_override: Option<(String, String)>,
+    /// Primary endpoint used for error messages and display.
+    primary: Endpoint,
 }
 
 /// Fluent builder for constructing a SupervisorClient.
@@ -27,14 +39,19 @@ pub struct SupervisorClientBuilder {
     endpoint: Endpoint,
     auth_token: Option<String>,
     basic_auth: Option<(String, String)>,
+    candidates: Vec<EndpointCandidate>,
 }
 
 impl SupervisorClientBuilder {
     pub fn new(endpoint: Endpoint) -> Self {
         Self {
-            endpoint,
+            endpoint: endpoint.clone(),
             auth_token: None,
             basic_auth: None,
+            candidates: vec![EndpointCandidate {
+                endpoint,
+                basic: None,
+            }],
         }
     }
 
@@ -54,9 +71,17 @@ impl SupervisorClientBuilder {
 
     pub fn build(self) -> SupervisorClient {
         SupervisorClient {
-            endpoint: self.endpoint,
+            primary: self.endpoint.clone(),
+            candidates: if self.candidates.is_empty() {
+                vec![EndpointCandidate {
+                    endpoint: self.endpoint,
+                    basic: self.basic_auth.clone(),
+                }]
+            } else {
+                self.candidates
+            },
             auth_token: self.auth_token,
-            basic_auth: self.basic_auth,
+            basic_override: self.basic_auth,
         }
     }
 }
@@ -70,9 +95,13 @@ impl SupervisorClient {
     /// Creates a new client targeting the specified endpoint with an optional token.
     pub fn new(endpoint: Endpoint, auth_token: Option<String>) -> Self {
         Self {
-            endpoint,
+            candidates: vec![EndpointCandidate {
+                endpoint: endpoint.clone(),
+                basic: None,
+            }],
             auth_token,
-            basic_auth: None,
+            basic_override: None,
+            primary: endpoint,
         }
     }
 
@@ -83,23 +112,120 @@ impl SupervisorClient {
         basic_auth: Option<(String, String)>,
     ) -> Self {
         Self {
-            endpoint,
+            candidates: vec![EndpointCandidate {
+                endpoint: endpoint.clone(),
+                basic: basic_auth.clone(),
+            }],
             auth_token,
-            basic_auth,
+            basic_override: basic_auth,
+            primary: endpoint,
+        }
+    }
+
+    /// Creates a client over an ordered endpoint candidate chain (pipe → UDS → TCP).
+    /// Each candidate carries its own config-derived basic credentials.
+    pub fn new_with_candidates(
+        candidates: Vec<EndpointCandidate>,
+        auth_token: Option<String>,
+        basic_override: Option<(String, String)>,
+    ) -> Self {
+        let primary = candidates
+            .first()
+            .map(|c| c.endpoint.clone())
+            .unwrap_or_else(Endpoint::default_local);
+        Self {
+            candidates,
+            auth_token,
+            basic_override,
+            primary,
         }
     }
 
     /// Configures HTTP Basic Authentication credentials on the client.
     pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
-        self.basic_auth = Some((username, password));
+        self.basic_override = Some((username, password));
         self
     }
 
-    /// Appends the appropriate Authorization header to the request string.
-    fn append_auth_header(&self, buf: &mut String) {
+    /// Returns the primary endpoint (first candidate) for display / error messages.
+    pub fn primary_endpoint(&self) -> &Endpoint {
+        &self.primary
+    }
+
+    /// Resolves which candidate to use by attempting a connection.
+    /// Authorization errors fail closed; only not-found / refused advance.
+    async fn resolve_candidate(
+        &self,
+    ) -> Result<(&EndpointCandidate, crate::cli::transport::StreamTransport)> {
+        let mut last_err: Option<(Endpoint, std::io::Error)> = None;
+
+        for cand in &self.candidates {
+            match tokio::time::timeout(Duration::from_secs(3), cand.endpoint.connect()).await {
+                Ok(Ok(stream)) => return Ok((cand, stream)),
+                Ok(Err(e)) if is_authorization_error(&e) => {
+                    bail!(
+                        "Access denied connecting to {:?}: {}. The endpoint exists but this caller is not authorized.",
+                        cand.endpoint,
+                        e
+                    );
+                }
+                Ok(Err(e)) if is_retryable_not_found(&e) => {
+                    last_err = Some((cand.endpoint.clone(), e));
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    // Non-classified errors: keep as last_err but still try next candidate
+                    // only when it is clearly a connect-time miss; otherwise surface now.
+                    last_err = Some((cand.endpoint.clone(), e));
+                    continue;
+                }
+                Err(_) => {
+                    last_err = Some((
+                        cand.endpoint.clone(),
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"),
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        match last_err {
+            Some((ep, e)) if is_authorization_error(&e) => {
+                bail!(
+                    "Access denied connecting to {:?}: {}. The endpoint exists but this caller is not authorized.",
+                    ep,
+                    e
+                );
+            }
+            Some((ep, e)) => Err(anyhow::anyhow!(
+                "Cannot connect to supervisord daemon at {:?}: {}. Is supervisord running?",
+                ep,
+                e
+            )),
+            None => Err(anyhow::anyhow!(
+                "No endpoint candidates configured for supervisord daemon."
+            )),
+        }
+    }
+
+    /// Opens a stream via the candidate chain and returns it together with the
+    /// basic credentials belonging to the successful candidate (CLI override wins).
+    async fn open_stream(
+        &self,
+    ) -> Result<(
+        crate::cli::transport::StreamTransport,
+        Option<(String, String)>,
+    )> {
+        let (cand, stream) = self.resolve_candidate().await?;
+        let basic = self.basic_override.clone().or_else(|| cand.basic.clone());
+        Ok((stream, basic))
+    }
+
+    /// Appends the appropriate Authorization header for the given basic credentials.
+    fn append_auth_header_with(&self, buf: &mut String, basic: &Option<(String, String)>) {
         if let Some(ref token) = self.auth_token {
             buf.push_str(&format!("Authorization: Bearer {}\r\n", token));
-        } else if let Some((ref u, ref p)) = self.basic_auth {
+        } else if let Some((u, p)) = basic {
             use base64::Engine;
             let credentials = format!("{}:{}", u, p);
             let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
@@ -256,24 +382,15 @@ impl SupervisorClient {
             "<?xml version=\"1.0\"?><methodCall><methodName>{}</methodName><params>{}</params></methodCall>",
             method_name, params_xml
         );
+
+        let (mut stream, basic) = self.open_stream().await?;
+
         let mut req_headers = format!(
             "POST /RPC2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n",
             payload.len()
         );
-        self.append_auth_header(&mut req_headers);
+        self.append_auth_header_with(&mut req_headers, &basic);
         req_headers.push_str("\r\n");
-
-        let mut stream = tokio::time::timeout(Duration::from_secs(5), self.endpoint.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Connection timed out connecting to supervisord daemon at {:?}.",
-                    self.endpoint
-                )
-            })?
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to connect to daemon at {:?}: {}", self.endpoint, e)
-            })?;
 
         stream.write_all(req_headers.as_bytes()).await?;
         stream.write_all(payload.as_bytes()).await?;
@@ -295,23 +412,13 @@ impl SupervisorClient {
     where
         F: FnMut(&str),
     {
-        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
-                    self.endpoint
-                )
-            })?
-            .with_context(|| format!("Failed to connect to daemon at {:?}", self.endpoint))?;
+        let (mut stream, basic) = self.open_stream().await?;
 
         let mut req = format!(
             "GET /api/v1/programs/{}/logs/stream HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n",
             name
         );
-        if let Some(ref token) = self.auth_token {
-            req.push_str(&format!("Authorization: Bearer {}\r\n", token));
-        }
+        self.append_auth_header_with(&mut req, &basic);
         req.push_str("\r\n");
 
         stream.write_all(req.as_bytes()).await?;
@@ -338,20 +445,12 @@ impl SupervisorClient {
     where
         F: FnMut(&str),
     {
-        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
-                    self.endpoint
-                )
-            })?
-            .with_context(|| format!("Failed to connect to daemon at {:?}", self.endpoint))?;
+        let (mut stream, basic) = self.open_stream().await?;
 
         let mut req =
             "GET /api/v1/logs/stream HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
                 .to_string();
-        self.append_auth_header(&mut req);
+        self.append_auth_header_with(&mut req, &basic);
         req.push_str("\r\n");
 
         stream.write_all(req.as_bytes()).await?;
@@ -377,20 +476,12 @@ impl SupervisorClient {
     where
         F: FnMut(&str),
     {
-        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
-                    self.endpoint
-                )
-            })?
-            .with_context(|| format!("Failed to connect to daemon at {:?}", self.endpoint))?;
+        let (mut stream, basic) = self.open_stream().await?;
 
         let mut req =
             "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n"
                 .to_string();
-        self.append_auth_header(&mut req);
+        self.append_auth_header_with(&mut req, &basic);
         req.push_str("\r\n");
 
         stream.write_all(req.as_bytes()).await?;
@@ -419,30 +510,17 @@ impl SupervisorClient {
         body: Option<&[u8]>,
     ) -> Result<T> {
         let body_bytes = body.unwrap_or(b"");
+
+        let (mut stream, basic) = self.open_stream().await?;
+
         let mut req_headers = format!(
             "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
             method,
             path_and_query,
             body_bytes.len()
         );
-        self.append_auth_header(&mut req_headers);
+        self.append_auth_header_with(&mut req_headers, &basic);
         req_headers.push_str("\r\n");
-
-        let mut stream = tokio::time::timeout(Duration::from_secs(3), self.endpoint.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Connection timed out after 3s connecting to supervisord daemon at {:?}. Is supervisord running?",
-                    self.endpoint
-                )
-            })?
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot connect to supervisord daemon at {:?}: {}. Is supervisord running?",
-                    self.endpoint,
-                    e
-                )
-            })?;
 
         stream.write_all(req_headers.as_bytes()).await?;
         if !body_bytes.is_empty() {

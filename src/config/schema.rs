@@ -17,6 +17,11 @@ use std::path::PathBuf;
 pub struct ServerConfig {
     #[serde(default = "default_uds_path")]
     pub uds_path: PathBuf,
+    /// Unix socket / Named Pipe DACL mode as an octal string (e.g. `"0700"`).
+    /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
+    /// `0o700`, or `0o777` when `allow_unelevated` is true so local CLI can connect.
+    #[serde(default, alias = "chmod")]
+    pub uds_chmod: Option<String>,
     #[serde(default)]
     pub uds_username: Option<String>,
     #[serde(default)]
@@ -52,6 +57,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             uds_path: default_uds_path(),
+            uds_chmod: None,
             uds_username: None,
             uds_password: None,
             http_bind: None,
@@ -62,6 +68,40 @@ impl Default for ServerConfig {
             path_translation: true,
             allow_unelevated: false,
         }
+    }
+}
+
+/// Parses an octal file mode string (`"0700"`, `"0o700"`, `"700"`).
+/// Result is masked to `0o7777` (permission + setuid/setgid/sticky bits).
+pub fn parse_chmod(s: &str) -> Result<u32, ProgramError> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(ProgramError::ConfigError(
+            "Invalid octal mode '': empty value".to_string(),
+        ));
+    }
+    let digits = trimmed
+        .strip_prefix("0o")
+        .or_else(|| trimmed.strip_prefix("0O"))
+        .unwrap_or(trimmed);
+    u32::from_str_radix(digits, 8)
+        .map(|mode| mode & 0o7777)
+        .map_err(|e| ProgramError::ConfigError(format!("Invalid octal mode '{}': {}", trimmed, e)))
+}
+
+impl ServerConfig {
+    /// Resolves the effective IPC mode: explicit `uds_chmod`, else `0o777` when
+    /// `allow_unelevated` is set, else `0o700`. Fails on invalid octal input.
+    pub fn resolved_uds_chmod(&self) -> Result<u32, ProgramError> {
+        match self.uds_chmod.as_deref() {
+            Some(s) if s.trim().is_empty() => Ok(self.default_uds_chmod()),
+            Some(s) => parse_chmod(s),
+            None => Ok(self.default_uds_chmod()),
+        }
+    }
+
+    fn default_uds_chmod(&self) -> u32 {
+        if self.allow_unelevated { 0o777 } else { 0o700 }
     }
 }
 
@@ -478,6 +518,8 @@ impl SupervisorConfig {
     }
 
     pub fn validate(&self) -> Result<(), ProgramError> {
+        // Fail fast on bad IPC mode before any listener bind.
+        self.server.resolved_uds_chmod()?;
         for (name, raw) in &self.programs {
             if raw.command.trim().is_empty() {
                 return Err(ProgramError::ConfigError(format!(
@@ -1471,6 +1513,106 @@ programs: {}
         assert_eq!(config.server.http_bind.as_deref(), Some("0.0.0.0:9001"));
         assert_eq!(config.server.username.as_deref(), Some("admin"));
         assert_eq!(config.server.password.as_deref(), Some("thepassword"));
+    }
+
+    #[test]
+    fn test_parse_chmod() {
+        assert_eq!(parse_chmod("0700").unwrap(), 0o700);
+        assert_eq!(parse_chmod("700").unwrap(), 0o700);
+        assert_eq!(parse_chmod("0o700").unwrap(), 0o700);
+        assert_eq!(parse_chmod("0O700").unwrap(), 0o700);
+        assert_eq!(parse_chmod(" 0755 ").unwrap(), 0o755);
+        // Mask to 0o7777 (permission + setuid/setgid/sticky)
+        assert_eq!(parse_chmod("7777").unwrap(), 0o7777);
+        assert!(parse_chmod("").is_err());
+        assert!(parse_chmod("xyz").is_err());
+        assert!(parse_chmod("8").is_err());
+    }
+
+    #[test]
+    fn test_resolved_uds_chmod_defaults() {
+        // allow_unelevated=false → 0o700
+        let s = ServerConfig {
+            allow_unelevated: false,
+            uds_chmod: None,
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_uds_chmod().unwrap(), 0o700);
+
+        // allow_unelevated=true → 0o777
+        let s = ServerConfig {
+            allow_unelevated: true,
+            uds_chmod: None,
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_uds_chmod().unwrap(), 0o777);
+
+        // Explicit uds_chmod always wins
+        let s = ServerConfig {
+            allow_unelevated: true,
+            uds_chmod: Some("0755".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_uds_chmod().unwrap(), 0o755);
+
+        // Empty string falls back to default
+        let s = ServerConfig {
+            allow_unelevated: true,
+            uds_chmod: Some("".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_uds_chmod().unwrap(), 0o777);
+
+        // Invalid explicit value fails
+        let s = ServerConfig {
+            allow_unelevated: true,
+            uds_chmod: Some("not-octal".to_string()),
+            ..Default::default()
+        };
+        assert!(s.resolved_uds_chmod().is_err());
+    }
+
+    #[test]
+    fn test_yaml_chmod_alias_and_deny_unknown() {
+        // Alias `chmod` maps to uds_chmod
+        let yaml = r#"
+server:
+  chmod: "0750"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("valid yaml");
+        assert_eq!(config.server.uds_chmod.as_deref(), Some("0750"));
+        assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o750);
+
+        // Quoted string form (primary field name)
+        let yaml2 = r#"
+server:
+  uds_chmod: "0700"
+programs: {}
+"#;
+        let config2 = SupervisorConfig::from_yaml_str(yaml2).expect("valid yaml");
+        assert_eq!(config2.server.uds_chmod.as_deref(), Some("0700"));
+
+        // deny_unknown_fields still rejects unknown keys
+        let bad = r#"
+server:
+  not_a_real_field: 1
+programs: {}
+"#;
+        assert!(SupervisorConfig::from_yaml_str(bad).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_uds_chmod() {
+        let yaml = r#"
+server:
+  uds_chmod: "not-octal"
+programs: {}
+"#;
+        // Load path already calls validate(); bad mode must fail-fast at parse.
+        let err = SupervisorConfig::from_yaml_str(yaml).expect_err("bad uds_chmod must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("not-octal"), "error must name the mode: {msg}");
     }
 
     #[test]

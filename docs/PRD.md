@@ -265,9 +265,22 @@ Built with the production-proven `file-rotate` crate:
 
 #### 3.3.2 Caller Security & Multi-Scheme Authentication
 
-The `supervisord` daemon enforces strict caller privilege and identity validation on incoming local IPC connections:
+Local IPC access is the composition of two independent layers:
 
-- **Server-Side Enforcement**:
+1. **Authorization (OS-layer DACL/mode)**: who may establish a TCP/pipe/socket connection at all.
+2. **Authentication (App-layer peer credential / HTTP schemes)**: who may invoke control operations once connected.
+
+Both layers must pass; connection success = OS authorization ∧ app authentication (app layer only active when the daemon is elevated).
+
+- **OS Authorization (File/Socket Permissions)**:
+  - Configuration `server.uds_chmod` (alias `chmod`) maps an octal mode onto the IPC endpoint:
+    - Unix socket: applied via `set_permissions` after bind, before any accept.
+    - Windows named pipe: baked into the first-instance `SECURITY_ATTRIBUTES` at create time (no race window).
+    - Windows file-based AF_UNIX socket: applied via `SetNamedSecurityInfoW` with a protected DACL (owner/group/other + SYSTEM).
+  - Mode mapping: owner → process user SID, group → Administrators, other → Everyone; SYSTEM always retains an ACE.
+  - Defaults when `server.uds_chmod` is unset: `0o700` if `allow_unelevated=false`, `0o777` if `allow_unelevated=true`. An explicit configuration always wins.
+  - Parsed fail-fast at config load: accepts `0700` / `0o700` / `700`, masked to `& 0o7777`; empty or invalid strings are rejected.
+- **App Authentication (Peer Credentials & Elevation)**:
   - Security checks are strictly enforced by the `supervisord` daemon during IPC connection handshake (not on the client).
   - Can be relaxed via configuration `server.allow_unelevated: true` or daemon CLI flag `supervisord --allow-unelevated` (default: `false`).
 - **Unix / BSD (Peer Credentials Compatibility)**:
@@ -288,6 +301,7 @@ The `supervisord` daemon enforces strict caller privilege and identity validatio
   - **Path tiers**: static Web UI shell and `/api/v1/auth/{config,login,logout}` are public; all other `/api/v1/*` and `/RPC2` are protected. API 401s are bare JSON (no `WWW-Authenticate`); only `/RPC2` carries the Basic challenge.
   - **Web UI session**: `POST /api/v1/auth/login` issues an HttpOnly `SameSite=Strict` session cookie (7-day sliding TTL). Credentials are never stored in the browser.
   - CLI Standalone Connectivity: `supervisorctl` can connect to a remote or local daemon without a local configuration file if `--key <token>` or `--user <user>` / `--password <pwd>` is provided.
+- **CLI Endpoint Candidate Chain (Windows, no `-s`)**: pipe → config `uds_path` (if different) → TCP, each candidate carrying its own basic credentials (`uds_*` for IPC, `username/password` for TCP, shared token). Authorization errors are **fail-closed** (do not fall through); only NotFound/refused advance to the next candidate.
 
 #### 3.3.3 Core RESTful JSON API Specification
 

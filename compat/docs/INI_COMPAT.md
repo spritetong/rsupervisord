@@ -58,7 +58,7 @@ Question answered: **what must be implemented for a standard Python `supervisord
 | `file` | `server.uds_path` | direct mapping |
 | `username` | `server.username` | direct; **note**: shares the same field with `[inet_http_server]`, Python allows independent credentials per section → inconsistent |
 | `password` | `server.password` | same as above |
-| `chmod` | — | **P2**(Unix socket permissions, not applicable on Windows) |
+| `chmod` | `server.uds_chmod` | implemented: octal mode applied at bind (Unix `set_permissions`, Windows pipe `SECURITY_ATTRIBUTES`, Windows file UDS protected DACL). Quoted string required in YAML. |
 | `chown` | — | **P2** |
 
 **Example**
@@ -355,7 +355,7 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 ### P2
 
 10. `[supervisord]` runtime-surface fields (`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`identifier`/`environment`/`silent`) → depends on §7 #12.
-11. `[unix_http_server]` `chmod`/`chown`.
+11. `[unix_http_server]` `chown` (`chmod` implemented, see §4.1).
 12. Independent stdout/stderr `maxbytes`/`backups`(currently a single shared `logs` value).
 
 ### Not Supported

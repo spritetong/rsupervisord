@@ -39,6 +39,60 @@ fn test_platform_default_uds_path_is_valid() {
     assert_eq!(uds_path.to_str().unwrap(), r"\\.\pipe\supervisord");
 }
 
+/// Unix: bind_ipc_listener must apply the requested mode to the socket file
+/// after bind and before any accept (authorization layer).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_unix_bind_ipc_listener_applies_mode() {
+    use rsupervisord::platform::PlatformBackend;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("mode-test.sock");
+    let platform = native_platform();
+
+    let listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind ipc listener");
+
+    let meta = std::fs::metadata(&sock).expect("socket file exists after bind");
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "socket mode must be 0o700 after bind");
+
+    drop(listener);
+}
+
+/// Windows: bind_ipc_listener on a named pipe path must succeed with mode
+/// (SECURITY_ATTRIBUTES baked into first instance). Smoke: bind + drop.
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_bind_named_pipe_with_mode() {
+    let platform = native_platform();
+    let pipe = std::path::Path::new(r"\\.\pipe\rsupervisord-mode-test");
+
+    let listener = platform
+        .bind_ipc_listener(pipe, true, 0o777)
+        .expect("bind named pipe with mode");
+
+    drop(listener);
+}
+
+/// Windows: bind file-based UDS with mode must succeed and apply DACL.
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_bind_file_uds_with_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("mode-test.sock");
+    let platform = native_platform();
+
+    let listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind file uds with mode");
+
+    assert!(sock.exists(), "socket file must exist after bind");
+    drop(listener);
+}
+
 #[tokio::test]
 async fn test_platform_backend_configure_attach_and_signal() {
     let platform = native_platform();

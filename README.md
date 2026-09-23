@@ -363,6 +363,14 @@ server:
   # When daemon runs elevated (root/Administrator), permits non-elevated callers on local IPC (default: false)
   allow_unelevated: false
 
+  # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
+  # Unix socket: applied via set_permissions after bind. Windows named pipe:
+  # baked into first-instance SECURITY_ATTRIBUTES. Windows file-based UDS:
+  # applied via SetNamedSecurityInfoW (protected DACL).
+  # Defaults when omitted: "0700" if allow_unelevated=false, "0777" if true.
+  # An explicit value always wins. Parsed fail-fast (0700 / 0o700 / 700).
+  # uds_chmod: "0700"
+
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings
 # ------------------------------------------------------------------------------
@@ -548,6 +556,7 @@ event_listeners:
 - **`server.identifier`** (*string*, optional): Node identifier, defaults to system hostname.
 - **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary.
 - **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC.
+- **`server.uds_chmod`** (*string* / alias `chmod`, optional): Octal IPC endpoint mode (authorization layer, distinct from `allow_unelevated` peer-credential checks). Unix: `set_permissions` after bind. Windows pipe: first-instance `SECURITY_ATTRIBUTES`. Windows file UDS: protected DACL via `SetNamedSecurityInfoW`. Defaults when omitted: `"0700"` if `allow_unelevated=false`, `"0777"` if `true`; an explicit value always wins. Accepts `0700` / `0o700` / `700`, validated fail-fast.
 
 #### 2. `logging` Section (Daemon Logging)
 - **`logging.enabled`** (*boolean*, default: `true`): Enable or disable internal daemon logging.

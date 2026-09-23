@@ -670,14 +670,17 @@ flowchart TD
 ```
 
 1. **Windows Named Pipe (Default IPC)**:
-   - Server binds `\\.\pipe\<cmd_name>` using asynchronous `ServerOptions::create()`.
+   - Server binds `\\.\pipe\<cmd_name>` using asynchronous `ServerOptions::create_with_security_attributes_raw` so the first instance carries a baked-in `SECURITY_ATTRIBUTES` DACL (authorization layer; no race window before permissions are applied).
    - Bypasses filesystem path and Unix Domain Socket implementation quirks across diverse Windows builds (e.g. Windows Server, Windows 10 without AF_UNIX support).
-   - Handles continuous client reconnection loops via Tokio tasks.
+   - Handles continuous client reconnection loops via Tokio tasks. The security descriptor is built during bind (block-scoped so raw pointers never cross an `await`), and the kernel copies the SD into each pipe instance object.
 2. **Native Windows AF_UNIX UDS Listener**:
    - Binds `<config_dir>/<cmd_name>.sock` using `uds_windows::UnixListener` converted into `hyper_util::rt::TokioIo`.
+   - After bind, applies `server.uds_chmod` via `SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION` (prevents inheritance from the parent directory); failure is a hard bind error.
    - Enables zero-port reverse proxy integration with Caddy and Nginx without exposing local TCP ports.
-3. **Automatic Client Transport Selection**:
-   - `supervisorctl` automatically attempts Named Pipe connection on Windows by default, gracefully falling back to UDS or TCP.
+3. **Automatic Client Transport Selection (Endpoint Candidate Chain)**:
+   - When `-s` is not given, `supervisorctl` builds an ordered candidate chain: default Named Pipe → config `uds_path` (if different from the pipe) → `http_bind` TCP.
+   - Each candidate carries its own HTTP Basic credentials (`uds_username`/`uds_password` for IPC candidates, `username`/`password` for TCP); the bearer token is shared.
+   - Candidates are tried in order with a connect timeout; **authorization errors fail closed** (never advance to the next candidate), while NotFound/refused record the error and fall through. On Unix the legacy single-endpoint behavior is preserved.
 
 ---
 
@@ -976,6 +979,7 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 | **Deadlock & Concurrency** | High-concurrency CLI start/stop/reload storms | Zero task deadlocks, circuit breakers effective | ✅ 101 automated unit and integration tests passed |
 | **Zero-Downtime Hot Reload** | Modify single program config; trigger `reload` | Unchanged programs maintain PID and connections | ✅ DAG 3-way diff engine verified |
 | **Caller Privilege Security** | Unelevated callers attempt control over elevated daemon | Rejected at connection boundary by daemon unless allow_unelevated is enabled | ✅ Daemon-side platform privilege checks verified |
+| **IPC Authorization (chmod/DACL)** | Bind UDS/named pipe with `server.uds_chmod`; attempt connect as wrong user/mode | Wrong mode denied at OS layer before app handshake; explicit mode always wins over defaults | ✅ `security.rs` DACL unit tests + `platform_tests.rs` bind-mode assertions |
 | **Windows Native IPC** | Bind Named Pipe (`\\.\pipe\...`) & AF_UNIX; connect CLI & reverse proxy | Zero-port, elevation-free high-compatibility IPC | ✅ Named Pipe + AF_UNIX dual listeners verified |
 | **Process Group Operations** | Start, stop, restart groups via CLI and REST APIs | Group sub-DAG priority order strictly honored | ✅ `test_manager_start_and_stop_group` verified |
 | **Cron Scheduling** | Scheduled start/stop via cron expressions with zero polling | Precise trigger at scheduled time; autostart: false | ✅ `cron_tests.rs` (3 tests passed) |

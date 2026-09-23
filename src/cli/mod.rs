@@ -10,13 +10,107 @@ pub mod commands;
 pub mod transport;
 
 pub use args::{CliArgs, CliCommand};
-pub use client::SupervisorClient;
+pub use client::{EndpointCandidate, SupervisorClient};
 pub use transport::{Endpoint, StreamTransport};
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsString;
 use std::path::Path;
+
+/// Builds an HTTP Basic credential pair from optional username/password fields,
+/// returning `None` when both are absent or empty (open access).
+fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> {
+    match (u, p) {
+        (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
+        _ => None,
+    }
+}
+
+/// Resolves the ordered endpoint candidate chain when `-s` is not provided.
+///
+/// Windows: named pipe (default local) first, then configured `uds_path`,
+/// then TCP `http_bind`. Authorization errors fail closed; only
+/// not-found/refused advance to the next candidate.
+/// Unix / other: preserves existing single-endpoint behavior
+/// (TCP if `http_bind` set, else IPC path, else default local).
+async fn resolve_endpoint_candidates(
+    args: &CliArgs,
+) -> Result<(
+    Vec<EndpointCandidate>,
+    Option<(String, String)>,
+    Option<String>,
+)> {
+    let cmd_name = crate::config::paths::get_cmd_name();
+    let cfg_path = args
+        .config
+        .clone()
+        .or_else(|| crate::config::paths::find_default_config_path(&cmd_name));
+
+    if let Some(ref path) = cfg_path
+        && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
+    {
+        let uds_basic = basic_pair(cfg.server.uds_username, cfg.server.uds_password);
+        let tcp_basic = basic_pair(cfg.server.username, cfg.server.password);
+        let token = cfg.server.auth_token;
+
+        #[cfg(windows)]
+        {
+            // Candidate chain: default local pipe → configured uds_path → TCP.
+            let mut candidates: Vec<EndpointCandidate> = Vec::new();
+            let default_local = Endpoint::default_local();
+            candidates.push(EndpointCandidate {
+                endpoint: default_local.clone(),
+                basic: uds_basic.clone(),
+            });
+
+            let uds_ep = Endpoint::parse(&cfg.server.uds_path.to_string_lossy());
+            if uds_ep != default_local {
+                candidates.push(EndpointCandidate {
+                    endpoint: uds_ep,
+                    basic: uds_basic.clone(),
+                });
+            }
+
+            if let Some(ref http) = cfg.server.http_bind {
+                candidates.push(EndpointCandidate {
+                    endpoint: Endpoint::parse(http),
+                    basic: tcp_basic.clone(),
+                });
+            }
+
+            return Ok((candidates, None, token));
+        }
+
+        #[cfg(not(windows))]
+        {
+            // Preserve historical single-endpoint behavior on Unix:
+            // TCP first when http_bind is set, else IPC path.
+            let candidate = if let Some(ref http) = cfg.server.http_bind {
+                EndpointCandidate {
+                    endpoint: Endpoint::parse(http),
+                    basic: tcp_basic.clone(),
+                }
+            } else {
+                EndpointCandidate {
+                    endpoint: Endpoint::parse(&cfg.server.uds_path.to_string_lossy()),
+                    basic: uds_basic.clone(),
+                }
+            };
+            return Ok((vec![candidate], None, token));
+        }
+    }
+
+    // No config: single default local endpoint (pipe on Windows, UDS on Unix).
+    Ok((
+        vec![EndpointCandidate {
+            endpoint: Endpoint::default_local(),
+            basic: None,
+        }],
+        None,
+        None,
+    ))
+}
 
 /// Entry point for the standalone `supervisorctl` binary.
 ///
@@ -64,38 +158,23 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
     // `args.config`, while local service operations need it too.
     let service_config = args.config.clone();
 
-    // Determine target daemon endpoint & configuration credentials
-    let (endpoint, cfg_basic_auth, cfg_token) = if let Some(ref s) = args.server {
-        (Endpoint::parse(s), None, None)
+    // Determine target daemon endpoint candidates & configuration credentials.
+    // Explicit `-s` yields a single endpoint with no config-derived credentials
+    // (matching prior behavior). Otherwise walk the candidate chain.
+    let (candidates, cfg_basic_auth, cfg_token) = if let Some(ref s) = args.server {
+        (
+            vec![EndpointCandidate {
+                endpoint: Endpoint::parse(s),
+                basic: None,
+            }],
+            None,
+            None,
+        )
     } else {
-        let cmd_name = crate::config::paths::get_cmd_name();
-        let cfg_path = args
-            .config
-            .or_else(|| crate::config::paths::find_default_config_path(&cmd_name));
-        if let Some(ref path) = cfg_path
-            && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
-        {
-            let (ep, basic) = if let Some(ref http) = cfg.server.http_bind {
-                let ep = Endpoint::parse(http);
-                let basic = match (cfg.server.username, cfg.server.password) {
-                    (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
-                    _ => None,
-                };
-                (ep, basic)
-            } else {
-                let ep = Endpoint::parse(&cfg.server.uds_path.to_string_lossy());
-                let basic = match (cfg.server.uds_username, cfg.server.uds_password) {
-                    (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
-                    _ => None,
-                };
-                (ep, basic)
-            };
-            (ep, basic, cfg.server.auth_token)
-        } else {
-            (Endpoint::default_local(), None, None)
-        }
+        resolve_endpoint_candidates(&args).await?
     };
 
+    // CLI -u/-p override config-derived basic auth for all candidates.
     let basic_auth = match (args.user, args.password) {
         (Some(u), Some(p)) => Some((u, p)),
         (Some(u), None) => Some((u, String::new())),
@@ -105,7 +184,7 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
 
     let auth_token = args.auth_token.or(cfg_token);
 
-    let client = SupervisorClient::new_with_auth(endpoint, auth_token, basic_auth);
+    let client = SupervisorClient::new_with_candidates(candidates, auth_token, basic_auth);
 
     // Default to 'status' if no subcommand was explicitly provided
     let command = args

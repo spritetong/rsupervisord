@@ -12,22 +12,24 @@ pub struct IpcServer<'a> {
     path: &'a Path,
     router: axum::Router,
     allow_unelevated: bool,
+    mode: u32,
 }
 
 impl<'a> IpcServer<'a> {
     /// Creates a new IpcServer bound to the target IPC path, router, and elevation policy.
-    pub fn new(path: &'a Path, router: axum::Router, allow_unelevated: bool) -> Self {
+    pub fn new(path: &'a Path, router: axum::Router, allow_unelevated: bool, mode: u32) -> Self {
         Self {
             path,
             router,
             allow_unelevated,
+            mode,
         }
     }
 
     /// Serves incoming IPC connections until the cancellation token is triggered.
     pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
         let mut listener = crate::platform::native_platform()
-            .bind_ipc_listener(self.path, self.allow_unelevated)
+            .bind_ipc_listener(self.path, self.allow_unelevated, self.mode)
             .map_err(|e| {
                 anyhow::anyhow!("Failed to bind IPC listener at {:?}: {}", self.path, e)
             })?;
@@ -82,8 +84,9 @@ pub async fn run_ipc_listener(
     app: axum::Router,
     cancel_token: CancellationToken,
     allow_unelevated: bool,
+    mode: u32,
 ) -> anyhow::Result<()> {
-    IpcServer::new(path, app, allow_unelevated)
+    IpcServer::new(path, app, allow_unelevated, mode)
         .run(cancel_token)
         .await
 }

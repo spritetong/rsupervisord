@@ -71,12 +71,14 @@ impl ServerEngine {
         // 1. Local IPC listener (UDS on Unix, Named Pipe on Windows)
         let ipc_path = self.server_config.uds_path.clone();
         let allow_unelevated = self.server_config.allow_unelevated;
+        let ipc_mode = self.server_config.resolved_uds_chmod()?;
         if !ipc_path.as_os_str().is_empty() {
             let ipc_router = ipc_router.clone();
             let ipc_token = cancel_token.clone();
             set.spawn(async move {
                 if let Err(e) =
-                    run_ipc_listener(&ipc_path, ipc_router, ipc_token, allow_unelevated).await
+                    run_ipc_listener(&ipc_path, ipc_router, ipc_token, allow_unelevated, ipc_mode)
+                        .await
                 {
                     tracing::error!("run_ipc_listener failed on {:?}: {}", ipc_path, e);
                 }

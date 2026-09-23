@@ -249,8 +249,9 @@ impl PlatformBackend for UnixPlatformBackend {
         &self,
         path: &Path,
         allow_unelevated: bool,
+        mode: u32,
     ) -> io::Result<Box<dyn PlatformIpcListener>> {
-        let listener = UnixIpcListener::bind(path, allow_unelevated)?;
+        let listener = UnixIpcListener::bind(path, allow_unelevated, mode)?;
         Ok(Box::new(listener))
     }
 
@@ -350,7 +351,9 @@ pub struct UnixIpcListener {
 }
 
 impl UnixIpcListener {
-    pub fn bind(path: &Path, allow_unelevated: bool) -> io::Result<Self> {
+    pub fn bind(path: &Path, allow_unelevated: bool, mode: u32) -> io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
@@ -359,6 +362,9 @@ impl UnixIpcListener {
         let _ = std::fs::remove_file(path);
 
         let listener = tokio::net::UnixListener::bind(path)?;
+        // Apply configured mode after bind, before any accept: authorization layer.
+        // Umask cannot widen the mode beyond what bind created; set_permissions is authoritative.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
         let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_unix_ipc as fn(PathBuf));
         Ok(Self {
             listener,

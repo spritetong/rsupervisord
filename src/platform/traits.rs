@@ -95,10 +95,16 @@ pub trait PlatformBackend: Send + Sync {
     async fn connect_named_pipe(&self, path: &Path) -> io::Result<Box<dyn AsyncStream>>;
 
     /// Binds an OS-level IPC listener at the given path.
+    ///
+    /// `mode` is the resolved Unix mode / Windows DACL basis (octal, masked to
+    /// `0o7777`): applied to the socket file after bind on Unix, to the AF_UNIX
+    /// file DACL on Windows, and to the Named Pipe security descriptor at
+    /// first-instance creation.
     fn bind_ipc_listener(
         &self,
         path: &Path,
         allow_unelevated: bool,
+        mode: u32,
     ) -> io::Result<Box<dyn PlatformIpcListener>>;
 
     /// Returns the platform default daemon log path.

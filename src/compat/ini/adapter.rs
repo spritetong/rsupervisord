@@ -32,6 +32,9 @@ pub fn adapt_ini_to_config(
         if let Some(file) = sec.get("file") {
             config.server.uds_path = PathBuf::from(file);
         }
+        if let Some(chmod) = sec.get("chmod") {
+            config.server.uds_chmod = Some(chmod.clone());
+        }
         if let Some(username) = sec.get("username") {
             config.server.uds_username = Some(username.clone());
         }

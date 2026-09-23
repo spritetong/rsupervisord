@@ -315,6 +315,87 @@ async fn test_cli_connection_refused_error() {
     );
 }
 
+/// Candidate chain: first reachable endpoint wins; unreachable ones are skipped.
+#[tokio::test]
+async fn test_cli_candidate_chain_falls_through_to_reachable() {
+    use rsupervisord::cli::EndpointCandidate;
+
+    // Real mock daemon on an ephemeral TCP port.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let body = serde_json::to_string(&ApiResponse::ok(vec![ProgramStatusDto {
+                name: "ok".into(),
+                group: "g".into(),
+                state: "RUNNING".into(),
+                health: "-".into(),
+                pid: "1".into(),
+                cpu: "-".into(),
+                mem: "-".into(),
+                uptime: "-".into(),
+                cron: "-".into(),
+                description: "-".into(),
+            }]))
+            .unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    // Dead path first (will fail not-found), then live TCP.
+    let dead = Endpoint::Ipc(std::path::PathBuf::from(
+        r"\\.\pipe\rsupervisord-candidate-dead",
+    ));
+    let candidates = vec![
+        EndpointCandidate {
+            endpoint: dead,
+            basic: None,
+        },
+        EndpointCandidate {
+            endpoint: Endpoint::Tcp(addr.to_string()),
+            basic: None,
+        },
+    ];
+
+    let client = SupervisorClient::new_with_candidates(candidates, None, None);
+    let res = client.status(&[]).await;
+    assert!(
+        res.is_ok(),
+        "chain must fall through to TCP: {:?}",
+        res.err()
+    );
+}
+
+/// Candidate chain fail-closed: authorization errors must not advance; only
+/// not-found/refused may fall through.
+#[test]
+fn test_cli_candidate_chain_auth_fail_closed_classifiers() {
+    use rsupervisord::cli::transport::{is_authorization_error, is_retryable_not_found};
+
+    // Authorization errors: fail closed (do not advance to next candidate).
+    let denied = std::io::Error::from_raw_os_error(5); // ERROR_ACCESS_DENIED
+    assert!(is_authorization_error(&denied));
+    assert!(!is_retryable_not_found(&denied));
+
+    let eacces = std::io::Error::from_raw_os_error(13); // Unix EACCES
+    assert!(is_authorization_error(&eacces));
+
+    // Not-found / refused: safe to advance to the next candidate.
+    let missing = std::io::Error::from_raw_os_error(2); // ERROR_FILE_NOT_FOUND / ENOENT
+    assert!(!is_authorization_error(&missing));
+    assert!(is_retryable_not_found(&missing));
+
+    let refused = std::io::Error::from_raw_os_error(111); // Unix ECONNREFUSED
+    assert!(is_retryable_not_found(&refused));
+}
+
 #[tokio::test]
 async fn test_cli_handle_stdin() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
