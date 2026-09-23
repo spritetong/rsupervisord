@@ -44,12 +44,8 @@ pub struct ServerConfig {
     /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
     /// `0o770` on Windows (owner + Administrators) or `0o700` on Unix, or
     /// `0o777` when `allow_unelevated` is true so local CLI can connect.
-    #[serde(
-        default,
-        alias = "chmod",
-        deserialize_with = "crate::serde_util::optional_chmod"
-    )]
-    pub uds_chmod: Option<crate::serde_util::ChmodMode>,
+    #[serde(default, alias = "chmod", with = "crate::serde_util::option_chmod")]
+    pub uds_chmod: Option<u32>,
     #[serde(default)]
     pub uds_username: Option<String>,
     #[serde(default)]
@@ -122,10 +118,7 @@ impl ServerConfig {
     /// `allow_unelevated` is set, else `0o770` on Windows (owner + Administrators)
     /// or `0o700` on Unix. Fails on invalid octal input.
     pub fn resolved_uds_chmod(&self) -> Result<u32, ProgramError> {
-        Ok(self
-            .uds_chmod
-            .map(|m| m.mode())
-            .unwrap_or_else(|| self.default_uds_chmod()))
+        Ok(self.uds_chmod.unwrap_or_else(|| self.default_uds_chmod()))
     }
 
     fn default_uds_chmod(&self) -> u32 {
@@ -321,7 +314,7 @@ pub struct ProgramConfigRaw {
     pub stop_wait_secs: Option<Duration>,
     #[serde(default)]
     pub exit_codes: Option<Vec<i32>>,
-    #[serde(default)]
+    #[serde(default, with = "crate::serde_util::option_chmod")]
     pub umask: Option<u32>,
     #[serde(default)]
     pub logs: Option<ProgramLogsConfigRaw>,
@@ -1529,7 +1522,7 @@ programs: {}
         // Explicit uds_chmod always wins
         let s = ServerConfig {
             allow_unelevated: true,
-            uds_chmod: Some(crate::serde_util::ChmodMode::parse("0755").unwrap()),
+            uds_chmod: Some(0o755),
             ..Default::default()
         };
         assert_eq!(s.resolved_uds_chmod().unwrap(), 0o755);
@@ -1561,7 +1554,7 @@ server:
 programs: {}
 "#;
         let config = SupervisorConfig::from_yaml_str(yaml).expect("valid yaml");
-        assert_eq!(config.server.uds_chmod.map(|m| m.mode()), Some(0o750));
+        assert_eq!(config.server.uds_chmod, Some(0o750));
         assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o750);
 
         // Quoted string form (primary field name)
@@ -1571,7 +1564,7 @@ server:
 programs: {}
 "#;
         let config2 = SupervisorConfig::from_yaml_str(yaml2).expect("valid yaml");
-        assert_eq!(config2.server.uds_chmod.map(|m| m.mode()), Some(0o700));
+        assert_eq!(config2.server.uds_chmod, Some(0o700));
 
         // deny_unknown_fields still rejects unknown keys
         let bad = r#"

@@ -60,7 +60,7 @@ pub fn adapt_ini_to_config(
             config.server.uds_path = PathBuf::from(file);
         }
         if let Some(chmod) = sec.get("chmod") {
-            config.server.uds_chmod = crate::serde_util::ChmodMode::parse(chmod).map(Some)?;
+            config.server.uds_chmod = Some(crate::config::schema::parse_chmod(chmod)?);
         }
         if let Some(username) = sec.get("username") {
             config.server.uds_username = Some(username.clone());

@@ -7,8 +7,7 @@
 //! Boundary serde helpers: wire-compatible conversions so config/JSON value
 //! types stay unchanged while runtime structs hold parsed forms.
 
-use crate::error::ProgramError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer};
 use std::fmt;
 use std::time::Duration;
 
@@ -16,10 +15,11 @@ use std::time::Duration;
 // Duration ↔ integer seconds (wire: plain u64)
 // ---------------------------------------------------------------------------
 
-/// Serializes/deserializes `Duration` as whole seconds on the wire.
+/// Serializes/deserializes `Duration` as whole seconds on the wire, accepting
+/// both plain integers and string forms (e.g. 10, "10", "10s").
 pub mod duration_secs {
     use super::*;
-    use serde::{Deserialize, Serializer};
+    use serde::{Deserializer, Serializer, de};
 
     pub fn serialize<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -32,16 +32,53 @@ pub mod duration_secs {
     where
         D: Deserializer<'de>,
     {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(Duration::from_secs(secs))
+        struct DurationVisitor;
+
+        impl<'de> de::Visitor<'de> for DurationVisitor {
+            type Value = Duration;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a duration in seconds as an integer or string (e.g. 10, '10s')")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Duration::from_secs(v))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("duration cannot be negative"));
+                }
+                Ok(Duration::from_secs(v as u64))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let trimmed = v.trim();
+                let s = trimmed.strip_suffix('s').unwrap_or(trimmed).trim();
+                s.parse::<u64>()
+                    .map(Duration::from_secs)
+                    .map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_any(DurationVisitor)
     }
 }
 
 /// Serde helpers for `Option<Duration>` fields: absent stays `None`,
-/// present integers become `Duration`. Wire stays integer-or-null.
+/// present integers or strings become `Duration`. Wire stays integer-or-null.
 pub mod option_duration_secs {
     use super::*;
-    use serde::{Deserialize, Serializer};
+    use serde::{Deserializer, Serializer, de};
 
     pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -57,8 +94,71 @@ pub mod option_duration_secs {
     where
         D: Deserializer<'de>,
     {
-        let secs = Option::<u64>::deserialize(deserializer)?;
-        Ok(secs.map(Duration::from_secs))
+        struct OptionDurationVisitor;
+
+        impl<'de> de::Visitor<'de> for OptionDurationVisitor {
+            type Value = Option<Duration>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    "an optional duration in seconds as an integer or string (e.g. 10, '10s')",
+                )
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Some(Duration::from_secs(v)))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("duration cannot be negative"));
+                }
+                Ok(Some(Duration::from_secs(v as u64)))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                let s = trimmed.strip_suffix('s').unwrap_or(trimmed).trim();
+                s.parse::<u64>()
+                    .map(|secs| Some(Duration::from_secs(secs)))
+                    .map_err(de::Error::custom)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+        }
+
+        deserializer.deserialize_option(OptionDurationVisitor)
     }
 }
 
@@ -209,60 +309,153 @@ pub mod option_byte_size {
 }
 
 // ---------------------------------------------------------------------------
-// ChmodMode: octal string on the wire, u32 bits at runtime
+// Octal chmod mode ↔ string (wire: "0700", "0755", "700")
 // ---------------------------------------------------------------------------
 
-/// File mode parsed from an octal string (`"0700"`, `"0o700"`, `"700"`).
-/// Serializes as a zero-padded 4-digit octal string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ChmodMode(u32);
-
-impl ChmodMode {
-    pub fn new(mode: u32) -> Self {
-        Self(mode & crate::consts::CHMOD_MASK)
-    }
-
-    /// Parses via the shared octal-mode rules (accepts `0700`/`0o700`/`700`).
-    pub fn parse(s: &str) -> Result<Self, ProgramError> {
-        crate::config::schema::parse_chmod(s).map(Self)
-    }
-
-    #[inline]
-    pub fn mode(self) -> u32 {
-        self.0
-    }
+/// Formats a mode as a canonical 4-digit octal string (e.g. "0700", "0755").
+pub fn format_chmod(mode: u32) -> String {
+    format!("{:04o}", mode & crate::consts::CHMOD_MASK)
 }
 
-impl From<u32> for ChmodMode {
-    fn from(mode: u32) -> Self {
-        Self::new(mode)
-    }
-}
+/// Serde helpers for `u32` chmod mode fields: serializes as canonical 4-digit
+/// octal string (e.g. `"0700"`), deserializes from octal strings or integers.
+pub mod chmod {
+    use super::*;
+    use serde::{Deserializer, Serializer, de};
 
-impl fmt::Display for ChmodMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04o}", self.0)
-    }
-}
-
-impl Serialize for ChmodMode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("{:04o}", self.0))
+        serializer.serialize_str(&format_chmod(*value))
     }
-}
 
-impl<'de> Deserialize<'de> for ChmodMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u32, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        // Empty string means "use platform default" and is stored as None by
-        // the Option wrapper; reject here so bad tokens fail at the boundary.
-        ChmodMode::parse(&s).map_err(de::Error::custom)
+        struct ChmodVisitor;
+
+        impl<'de> de::Visitor<'de> for ChmodVisitor {
+            type Value = u32;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an octal mode string (e.g. '0700') or an integer mode")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                crate::config::schema::parse_chmod(v).map_err(de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok((v as u32) & crate::consts::CHMOD_MASK)
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("chmod mode cannot be negative"));
+                }
+                Ok((v as u32) & crate::consts::CHMOD_MASK)
+            }
+        }
+
+        deserializer.deserialize_any(ChmodVisitor)
+    }
+}
+
+/// Serde helpers for `Option<u32>` chmod mode fields: absent stays `None`,
+/// present values serialize as canonical 4-digit octal strings and
+/// deserialize from octal strings (`"0700"`, `"0755"`, `"700"`) or integers.
+/// Empty/whitespace strings map to `None` ("use platform default").
+pub mod option_chmod {
+    use super::*;
+    use serde::{Deserializer, Serializer, de};
+
+    pub fn serialize<S>(value: &Option<u32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(mode) => serializer.serialize_str(&format_chmod(*mode)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OptionChmodVisitor;
+
+        impl<'de> de::Visitor<'de> for OptionChmodVisitor {
+            type Value = Option<u32>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an optional octal mode string (e.g. '0700') or integer mode")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                crate::config::schema::parse_chmod(trimmed)
+                    .map(Some)
+                    .map_err(de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Some((v as u32) & crate::consts::CHMOD_MASK))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("chmod mode cannot be negative"));
+                }
+                Ok(Some((v as u32) & crate::consts::CHMOD_MASK))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+        }
+
+        deserializer.deserialize_option(OptionChmodVisitor)
     }
 }
 
@@ -279,36 +472,34 @@ where
     Ok(value.map(|s| crate::config::schema::normalize_http_bind(&s)))
 }
 
-/// Deserializes `Option<ChmodMode>`; empty/whitespace strings become `None`
-/// (meaning "use platform default"), matching pre-migration semantics.
-pub fn optional_chmod<'de, D>(deserializer: D) -> Result<Option<ChmodMode>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<String>::deserialize(deserializer)?;
-    match value {
-        None => Ok(None),
-        Some(s) if s.trim().is_empty() => Ok(None),
-        Some(s) => ChmodMode::parse(&s).map(Some).map_err(de::Error::custom),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-    struct DummyConfig {
+    struct DummyByteSizeConfig {
         #[serde(default, with = "option_byte_size")]
         max_bytes: Option<usize>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct DummyChmodConfig {
+        #[serde(default, with = "option_chmod")]
+        mode: Option<u32>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct DummyDurationConfig {
+        #[serde(default, with = "option_duration_secs")]
+        secs: Option<Duration>,
     }
 
     #[test]
     fn test_option_byte_size_serde_round_trip() {
         // String deserialization
         let json_input = r#"{"max_bytes":"50MB"}"#;
-        let parsed: DummyConfig = serde_json::from_str(json_input).unwrap();
+        let parsed: DummyByteSizeConfig = serde_json::from_str(json_input).unwrap();
         assert_eq!(parsed.max_bytes, Some(50 * 1024 * 1024));
 
         // Serialization perfectly restores canonical string
@@ -317,7 +508,7 @@ mod tests {
 
         // Numeric deserialization also works
         let num_input = r#"{"max_bytes":52428800}"#;
-        let parsed_num: DummyConfig = serde_json::from_str(num_input).unwrap();
+        let parsed_num: DummyByteSizeConfig = serde_json::from_str(num_input).unwrap();
         assert_eq!(parsed_num.max_bytes, Some(50 * 1024 * 1024));
         assert_eq!(
             serde_json::to_string(&parsed_num).unwrap(),
@@ -326,7 +517,7 @@ mod tests {
 
         // Small byte sizes
         let small_input = r#"{"max_bytes":"25B"}"#;
-        let parsed_small: DummyConfig = serde_json::from_str(small_input).unwrap();
+        let parsed_small: DummyByteSizeConfig = serde_json::from_str(small_input).unwrap();
         assert_eq!(parsed_small.max_bytes, Some(25));
         assert_eq!(
             serde_json::to_string(&parsed_small).unwrap(),
@@ -335,7 +526,7 @@ mod tests {
 
         // None / null handling
         let null_input = r#"{"max_bytes":null}"#;
-        let parsed_null: DummyConfig = serde_json::from_str(null_input).unwrap();
+        let parsed_null: DummyByteSizeConfig = serde_json::from_str(null_input).unwrap();
         assert_eq!(parsed_null.max_bytes, None);
         assert_eq!(
             serde_json::to_string(&parsed_null).unwrap(),
@@ -344,7 +535,75 @@ mod tests {
 
         // Absent field
         let empty_input = r#"{}"#;
-        let parsed_empty: DummyConfig = serde_json::from_str(empty_input).unwrap();
+        let parsed_empty: DummyByteSizeConfig = serde_json::from_str(empty_input).unwrap();
         assert_eq!(parsed_empty.max_bytes, None);
+    }
+
+    #[test]
+    fn test_option_chmod_serde_round_trip() {
+        // Octal string deserialization
+        let json_input = r#"{"mode":"0750"}"#;
+        let parsed: DummyChmodConfig = serde_json::from_str(json_input).unwrap();
+        assert_eq!(parsed.mode, Some(0o750));
+
+        // Serialization perfectly restores canonical 4-digit octal string
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(reserialized, r#"{"mode":"0750"}"#);
+
+        // 3-digit octal string "700" -> serialized to canonical "0700"
+        let short_input = r#"{"mode":"700"}"#;
+        let parsed_short: DummyChmodConfig = serde_json::from_str(short_input).unwrap();
+        assert_eq!(parsed_short.mode, Some(0o700));
+        assert_eq!(
+            serde_json::to_string(&parsed_short).unwrap(),
+            r#"{"mode":"0700"}"#
+        );
+
+        // Numeric deserialization (e.g. from YAML 0o755 = 493)
+        let num_input = r#"{"mode":488}"#; // 488 == 0o750
+        let parsed_num: DummyChmodConfig = serde_json::from_str(num_input).unwrap();
+        assert_eq!(parsed_num.mode, Some(0o750));
+        assert_eq!(
+            serde_json::to_string(&parsed_num).unwrap(),
+            r#"{"mode":"0750"}"#
+        );
+
+        // Empty string -> None
+        let empty_str_input = r#"{"mode":""}"#;
+        let parsed_empty_str: DummyChmodConfig = serde_json::from_str(empty_str_input).unwrap();
+        assert_eq!(parsed_empty_str.mode, None);
+
+        // null -> None
+        let null_input = r#"{"mode":null}"#;
+        let parsed_null: DummyChmodConfig = serde_json::from_str(null_input).unwrap();
+        assert_eq!(parsed_null.mode, None);
+        assert_eq!(
+            serde_json::to_string(&parsed_null).unwrap(),
+            r#"{"mode":null}"#
+        );
+    }
+
+    #[test]
+    fn test_option_duration_secs_serde_round_trip() {
+        // Integer
+        let int_input = r#"{"secs":10}"#;
+        let parsed: DummyDurationConfig = serde_json::from_str(int_input).unwrap();
+        assert_eq!(parsed.secs, Some(Duration::from_secs(10)));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), r#"{"secs":10}"#);
+
+        // String with "s" suffix
+        let str_s_input = r#"{"secs":"10s"}"#;
+        let parsed_s: DummyDurationConfig = serde_json::from_str(str_s_input).unwrap();
+        assert_eq!(parsed_s.secs, Some(Duration::from_secs(10)));
+
+        // String plain
+        let str_input = r#"{"secs":"15"}"#;
+        let parsed_str: DummyDurationConfig = serde_json::from_str(str_input).unwrap();
+        assert_eq!(parsed_str.secs, Some(Duration::from_secs(15)));
+
+        // null / empty
+        let null_input = r#"{"secs":null}"#;
+        let parsed_null: DummyDurationConfig = serde_json::from_str(null_input).unwrap();
+        assert_eq!(parsed_null.secs, None);
     }
 }

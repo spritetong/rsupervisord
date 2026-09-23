@@ -151,7 +151,7 @@ fn test_ini_chmod_maps_to_uds_chmod() {
     "#;
     let config = SupervisorConfig::from_ini_str(ini_str).expect("parse ini");
 
-    assert_eq!(config.server.uds_chmod.map(|m| m.mode()), Some(0o755));
+    assert_eq!(config.server.uds_chmod, Some(0o755));
     assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o755);
     assert_eq!(config.server.uds_username.as_deref(), Some("alice"));
 }
