@@ -30,7 +30,7 @@ pub struct DaemonArgs {
     pub nodaemon: bool,
 
     /// Log level filter (trace, debug, info, warn, error, off)
-    #[arg(short = 'l', long = "loglevel", default_value = "info")]
+    #[arg(short = 'l', long = "loglevel", default_value_t = crate::consts::DEFAULT_LOG_LEVEL.to_string())]
     pub loglevel: String,
 
     /// Number of worker threads for Tokio runtime (1 = single-threaded current_thread)
@@ -109,6 +109,12 @@ impl SupervisorDaemon {
         if args.allow_unelevated {
             config.server.allow_unelevated = true;
         }
+        // CLI -n/--nodaemon forces foreground. Daemonize for the false case is
+        // not yet implemented (Python parity double-fork).
+        // TODO: Python parity double-fork daemonize when nodaemon is false.
+        if args.nodaemon {
+            config.nodaemon = true;
+        }
 
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -138,11 +144,12 @@ impl SupervisorDaemon {
                 if let Some(parent) = log_file.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let max_bytes = match &config.logging.max_bytes {
-                    Some(s) => crate::logging::parse_byte_size(s)
-                        .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES),
-                    None => crate::consts::DEFAULT_LOG_MAX_BYTES,
-                };
+                let max_bytes = config
+                    .logging
+                    .max_bytes
+                    .as_ref()
+                    .map(|b| b.bytes())
+                    .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
                 let file_rotator = file_rotate::FileRotate::new(
                     log_file,
                     file_rotate::suffix::AppendCount::new(config.logging.backups),

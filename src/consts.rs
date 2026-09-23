@@ -49,6 +49,11 @@ pub const fn usize_value<const N: usize>() -> usize {
     N
 }
 
+/// Returns a `Duration` default from a const seconds value.
+pub const fn duration_value<const N: u64>() -> Duration {
+    Duration::from_secs(N)
+}
+
 /// Builds a serde default function for types that cannot be expressed with
 /// const generics (`String`, `Vec<T>`, etc.). Invoke only inside this module
 /// so every non-generic default lives in one place.
@@ -60,7 +65,11 @@ macro_rules! default_fn {
     };
 }
 
-default_fn!(default_log_level: String = "info".into());
+/// Default log level for CLI/daemon (`-l/--loglevel`).
+pub const DEFAULT_LOG_LEVEL: &str = "info";
+/// Default historical byte count for `tail`/`maintail` (Python `-B` default).
+pub const DEFAULT_TAIL_BYTES: usize = 1600;
+default_fn!(default_log_level: String = DEFAULT_LOG_LEVEL.into());
 default_fn!(
     default_result_handler: String = "supervisor.dispatchers:default_handler".into()
 );

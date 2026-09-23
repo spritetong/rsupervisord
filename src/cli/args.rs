@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::DEFAULT_ACTION_TIMEOUT_SECS;
 use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -59,7 +60,7 @@ pub enum CliCommand {
         r#async: bool,
 
         /// Timeout in seconds when waiting in synchronous mode
-        #[arg(short = 't', long = "timeout", default_value = "30")]
+        #[arg(short = 't', long = "timeout", default_value_t = DEFAULT_ACTION_TIMEOUT_SECS)]
         timeout: u64,
     },
     /// Stop specified program(s) or 'all'
@@ -72,7 +73,7 @@ pub enum CliCommand {
         r#async: bool,
 
         /// Timeout in seconds when waiting in synchronous mode
-        #[arg(short = 't', long = "timeout", default_value = "10")]
+        #[arg(short = 't', long = "timeout", default_value_t = DEFAULT_ACTION_TIMEOUT_SECS)]
         timeout: u64,
     },
     /// Restart specified program(s) or 'all'
@@ -85,7 +86,7 @@ pub enum CliCommand {
         r#async: bool,
 
         /// Timeout in seconds when waiting in synchronous mode
-        #[arg(short = 't', long = "timeout", default_value = "30")]
+        #[arg(short = 't', long = "timeout", default_value_t = DEFAULT_ACTION_TIMEOUT_SECS)]
         timeout: u64,
     },
     /// Configuration management subcommands (e.g. 'config reload')

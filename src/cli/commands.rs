@@ -6,6 +6,7 @@
 
 use crate::cli::args::CliArgs;
 use crate::cli::client::SupervisorClient;
+use crate::consts::{DEFAULT_LOG_LINES, DEFAULT_TAIL_BYTES};
 use crate::control::protocol::ProgramStatusDto;
 use anyhow::Result;
 use clap::CommandFactory;
@@ -855,7 +856,7 @@ pub async fn handle_tail(
     bytes: Option<usize>,
     lines: Option<usize>,
 ) -> Result<i32> {
-    let num_lines = lines.unwrap_or(100);
+    let num_lines = lines.unwrap_or(DEFAULT_LOG_LINES);
 
     if follow {
         client
@@ -869,7 +870,7 @@ pub async fn handle_tail(
             "supervisor.readProcessStdoutLog"
         };
 
-        let length = bytes.unwrap_or(1600);
+        let length = bytes.unwrap_or(DEFAULT_TAIL_BYTES);
         let param = format!(
             "<param><value><string>{}</string></value></param><param><value><int>0</int></value></param><param><value><int>{}</int></value></param>",
             name, length
@@ -899,7 +900,7 @@ pub async fn handle_maintail(
     if follow {
         client.stream_all_logs(|line| println!("{}", line)).await?;
     } else {
-        let length = bytes.unwrap_or(1600);
+        let length = bytes.unwrap_or(DEFAULT_TAIL_BYTES);
         let param = format!(
             "<param><value><int>0</int></value></param><param><value><int>{}</int></value></param>",
             length
@@ -907,7 +908,7 @@ pub async fn handle_maintail(
         let xml = client.call_xmlrpc("supervisor.readLog", &param).await?;
         let text = extract_xml_tag(&xml, "string").unwrap_or_default();
         if text.is_empty() {
-            let log_lines = client.read_logs("all", lines.unwrap_or(100)).await?;
+            let log_lines = client.read_logs("all", lines.unwrap_or(DEFAULT_LOG_LINES)).await?;
             for l in log_lines {
                 println!("{}", l);
             }
