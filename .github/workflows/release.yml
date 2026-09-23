@@ -39,17 +39,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 glibc (requires glibc >= 2.35)
+          # Linux x86_64 glibc (baseline glibc 2.28 via zig, Cross.toml)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
-            use_cross: false
+            use_cross: true
 
           # Linux x86_64 musl (static standalone / Alpine)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
             use_cross: true
 
-          # Linux aarch64 glibc (ARM64 servers / Raspberry Pi, glibc 2.31 via cross)
+          # Linux aarch64 glibc (baseline glibc 2.28 via zig, Cross.toml)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
             use_cross: true
