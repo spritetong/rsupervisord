@@ -19,7 +19,8 @@ pub struct ServerConfig {
     pub uds_path: PathBuf,
     /// Unix socket / Named Pipe DACL mode as an octal string (e.g. `"0700"`).
     /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
-    /// `0o700`, or `0o777` when `allow_unelevated` is true so local CLI can connect.
+    /// `0o770` on Windows (owner + Administrators) or `0o700` on Unix, or
+    /// `0o777` when `allow_unelevated` is true so local CLI can connect.
     #[serde(default, alias = "chmod")]
     pub uds_chmod: Option<String>,
     #[serde(default)]
@@ -91,7 +92,8 @@ pub fn parse_chmod(s: &str) -> Result<u32, ProgramError> {
 
 impl ServerConfig {
     /// Resolves the effective IPC mode: explicit `uds_chmod`, else `0o777` when
-    /// `allow_unelevated` is set, else `0o700`. Fails on invalid octal input.
+    /// `allow_unelevated` is set, else `0o770` on Windows (owner + Administrators)
+    /// or `0o700` on Unix. Fails on invalid octal input.
     pub fn resolved_uds_chmod(&self) -> Result<u32, ProgramError> {
         match self.uds_chmod.as_deref() {
             Some(s) if s.trim().is_empty() => Ok(self.default_uds_chmod()),
@@ -101,7 +103,20 @@ impl ServerConfig {
     }
 
     fn default_uds_chmod(&self) -> u32 {
-        if self.allow_unelevated { 0o777 } else { 0o700 }
+        if self.allow_unelevated {
+            0o777
+        } else {
+            // Windows: owner may be SYSTEM (service); include Administrators so an
+            // elevated admin CLI can pass the OS authorization layer.
+            #[cfg(windows)]
+            {
+                0o770
+            }
+            #[cfg(not(windows))]
+            {
+                0o700
+            }
+        }
     }
 }
 
@@ -1531,12 +1546,15 @@ programs: {}
 
     #[test]
     fn test_resolved_uds_chmod_defaults() {
-        // allow_unelevated=false → 0o700
+        // allow_unelevated=false → 0o770 on Windows, 0o700 elsewhere
         let s = ServerConfig {
             allow_unelevated: false,
             uds_chmod: None,
             ..Default::default()
         };
+        #[cfg(windows)]
+        assert_eq!(s.resolved_uds_chmod().unwrap(), 0o770);
+        #[cfg(not(windows))]
         assert_eq!(s.resolved_uds_chmod().unwrap(), 0o700);
 
         // allow_unelevated=true → 0o777

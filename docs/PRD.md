@@ -278,7 +278,7 @@ Both layers must pass; connection success = OS authorization ∧ app authenticat
     - Windows named pipe: baked into the first-instance `SECURITY_ATTRIBUTES` at create time (no race window).
     - Windows file-based AF_UNIX socket: applied via `SetNamedSecurityInfoW` with a protected DACL (owner/group/other + SYSTEM).
   - Mode mapping: owner → process user SID, group → Administrators, other → Everyone; SYSTEM always retains an ACE.
-  - Defaults when `server.uds_chmod` is unset: `0o700` if `allow_unelevated=false`, `0o777` if `allow_unelevated=true`. An explicit configuration always wins.
+  - Defaults when `server.uds_chmod` is unset: `0o777` if `allow_unelevated=true`; otherwise `0o700` on Unix (owner only) or `0o770` on Windows (owner + Administrators, so an elevated admin CLI can pass the OS layer when the daemon is a SYSTEM service). An explicit configuration always wins.
   - Parsed fail-fast at config load: accepts `0700` / `0o700` / `700`, masked to `& 0o7777`; empty or invalid strings are rejected.
 - **App Authentication (Peer Credentials & Elevation)**:
   - Security checks are strictly enforced by the `supervisord` daemon during IPC connection handshake (not on the client).

@@ -391,7 +391,8 @@ server:
   # 可选：本地 IPC 端点权限模式（别名: chmod）。八进制字符串，必须加引号。
   # Unix socket: bind 后调用 set_permissions；Windows 命名管道: 写入首个实例的
   # SECURITY_ATTRIBUTES（无竞态窗口）；Windows 文件型 UDS: SetNamedSecurityInfoW
-  # 保护性 DACL。未配置时的默认值: allow_unelevated=false → "0700"，true → "0777"；
+  # 保护性 DACL。未配置时的默认值: allow_unelevated=true → "0777"；否则 Unix "0700"、
+  # Windows "0770"（owner + Administrators，便于提权 admin CLI 访问 SYSTEM 服务 socket）；
   # 显式配置永远优先。解析 fail-fast（0700 / 0o700 / 700）。
   # uds_chmod: "0700"
 
@@ -581,7 +582,7 @@ event_listeners:
 - **`server.identifier`** (*字符串*, 可选): 守护节点名称，默认为主机名。
 - **`server.path_translation`** (*布尔值*, 默认: `true`): 是否在解析配置时统一将所有相对路径转为绝对路径（以配置文件所在目录为基准）。
 - **`server.allow_unelevated`** (*布尔值*, 默认: `false`): 当守护进程以 root 或 Administrator 特权身份运行时，是否允许非特权客户端连接本地 IPC（Unix UDS / Windows 命名管道与 AF_UNIX）。默认关闭以保障安全基线。
-- **`server.uds_chmod`** (*字符串* / 别名 `chmod`, 可选): 本地 IPC 端点八进制权限模式（授权层，区别于 `allow_unelevated` 的 peer-credential 鉴权层）。Unix: bind 后 `set_permissions`；Windows 命名管道: 首个实例 `SECURITY_ATTRIBUTES`；Windows 文件型 UDS: `SetNamedSecurityInfoW` 保护性 DACL。未配置默认: `allow_unelevated=false` → `"0700"`，`true` → `"0777"`；显式配置永远优先。接受 `0700` / `0o700` / `700`，解析 fail-fast。
+- **`server.uds_chmod`** (*字符串* / 别名 `chmod`, 可选): 本地 IPC 端点八进制权限模式（授权层，区别于 `allow_unelevated` 的 peer-credential 鉴权层）。Unix: bind 后 `set_permissions`；Windows 命名管道: 首个实例 `SECURITY_ATTRIBUTES`；Windows 文件型 UDS: `SetNamedSecurityInfoW` 保护性 DACL。未配置默认: `allow_unelevated=true` → `"0777"`；否则 Unix `"0700"`、Windows `"0770"`（owner + Administrators，便于提权 admin CLI 访问 SYSTEM 服务 socket）。显式配置永远优先。接受 `0700` / `0o700` / `700`，解析 fail-fast。
 
 #### 2. `logging` 节 (守护进程自身日志)
 

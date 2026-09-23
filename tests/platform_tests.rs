@@ -93,6 +93,73 @@ async fn test_windows_bind_file_uds_with_mode() {
     drop(listener);
 }
 
+/// Windows: same-user connect to a 0o700 file UDS must succeed after bind
+/// applies the DACL (regression for WSAEACCES / os error 10013).
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_file_uds_same_user_connect_after_0700() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("connect-0700.sock");
+    let platform = native_platform();
+
+    let mut listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind file uds with mode 0700");
+
+    // Accept task: serve one connection so connect() does not block forever.
+    let accept = tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    });
+
+    let connect = platform.connect_ipc(&sock);
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), connect).await;
+    match res {
+        Ok(Ok(_stream)) => {}
+        Ok(Err(e)) => panic!(
+            "same-user connect after 0o700 bind failed: os={:?} kind={:?} err={e}",
+            e.raw_os_error(),
+            e.kind()
+        ),
+        Err(_) => panic!("connect timed out after 0o700 bind"),
+    }
+    let _ = accept.await;
+}
+
+/// Windows: path containing `./` (INI `file=./x.sock` after path translation)
+/// must still apply DACL and allow same-user connect.
+#[cfg(windows)]
+#[tokio::test]
+async fn test_windows_file_uds_connect_with_dot_slash_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Exact shape from the bug report: <config_dir>/./supervisord.sock
+    let sock = dir.path().join(".").join("supervisord.sock");
+    let platform = native_platform();
+
+    let mut listener = platform
+        .bind_ipc_listener(&sock, false, 0o700)
+        .expect("bind with ./ path");
+
+    let accept = tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    });
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        platform.connect_ipc(&sock),
+    )
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!(
+            "connect with ./ path failed: os={:?} kind={:?} err={e}",
+            e.raw_os_error(),
+            e.kind()
+        ),
+        Err(_) => panic!("connect with ./ path timed out"),
+    }
+    let _ = accept.await;
+}
+
 #[tokio::test]
 async fn test_platform_backend_configure_attach_and_signal() {
     let platform = native_platform();

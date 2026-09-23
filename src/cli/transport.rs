@@ -106,6 +106,7 @@ pub fn is_authorization_error(err: &io::Error) -> bool {
     match err.raw_os_error() {
         Some(5)    // Windows ERROR_ACCESS_DENIED
         | Some(13) // Unix EACCES
+        | Some(10013) // Windows WSAEACCES
         | Some(1314) // Windows ERROR_PRIVILEGE_NOT_HELD
         => true,
         _ => err.kind() == io::ErrorKind::PermissionDenied,
@@ -225,9 +226,10 @@ mod tests {
 
     #[test]
     fn test_is_authorization_error() {
-        // Windows ERROR_ACCESS_DENIED / Unix EACCES / PermissionDenied
+        // Windows ERROR_ACCESS_DENIED / Unix EACCES / WSAEACCES / PermissionDenied
         assert!(is_authorization_error(&io::Error::from_raw_os_error(5)));
         assert!(is_authorization_error(&io::Error::from_raw_os_error(13)));
+        assert!(is_authorization_error(&io::Error::from_raw_os_error(10013)));
         assert!(is_authorization_error(&io::Error::from_raw_os_error(1314)));
         assert!(is_authorization_error(&io::Error::new(
             io::ErrorKind::PermissionDenied,
