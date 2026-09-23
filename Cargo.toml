@@ -33,7 +33,10 @@ async-trait = "0.1"
 futures-util = "0.3"
 bytes = "1"
 croner = "4.0"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "std",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -78,6 +81,7 @@ derive_more = { version = "2.1.1", features = ["full"] }
 dashmap = "6.2.1"
 ahash = "0.8.12"
 smallvec = "1.16.1"
+smart-default = "0.7"
 compact_str = { version = "0.10.0", features = ["serde"] }
 notify = "8"
 quick-xml = "0.42.0"

@@ -7,6 +7,7 @@
 use crate::consts::{DEFAULT_ACTION_TIMEOUT_SECS, bool_value, u64_value};
 use crate::program::state::ProgramState;
 use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use tabled::Tabled;
 
 /// Universal REST API JSON response envelope.
@@ -96,21 +97,14 @@ pub struct ProgramDetailsDto {
 }
 
 /// Request parameters for lifecycle operations (start, stop, restart).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
 pub struct ActionRequest {
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub sync: bool,
     #[serde(default = "u64_value::<DEFAULT_ACTION_TIMEOUT_SECS>")]
+    #[default(DEFAULT_ACTION_TIMEOUT_SECS)]
     pub timeout_secs: u64,
-}
-
-impl Default for ActionRequest {
-    fn default() -> Self {
-        Self {
-            sync: true,
-            timeout_secs: DEFAULT_ACTION_TIMEOUT_SECS,
-        }
-    }
 }
 
 /// Result returned from a program lifecycle action.

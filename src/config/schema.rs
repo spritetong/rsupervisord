@@ -10,6 +10,7 @@ use crate::program::config::{
     AutoRestartPolicy, HealthCheckConfig, ProgramConfig, ProgramLogsConfig, StopSignal,
 };
 use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,10 +36,11 @@ macro_rules! inherit_clone {
     };
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_uds_path")]
+    #[default(default_uds_path())]
     pub uds_path: PathBuf,
     /// Unix socket / Named Pipe DACL mode as an octal string (e.g. `"0700"`).
     /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
@@ -65,6 +67,7 @@ pub struct ServerConfig {
     /// preserved and interpretated relative to the daemon working directory, matching
     /// python supervisor behavior.
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub path_translation: bool,
     /// When true, allows non-elevated (non-root on Unix, non-admin on Windows) callers
     /// to connect via local IPC when the daemon is running elevated. Default is false.
@@ -75,24 +78,6 @@ pub struct ServerConfig {
 fn default_uds_path() -> PathBuf {
     let cmd_name = crate::config::paths::get_cmd_name();
     crate::config::paths::default_uds_path(&cmd_name, None)
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            uds_path: default_uds_path(),
-            uds_chmod: None,
-            uds_username: None,
-            uds_password: None,
-            http_bind: None,
-            auth_token: None,
-            username: None,
-            password: None,
-            identifier: None,
-            path_translation: true,
-            allow_unelevated: false,
-        }
-    }
 }
 
 /// Parses an octal file mode string (`"0700"`, `"0o700"`, `"700"`).
@@ -154,58 +139,43 @@ pub fn normalize_http_bind(bind: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub enabled: bool,
     #[serde(default)]
     pub file: Option<PathBuf>,
     #[serde(default = "default_log_level")]
+    #[default(default_log_level())]
     pub level: String,
     #[serde(default, with = "crate::serde_util::option_byte_size")]
+    #[default(Some(DEFAULT_LOG_MAX_BYTES))]
     pub max_bytes: Option<usize>,
     #[serde(default = "usize_value::<DEFAULT_LOG_BACKUPS>")]
+    #[default(DEFAULT_LOG_BACKUPS)]
     pub backups: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub enabled: bool,
     #[serde(
         default = "duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>())]
     pub idle_timeout_secs: Duration,
     #[serde(
         default = "duration_value::<DEFAULT_METRICS_INTERVAL_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(duration_value::<DEFAULT_METRICS_INTERVAL_SECS>())]
     pub interval_secs: Duration,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            idle_timeout_secs: duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>(),
-            interval_secs: duration_value::<DEFAULT_METRICS_INTERVAL_SECS>(),
-        }
-    }
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            file: None,
-            level: default_log_level(),
-            max_bytes: Some(DEFAULT_LOG_MAX_BYTES),
-            backups: DEFAULT_LOG_BACKUPS,
-        }
-    }
 }
 
 /// Global defaults template for programs (equivalent to legacy [program-default]).

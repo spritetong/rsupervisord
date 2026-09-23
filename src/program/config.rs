@@ -12,6 +12,7 @@ use crate::consts::{
     default_exit_codes, duration_value, u16_value, u32_value,
 };
 use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -138,10 +139,11 @@ impl Default for StopSignal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramLogsConfig {
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub enabled: bool,
     #[serde(default)]
     pub stdout: Option<PathBuf>,
@@ -159,52 +161,36 @@ pub struct ProgramLogsConfig {
     pub stderr_events_enabled: bool,
 }
 
-impl Default for ProgramLogsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            stdout: None,
-            stderr: None,
-            max_bytes: None,
-            backups: None,
-            redirect_stderr: false,
-            stdout_events_enabled: false,
-            stderr_events_enabled: false,
-        }
-    }
-}
-
 impl ProgramLogsConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     pub fn is_stdout_disabled(&self) -> bool {
-        if !self.enabled {
-            return true;
-        }
-        if let Some(ref p) = self.stdout {
-            let s = p.to_string_lossy().to_lowercase();
-            s == "/dev/null" || s == "null" || s == "none" || s == "off"
-        } else {
-            false
-        }
+        self.is_file_disabled(self.stdout.as_deref())
     }
 
     pub fn is_stderr_disabled(&self) -> bool {
+        self.is_file_disabled(self.stderr.as_deref())
+    }
+
+    fn is_file_disabled(&self, file_path: Option<&std::path::Path>) -> bool {
         if !self.enabled {
             return true;
         }
-        if let Some(ref p) = self.stderr {
-            let s = p.to_string_lossy().to_lowercase();
-            s == "/dev/null" || s == "null" || s == "none" || s == "off"
+        if let Some(p) = file_path
+            && let Some(s) = p.to_str()
+        {
+            ["/dev/null", "null", "none", "off"]
+                .iter()
+                .any(|&x| x.eq_ignore_ascii_case(s))
         } else {
             false
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SmartDefault, Serialize, Deserialize)]
 pub struct ProgramConfig {
     pub name: String,
     pub command: String,
@@ -217,10 +203,12 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub environment: HashMap<String, String>,
     #[serde(default = "u32_value::<DEFAULT_PRIORITY>")]
+    #[default(DEFAULT_PRIORITY)]
     pub priority: u32,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default = "bool_value::<true>")]
+    #[default(true)]
     pub autostart: bool,
     #[serde(default)]
     pub autorestart: AutoRestartPolicy,
@@ -228,8 +216,10 @@ pub struct ProgramConfig {
         default = "duration_value::<DEFAULT_START_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(Duration::from_secs(DEFAULT_START_SECS))]
     pub start_secs: Duration,
     #[serde(default = "u32_value::<DEFAULT_START_RETRIES>")]
+    #[default(DEFAULT_START_RETRIES)]
     pub start_retries: u32,
     #[serde(default)]
     pub stop_signal: StopSignal,
@@ -237,8 +227,10 @@ pub struct ProgramConfig {
         default = "duration_value::<DEFAULT_STOP_WAIT_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))]
     pub stop_wait_secs: Duration,
     #[serde(default = "default_exit_codes")]
+    #[default(default_exit_codes())]
     pub exit_codes: Vec<i32>,
     #[serde(default)]
     pub umask: Option<u32>,
@@ -249,6 +241,7 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub group: String,
     #[serde(default = "u32_value::<DEFAULT_GROUP_PRIORITY>")]
+    #[default(DEFAULT_GROUP_PRIORITY)]
     pub group_priority: u32,
     #[serde(default)]
     pub cron: Option<String>,
@@ -264,6 +257,7 @@ pub struct ProgramConfig {
         default = "duration_value::<DEFAULT_HOOK_TIMEOUT_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS))]
     pub hook_timeout_secs: Duration,
     #[serde(default)]
     pub restart_when_binary_changed: bool,
@@ -283,6 +277,7 @@ pub struct ProgramConfig {
         default = "duration_value::<DEFAULT_RESTART_DEBOUNCE_SECS>",
         with = "crate::serde_util::duration_secs"
     )]
+    #[default(Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS))]
     pub restart_debounce_secs: Duration,
     #[serde(default)]
     pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
@@ -332,40 +327,9 @@ impl ProgramConfig {
         let n = name.into();
         Self {
             group: n.clone(),
-            group_priority: DEFAULT_GROUP_PRIORITY,
             name: n,
             command: command.into(),
-            args: Vec::new(),
-            directory: None,
-            user: None,
-            environment: HashMap::new(),
-            priority: DEFAULT_PRIORITY,
-            depends_on: Vec::new(),
-            autostart: true,
-            autorestart: AutoRestartPolicy::default(),
-            start_secs: Duration::from_secs(DEFAULT_START_SECS),
-            start_retries: DEFAULT_START_RETRIES,
-            stop_signal: StopSignal::default(),
-            stop_wait_secs: Duration::from_secs(DEFAULT_STOP_WAIT_SECS),
-            exit_codes: default_exit_codes(),
-            umask: None,
-            logs: ProgramLogsConfig::default(),
-            health_check: None,
-            cron: None,
-            cron_stop: None,
-            pre_start: None,
-            pre_stop: None,
-            pre_start_ignore_failure: false,
-            hook_timeout_secs: Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
-            restart_when_binary_changed: false,
-            restart_signal_when_binary_changed: None,
-            restart_cmd_when_binary_changed: None,
-            restart_directory_monitor: None,
-            restart_file_pattern: None,
-            restart_signal_when_file_changed: None,
-            restart_cmd_when_file_changed: None,
-            restart_debounce_secs: Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS),
-            event_listener: None,
+            ..Default::default()
         }
     }
 
