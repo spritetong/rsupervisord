@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::consts::{
-    DEFAULT_EVENTLISTENER_PRIORITY, DEFAULT_EVENT_BUFFER_SIZE, default_result_handler, i32_value,
+    DEFAULT_EVENT_BUFFER_SIZE, DEFAULT_EVENTLISTENER_PRIORITY, default_result_handler, i32_value,
     usize_value,
 };
 use crate::error::ProgramError;

@@ -14,7 +14,7 @@ use crate::config::schema::{
     normalize_http_bind,
 };
 use crate::consts::{
-    DEFAULT_EVENTLISTENER_PRIORITY, DEFAULT_EVENT_BUFFER_SIZE, default_result_handler,
+    DEFAULT_EVENT_BUFFER_SIZE, DEFAULT_EVENTLISTENER_PRIORITY, default_result_handler,
 };
 use crate::error::ProgramError;
 use std::collections::HashMap;

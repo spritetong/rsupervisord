@@ -27,6 +27,12 @@ fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> 
     }
 }
 
+type ResolvedCandidates = (
+    Vec<EndpointCandidate>,
+    Option<(String, String)>,
+    Option<String>,
+);
+
 /// Resolves the ordered endpoint candidate chain when `-s` is not provided.
 ///
 /// Windows: named pipe (default local) first, then configured `uds_path`,
@@ -34,13 +40,7 @@ fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> 
 /// not-found/refused advance to the next candidate.
 /// Unix / other: preserves existing single-endpoint behavior
 /// (TCP if `http_bind` set, else IPC path, else default local).
-fn resolve_endpoint_candidates(
-    args: &CliArgs,
-) -> Result<(
-    Vec<EndpointCandidate>,
-    Option<(String, String)>,
-    Option<String>,
-)> {
+fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
     let cmd_name = crate::config::paths::get_cmd_name();
     let cfg_path = args
         .config

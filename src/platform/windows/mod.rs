@@ -547,7 +547,7 @@ impl PlatformBackend for WindowsPlatformBackend {
             }
             return canon;
         }
-        path.to_path_buf()
+        self.norm_path(path)
     }
 
     fn build_command(&self, program: &Path, args: &[String]) -> TokioCommand {

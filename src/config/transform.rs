@@ -230,8 +230,9 @@ pub fn absolutize(value: &str, config_dir: Option<&Path>) -> PathBuf {
     if is_abs_like(trimmed) {
         return PathBuf::from(value);
     }
+    let platform = crate::platform::native_platform();
     let base = config_dir.unwrap_or(Path::new("."));
-    base.join(value)
+    platform.norm_path(&base.join(value))
 }
 
 /// Reports whether a string looks like an absolute path, independent of the
@@ -264,14 +265,15 @@ mod tests {
 
     #[test]
     fn test_absolutize_relative_joins_config_dir() {
+        let platform = crate::platform::native_platform();
         let dir = Path::new("/etc/supervisor");
         assert_eq!(
             absolutize("logs/app.log", Some(dir)),
-            dir.join("logs/app.log")
+            platform.norm_path(&dir.join("logs/app.log"))
         );
         assert_eq!(
             absolutize("./svc/a.out", Some(dir)),
-            dir.join("./svc/a.out")
+            platform.norm_path(&dir.join("svc/a.out"))
         );
     }
 
@@ -305,11 +307,26 @@ mod tests {
     fn test_absolutize_none_dir_uses_cwd() {
         let rel = "logs/app.log";
         let got = absolutize(rel, None);
-        assert_eq!(got, Path::new(".").join(rel));
+        assert_eq!(
+            got,
+            crate::platform::native_platform().norm_path(&Path::new(".").join(rel))
+        );
+    }
+
+    #[test]
+    fn test_absolutize_lexical_norm_does_not_require_existence() {
+        let platform = crate::platform::native_platform();
+        let dir = Path::new("/etc/supervisor/conf.d");
+        let res = absolutize("../nonexistent/./dir/../../logs/app.log", Some(dir));
+        assert_eq!(
+            res,
+            platform.norm_path(Path::new("/etc/supervisor/logs/app.log"))
+        );
     }
 
     #[test]
     fn test_walker_absolutizes_path_fields() {
+        let platform = crate::platform::native_platform();
         let dir = Path::new("/etc/supervisor");
         let mut value = json!({
             "server": { "uds_path": "run/ipc.sock" },
@@ -333,40 +350,64 @@ mod tests {
 
         assert_eq!(
             value["server"]["uds_path"],
-            dir.join("run/ipc.sock").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("run/ipc.sock"))
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(
             value["logging"]["file"],
-            dir.join("logs/daemon.log").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/daemon.log"))
+                .to_string_lossy()
+                .as_ref()
         );
         let web = &value["programs"]["web"];
         assert_eq!(
             web["directory"],
-            dir.join("./services/api").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("services/api"))
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(
             web["logs"]["stdout"],
-            dir.join("logs/web.log").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/web.log"))
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(
             web["logs"]["stderr"],
-            dir.join("logs/web.err").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/web.err"))
+                .to_string_lossy()
+                .as_ref()
         );
         // Absolute command remains unchanged.
         assert_eq!(web["command"], json!("/usr/bin/python -m http.server"));
         let ev = &value["event_listeners"]["ev"];
         assert_eq!(
             ev["stdout_logfile"],
-            dir.join("logs/ev.out").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/ev.out"))
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(
             ev["stderr_logfile"],
-            dir.join("logs/ev.err").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/ev.err"))
+                .to_string_lossy()
+                .as_ref()
         );
         // Relative command containing path separators is absolutized against config_dir.
         assert_eq!(
             ev["command"],
-            dir.join("bin/handler").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("bin/handler"))
+                .to_string_lossy()
+                .as_ref()
         );
     }
 
@@ -383,6 +424,7 @@ mod tests {
                 }
             }
         });
+        let platform = crate::platform::native_platform();
         let c = Ctx {
             config_dir: Some(dir),
             path_translation: true,
@@ -395,7 +437,8 @@ mod tests {
         // the (still literal) relative path with config_dir, leaving %(program_name)s for resolve_programs.
         assert_eq!(
             web["command"],
-            dir.join("%(here)s/bin/%(program_name)s")
+            platform
+                .norm_path(&dir.join("%(here)s/bin/%(program_name)s"))
                 .to_string_lossy()
                 .as_ref()
         );
@@ -406,13 +449,17 @@ mod tests {
         // the remaining %(process_num)s for resolve_programs to substitute later.
         assert_eq!(
             web["logs"]["stdout"],
-            dir.join("logs/%(process_num)s.log")
+            platform
+                .norm_path(&dir.join("logs/%(process_num)s.log"))
                 .to_string_lossy()
                 .as_ref(),
         );
         assert_eq!(
             web["logs"]["stderr"],
-            dir.join("logs/e.log").to_string_lossy().as_ref()
+            platform
+                .norm_path(&dir.join("logs/e.log"))
+                .to_string_lossy()
+                .as_ref()
         );
     }
 

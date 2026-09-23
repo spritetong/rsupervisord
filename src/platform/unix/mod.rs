@@ -323,7 +323,7 @@ impl PlatformBackend for UnixPlatformBackend {
     }
 
     fn real_path(&self, path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        path.canonicalize().unwrap_or_else(|_| self.norm_path(path))
     }
 
     fn build_command(&self, program: &Path, args: &[String]) -> TokioCommand {

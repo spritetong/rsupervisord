@@ -132,6 +132,13 @@ pub trait PlatformBackend: Send + Sync {
     /// Splits a command line string into arguments according to platform rules.
     fn split_command_line(&self, cmd: &str) -> Result<Vec<String>, String>;
 
+    /// Lexically normalizes a path (collapsing redundant separators, '.' and '..'),
+    /// equivalent to Python's os.path.normpath. Does NOT touch the filesystem or require
+    /// the path to exist.
+    fn norm_path(&self, path: &Path) -> PathBuf {
+        lexical_norm_path(path)
+    }
+
     /// Canonicalizes/normalizes a path to its real path according to platform rules,
     /// equivalent to Python's os.path.realpath (e.g. resolving symlinks and stripping \\?\ on Windows).
     fn real_path(&self, path: &Path) -> PathBuf;
@@ -141,6 +148,63 @@ pub trait PlatformBackend: Send + Sync {
 
     /// Returns the platform system service manager.
     fn service(&self) -> &dyn PlatformService;
+}
+
+/// Purely lexical normalization of a path, collapsing redundant separators,
+/// '.' components, and internal '..' components, without touching the filesystem.
+/// Equivalent to Python's `os.path.normpath`.
+pub fn lexical_norm_path(path: &Path) -> PathBuf {
+    use std::path::{Component, PathBuf};
+
+    if path.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+
+    let mut components = Vec::new();
+    let mut has_root_or_prefix = false;
+
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                components.push(Component::Prefix(prefix));
+                has_root_or_prefix = true;
+            }
+            Component::RootDir => {
+                components.push(Component::RootDir);
+                has_root_or_prefix = true;
+            }
+            Component::CurDir => {
+                // Ignore '.'
+            }
+            Component::ParentDir => {
+                if let Some(last) = components.last() {
+                    match last {
+                        Component::Normal(_) => {
+                            components.pop();
+                        }
+                        Component::RootDir | Component::Prefix(_) => {
+                            // Cannot escape above root or drive prefix
+                        }
+                        Component::ParentDir => {
+                            components.push(Component::ParentDir);
+                        }
+                        Component::CurDir => unreachable!(),
+                    }
+                } else if !has_root_or_prefix {
+                    components.push(Component::ParentDir);
+                }
+            }
+            Component::Normal(c) => {
+                components.push(Component::Normal(c));
+            }
+        }
+    }
+
+    if components.is_empty() {
+        return PathBuf::from(".");
+    }
+
+    components.iter().collect()
 }
 
 /// Trait representing platform-specific system service management and execution.

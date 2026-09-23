@@ -542,11 +542,15 @@ impl ProgramActor {
         let (health_tx, health_rx) = mpsc::channel(16);
 
         let max_bytes = match &config.logs.max_bytes {
-            Some(s) => crate::logging::parse_byte_size(s)
-                .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES),
+            Some(s) => {
+                crate::logging::parse_byte_size(s).unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+            }
             None => crate::consts::DEFAULT_LOG_MAX_BYTES,
         };
-        let backups = config.logs.backups.unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS);
+        let backups = config
+            .logs
+            .backups
+            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS);
         let stdout_disabled = config.logs.is_stdout_disabled();
         let stderr_disabled = config.logs.is_stderr_disabled();
 

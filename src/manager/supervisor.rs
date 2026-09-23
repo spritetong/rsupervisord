@@ -1232,7 +1232,12 @@ impl ManagerActor {
                 name: format!("group '{}'", group),
             });
         }
-        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(DEFAULT_PRIORITY));
+        targets.sort_by_key(|n| {
+            self.configs
+                .get(n)
+                .map(|c| c.priority)
+                .unwrap_or(DEFAULT_PRIORITY)
+        });
         for name in &targets {
             if let Some(prog) = self.programs.get_mut(name) {
                 prog.start().await?;
@@ -1255,7 +1260,12 @@ impl ManagerActor {
                 name: format!("group '{}'", group),
             });
         }
-        targets.sort_by_key(|n| self.configs.get(n).map(|c| c.priority).unwrap_or(DEFAULT_PRIORITY));
+        targets.sort_by_key(|n| {
+            self.configs
+                .get(n)
+                .map(|c| c.priority)
+                .unwrap_or(DEFAULT_PRIORITY)
+        });
         for name in targets.iter().rev() {
             let default_wait = self
                 .configs
