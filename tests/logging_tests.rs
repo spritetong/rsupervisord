@@ -90,8 +90,13 @@ async fn test_process_stdout_capture_into_ring_buffer() {
     let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
 
-    // Give process a brief moment to finish outputting
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for process to output
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if program.read_logs(None).len() >= 3 {
+            break;
+        }
+    }
     let _ = program.stop(Duration::from_secs(1)).await;
 
     let logs = program.read_logs(None);
@@ -153,7 +158,13 @@ async fn test_process_stdout_file_logging_and_rotation() {
     let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Wait for process to output and rotate
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if dir.path().join("app_stdout.log.1").exists() {
+            break;
+        }
+    }
     let _ = program.stop(Duration::from_secs(1)).await;
 
     // Check that primary log file and rotated backups exist

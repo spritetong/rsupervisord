@@ -244,7 +244,7 @@ impl ServerAuthState {
                 if let Some((k, v)) = pair.split_once('=')
                     && k == "token"
                 {
-                    attempts.token = Some(v.to_string());
+                    attempts.token = Some(percent_decode_query_param(v));
                     break;
                 }
             }
@@ -253,6 +253,43 @@ impl ServerAuthState {
         attempts.session = session_id_from_headers(req.headers());
         attempts
     }
+}
+
+/// Decodes a percent-encoded query parameter string (`%XX` hex and `+` as space).
+pub fn percent_decode_query_param(s: &str) -> String {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let next_two = (chars.next(), chars.next());
+            match next_two {
+                (Some(h1), Some(h2)) => {
+                    let hex = [h1, h2];
+                    if let Ok(hex_str) = std::str::from_utf8(&hex)
+                        && let Ok(val) = u8::from_str_radix(hex_str, 16)
+                    {
+                        bytes.push(val);
+                        continue;
+                    }
+                    bytes.push(b'%');
+                    bytes.push(h1);
+                    bytes.push(h2);
+                }
+                (Some(h1), None) => {
+                    bytes.push(b'%');
+                    bytes.push(h1);
+                }
+                _ => {
+                    bytes.push(b'%');
+                }
+            }
+        } else if b == b'+' {
+            bytes.push(b' ');
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
 /// Parses the Web UI session id out of a `Cookie` header.
@@ -275,6 +312,7 @@ fn request_is_https(headers: &axum::http::HeaderMap, uri: &Uri) -> bool {
     if uri.scheme_str() == Some("https") {
         return true;
     }
+    // TODO: Add reverse proxy trust configuration / CIDR whitelist before trusting X-Forwarded-Proto blindly.
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -527,5 +565,14 @@ mod tests {
             .insert("expired".into(), Instant::now() - Duration::from_secs(1));
         assert!(!store.validate_session("expired"));
         assert!(store.sessions.get("expired").is_none());
+    }
+
+    #[test]
+    fn test_percent_decode_query_param() {
+        assert_eq!(percent_decode_query_param("hello"), "hello");
+        assert_eq!(percent_decode_query_param("hello%20world"), "hello world");
+        assert_eq!(percent_decode_query_param("a%2Bb%3Dc"), "a+b=c");
+        assert_eq!(percent_decode_query_param("a+b"), "a b");
+        assert_eq!(percent_decode_query_param("invalid%2"), "invalid%2");
     }
 }

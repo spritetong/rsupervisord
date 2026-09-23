@@ -731,8 +731,9 @@ fn verify_windows_uds_caller(stream: &uds_windows::UnixStream) -> Result<(), Pro
         );
 
         if ret != 0 || peer_pid == 0 {
-            tracing::debug!("Could not query peer PID on Windows UDS, skipping token check");
-            return Ok(());
+            return Err(ProgramError::PlatformError(
+                "Access denied: cannot query peer PID on Windows UDS socket".to_string(),
+            ));
         }
 
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, peer_pid);

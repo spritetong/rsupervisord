@@ -134,8 +134,19 @@ programs:
     assert_eq!(statuses[0].state, "RUNNING");
 
     // 4. Read logs
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let logs = client.read_logs("worker", 50).await.expect("read logs");
+    let mut logs = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(l) = client.read_logs("worker", 50).await {
+            logs = l;
+            if logs
+                .iter()
+                .any(|line| line.contains("worker_online_marker"))
+            {
+                break;
+            }
+        }
+    }
     assert!(
         logs.iter()
             .any(|line| line.contains("worker_online_marker")),

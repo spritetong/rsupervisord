@@ -165,11 +165,8 @@ pub const DEFAULT_LOG_BACKUPS: usize = 10;
 
 /// IPC mode when `allow_unelevated` requires world access for local CLI.
 pub const UDS_CHMOD_UNELEVATED: u32 = 0o777;
-/// Default IPC mode on Unix (owner only).
-#[cfg(windows)]
-pub const UDS_CHMOD: u32 = 0o770; // owner + Administrators on Windows
-#[cfg(not(windows))]
-pub const UDS_CHMOD: u32 = 0o700; // owner only on Unix
+/// Default IPC mode: owner + Administrators on Windows, owner only on Unix.
+pub const UDS_CHMOD: u32 = if cfg!(windows) { 0o770 } else { 0o700 };
 /// Permission bits accepted by `parse_chmod` (mode + setuid/setgid/sticky).
 pub const CHMOD_MASK: u32 = 0o7777;
 /// umask applied while binding the Unix socket to close the bind→chmod race.

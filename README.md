@@ -364,12 +364,8 @@ server:
   allow_unelevated: false
 
   # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
-  # Unix socket: applied via set_permissions after bind. Windows named pipe:
-  # baked into first-instance SECURITY_ATTRIBUTES. Windows file-based UDS:
-  # applied via SetNamedSecurityInfoW (protected DACL).
-  # Defaults when omitted: "0777" if allow_unelevated=true; otherwise "0700"
-  # on Unix or "0770" on Windows (owner + Administrators).
-  # An explicit value always wins. Parsed fail-fast (0700 / 0o700 / 700).
+  # Valid values (recommended): "0700", "0770", "0777" (accepts "0700" / "0o700" / "700").
+  # Defaults when omitted: "0777" if allow_unelevated=true; otherwise "0700" on Unix or "0770" on Windows.
   # uds_chmod: "0700"
 
 # ------------------------------------------------------------------------------
@@ -557,7 +553,7 @@ event_listeners:
 - **`server.identifier`** (*string*, optional): Node identifier, defaults to system hostname.
 - **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary.
 - **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC.
-- **`server.uds_chmod`** (*string* / alias `chmod`, optional): Octal IPC endpoint mode (authorization layer, distinct from `allow_unelevated` peer-credential checks). Unix: `set_permissions` after bind. Windows pipe: first-instance `SECURITY_ATTRIBUTES`. Windows file UDS: protected DACL via `SetNamedSecurityInfoW`. Defaults when omitted: `"0777"` if `allow_unelevated=true`; otherwise `"0700"` on Unix or `"0770"` on Windows (owner + Administrators, so an elevated admin CLI can reach a SYSTEM/service-owned socket). An explicit value always wins. Accepts `0700` / `0o700` / `700`, validated fail-fast.
+- **`server.uds_chmod`** (*string* / alias `chmod`, optional): Octal IPC endpoint permission mode. Recommended valid values are `"0700"`, `"0770"`, or `"0777"` (accepts `"0700"`, `"0o700"`, or `"700"` format). Defaults when omitted: `"0777"` if `allow_unelevated=true`; otherwise `"0700"` on Unix and `"0770"` on Windows. An explicit value always wins.
 
 #### 2. `logging` Section (Daemon Logging)
 - **`logging.enabled`** (*boolean*, default: `true`): Enable or disable internal daemon logging.
