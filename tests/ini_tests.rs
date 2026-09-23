@@ -400,3 +400,79 @@ command = /bin/true
     assert_eq!(config.server.uds_username, None);
     assert_eq!(config.server.uds_password, None);
 }
+
+#[test]
+fn test_ini_baselines_path_translation_and_allow_unelevated() {
+    // INI frontend must align with Python supervisor / go-supervisord baselines:
+    // - path_translation=false: bare relative paths stay relative (CWD-resolved)
+    // - allow_unelevated=true: no elevation gate on IPC
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        r#"
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[supervisord]
+logfile = relative/path/supervisord.log
+
+[program:web]
+command = /usr/bin/web
+stdout_logfile = relative/path/web.out.log
+"#,
+    )
+    .unwrap();
+
+    let config = SupervisorConfig::from_file(&conf_path).expect("INI load must succeed");
+
+    assert!(
+        !config.server.path_translation,
+        "INI frontend must force path_translation=false"
+    );
+    assert!(
+        config.server.allow_unelevated,
+        "INI frontend must force allow_unelevated=true"
+    );
+
+    // Bare relative paths must stay relative (not absolutized against config_dir)
+    let log_file = config
+        .logging
+        .file
+        .as_ref()
+        .expect("logging.file must be set");
+    assert!(
+        log_file.is_relative(),
+        "relative logfile must stay relative under INI path_translation=false, got {:?}",
+        log_file
+    );
+    assert!(
+        !log_file
+            .to_string_lossy()
+            .contains(dir.path().to_string_lossy().as_ref()),
+        "relative logfile must not be absolutized against config_dir {:?}, got {:?}",
+        dir.path(),
+        log_file
+    );
+
+    let prog = config.programs.get("web").expect("program web must exist");
+    let stdout = prog
+        .logs
+        .as_ref()
+        .and_then(|l| l.stdout.as_ref())
+        .expect("stdout_logfile must be set");
+    assert!(
+        stdout.is_relative(),
+        "relative stdout_logfile must stay relative under INI path_translation=false, got {:?}",
+        stdout
+    );
+
+    // resolved_uds_chmod with allow_unelevated=true (no explicit chmod) must be
+    // the unelevated-friendly mode (0o777), matching Python/go which have no
+    // elevation gate and rely on socket file permissions only.
+    assert_eq!(
+        config.server.resolved_uds_chmod().unwrap(),
+        0o777,
+        "allow_unelevated=true without explicit chmod must resolve to 0o777"
+    );
+}

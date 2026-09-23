@@ -1084,6 +1084,7 @@ In traditional supervisors (such as Python Supervisor), relative configuration p
 **The Solution: Parse-Boundary Projection**:
 Rather than delegating path resolution to scattered downstream consumers or mutating OS state, `supervisord` establishes a **single, self-contained transformation boundary** (`src/config/transform.rs`). At the configuration boundary (immediately after deserializing YAML/INI and before validation), the typed configuration tree is projected into a JSON `Value` tree, walked by a pure transformation function, and deserialized back.
 - When `server.path_translation: true` (default), relative paths are deterministically anchored to `config_dir`, simulating the effect of `chdir(config_dir)` with zero global side effects.
+- **INI Frontend Baseline Alignment**: `adapt_ini_to_config` (`src/compat/ini/adapter.rs`) forces `server.path_translation = false` and `server.allow_unelevated = true` before invoking `translate_paths` + `validate`, aligning bare relative path resolution (daemon CWD) and IPC access (no elevation gate) with the Python supervisor / go-supervisord baselines. YAML native configs keep the rsupervisord defaults (`true` / `false`).
 - **Zero Diffusion Principle**: Downstream modules (`schema.rs`, `process.rs`, `watch.rs`, `health.rs`) contain **zero `path_translation` conditional checks** and zero manual path concatenations. Downstream code consumes pure configuration instances directly.
 
 ```mermaid

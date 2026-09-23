@@ -330,8 +330,11 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 | `logfile_backups` | 10 | 3 | documented difference |
 | `umask` | 022 | None | **P2** |
 | `redirect_stderr` | false | false | consistent |
+| `path_translation` | N/A (Python always CWD-resolves bare relative paths) | INI frontend forces `false` (YAML native default remains `true`) | **Aligned**: bare relative paths stay relative and resolve against daemon CWD, matching Python/go-supervisord |
+| `allow_unelevated` | N/A (Python/go have no elevation gate on IPC) | INI frontend forces `true` (YAML native default remains `false`) | **Aligned**: no app-layer elevation check; access governed by socket file permissions only, matching Python/go |
 
 > Default-value differences do not block loading; recommended: "if a config explicitly writes a value, use the explicit value"; when not written, use the ours default and note it in the docs.
+> **Note on `path_translation` / `allow_unelevated`**: these are rsupervisord-only knobs with no Python INI key. The INI frontend forces them to baseline-aligning values (`false` / `true`) before `translate_paths` + `validate`, so a stock Python `supervisord.conf` loads with path and IPC semantics equivalent to Python supervisor / go-supervisord. YAML native configs keep the rsupervisord defaults (`path_translation: true`, `allow_unelevated: false`).
 
 ---
 

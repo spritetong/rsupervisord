@@ -161,6 +161,14 @@ pub fn adapt_ini_to_config(
         }
     }
 
+    // Align INI frontend with Python supervisor / go-supervisord baselines:
+    // - path_translation=false: bare relative paths stay relative (resolved against
+    //   the daemon working directory at runtime), matching Python/go behavior.
+    // - allow_unelevated=true: no elevation gate on IPC, matching Python/go which
+    //   only rely on socket file permissions.
+    config.server.path_translation = false;
+    config.server.allow_unelevated = true;
+
     config.apply_default_paths();
     config = config.translate_paths()?;
     config.validate()?;

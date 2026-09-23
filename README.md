@@ -358,9 +358,11 @@ server:
   # Parse-boundary path translation (default: true)
   # When true, relative paths in config fields are absolutized against the config file directory.
   # When false, relative paths are resolved relative to the process runtime CWD (Python behavior).
+  # For INI (Python-compat) configs this is forced to false (Python/go baseline).
   path_translation: true
 
   # When daemon runs elevated (root/Administrator), permits non-elevated callers on local IPC (default: false)
+  # For INI (Python-compat) configs this is forced to true (Python/go baseline: no elevation gate).
   allow_unelevated: false
 
   # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
@@ -551,8 +553,8 @@ event_listeners:
 - **`server.auth_token`** (*string*, optional): Bearer token for HTTP REST/XMLRPC/SSE (`Authorization: Bearer <token>` or `?token=`). When basic credentials are also configured, **either** may be used (OR). Applied on both TCP and IPC listeners.
 - **`server.username` / `server.password`** (*string*, optional): HTTP Basic Auth credentials. Passwords support cleartext or `{SHA}` hashed format. IPC uses `uds_username`/`uds_password` (auto-filled from this pair when omitted). The Web UI signs in via a login modal and keeps an HttpOnly session cookie — secrets are never stored in the browser.
 - **`server.identifier`** (*string*, optional): Node identifier, defaults to system hostname.
-- **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary.
-- **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC.
+- **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary. For INI (Python-compat) configs this is forced to `false` to match Python/go-supervisord baseline behavior (bare relative paths resolve against daemon CWD).
+- **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC. For INI (Python-compat) configs this is forced to `true` to match Python/go-supervisord baseline behavior (no app-layer elevation gate; access governed by socket file permissions only).
 - **`server.uds_chmod`** (*string* / alias `chmod`, optional): Octal IPC endpoint permission mode. Recommended valid values are `"0700"`, `"0770"`, or `"0777"` (accepts `"0700"`, `"0o700"`, or `"700"` format). Defaults when omitted: `"0777"` if `allow_unelevated=true`; otherwise `"0700"` on Unix and `"0770"` on Windows. An explicit value always wins.
 
 #### 2. `logging` Section (Daemon Logging)

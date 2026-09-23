@@ -383,9 +383,11 @@ server:
   # 路径自动转译开关 (默认: true)
   # 为 true 时，在配置解析边界将所有相对路径基于配置文件所在目录转换为绝对路径；
   # 为 false 时，保留原样并相对于执行时的进程当前工作目录 (CWD)。
+  # 对 INI (Python 兼容) 配置会强制为 false (对齐 Python/go 基准: 裸相对路径按 CWD 解析)。
   path_translation: true
 
   # 守护进程以特权 (root/管理员) 身份运行且对外提供本地 IPC 时，是否允许非特权客户端连接 (默认: false)
+  # 对 INI (Python 兼容) 配置会强制为 true (对齐 Python/go 基准: 无提权门控，仅受 socket 文件权限约束)。
   allow_unelevated: false
 
   # 可选：本地 IPC 端点权限模式（别名: chmod）。八进制字符串，推荐值: "0700"、"0770"、"0777"。
@@ -577,8 +579,8 @@ event_listeners:
 - **`server.auth_token`** (*字符串*, 可选): REST/XMLRPC/SSE 访问令牌（`Authorization: Bearer <token>` 或 `?token=`）。与 basic 凭据同时配置时二者均可通过（OR 语义），TCP 与 IPC 监听器同时生效。
 - **`server.username` / `server.password`** (*字符串*, 可选): HTTP Basic Auth 访问凭据。密码支持 `{SHA}` 前缀哈希值。IPC 使用 `uds_username`/`uds_password`（缺省时从本对自动填充）。Web UI 通过登录弹窗换取 HttpOnly 会话 Cookie，浏览器中不保存任何明文凭据。
 - **`server.identifier`** (*字符串*, 可选): 守护节点名称，默认为主机名。
-- **`server.path_translation`** (*布尔值*, 默认: `true`): 是否在解析配置时统一将所有相对路径转为绝对路径（以配置文件所在目录为基准）。
-- **`server.allow_unelevated`** (*布尔值*, 默认: `false`): 当守护进程以 root 或 Administrator 特权身份运行时，是否允许非特权客户端连接本地 IPC（Unix UDS / Windows 命名管道与 AF_UNIX）。默认关闭以保障安全基线。
+- **`server.path_translation`** (*布尔值*, 默认: `true`): 是否在解析配置时统一将所有相对路径转为绝对路径（以配置文件所在目录为基准）。对 INI（Python 兼容）配置会强制为 `false`，以对齐 Python/go-supervisord 基准行为（裸相对路径按守护进程 CWD 解析）。
+- **`server.allow_unelevated`** (*布尔值*, 默认: `false`): 当守护进程以 root 或 Administrator 特权身份运行时，是否允许非特权客户端连接本地 IPC（Unix UDS / Windows 命名管道与 AF_UNIX）。默认关闭以保障安全基线。对 INI（Python 兼容）配置会强制为 `true`，以对齐 Python/go-supervisord 基准行为（无应用层提权门控，访问仅受 socket 文件权限约束）。
 - **`server.uds_chmod`** (*字符串* / 别名 `chmod`, 可选): 本地 IPC 端点权限模式。有效值推荐为 `"0700"`、`"0770"` 或 `"0777"`（支持 `"0700"` / `"0o700"` / `"700"` 格式）。未配置时的默认值：`allow_unelevated: true` 时默认为 `"0777"`；否则 Unix 默认为 `"0700"`，Windows 默认为 `"0770"`。显式配置优先。
 
 #### 2. `logging` 节 (守护进程自身日志)

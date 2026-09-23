@@ -45,10 +45,12 @@ server:
   password: "${SUPERVISOR_HTTP_PASSWORD:-}"
 
   # When true (default), relative paths are absolutized against the config file directory.
+  # For INI (Python-compat) configs this is forced to false (bare relative paths resolve against daemon CWD).
   path_translation: true
 
   # When true, allows non-elevated (non-root on Unix, non-admin on Windows) callers to connect
   # via local IPC when the daemon is running elevated. (default: false)
+  # For INI (Python-compat) configs this is forced to true (no elevation gate; socket file permissions only).
   allow_unelevated: false
 
   # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
