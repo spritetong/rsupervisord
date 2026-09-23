@@ -47,18 +47,18 @@ impl HealthProbeRunner {
     /// Spawns the health probe background loop.
     pub async fn run(self) {
         // 1. Initial delay grace period before probing starts
-        if self.config.initial_delay_secs > 0 {
+        if !self.config.initial_delay_secs.is_zero() {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(self.config.initial_delay_secs)) => {}
+                _ = tokio::time::sleep(self.config.initial_delay_secs) => {}
             }
         }
 
         let mut consecutive_failures = 0u32;
         let mut last_reported = HealthStatus::Starting;
-        let interval = Duration::from_secs(self.config.interval_secs.max(1));
-        let timeout_dur = Duration::from_secs(self.config.timeout_secs.max(1));
+        let interval = self.config.interval_secs.max(Duration::from_secs(1));
+        let timeout_dur = self.config.timeout_secs.max(Duration::from_secs(1));
 
         loop {
             tokio::select! {

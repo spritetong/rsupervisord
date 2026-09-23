@@ -105,14 +105,14 @@ pub struct EventListenerConfigRaw {
     pub autostart: Option<bool>,
     #[serde(default)]
     pub autorestart: Option<AutoRestartPolicy>,
-    #[serde(default)]
-    pub start_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub start_secs: Option<std::time::Duration>,
     #[serde(default)]
     pub start_retries: Option<u32>,
     #[serde(default)]
     pub stop_signal: Option<StopSignal>,
-    #[serde(default)]
-    pub stop_wait_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub stop_wait_secs: Option<std::time::Duration>,
     #[serde(default)]
     pub directory: Option<PathBuf>,
     #[serde(default)]

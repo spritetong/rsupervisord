@@ -9,11 +9,12 @@ use crate::consts::{
     DEFAULT_HEALTH_INTERVAL_SECS, DEFAULT_HEALTH_TIMEOUT_SECS, DEFAULT_HOOK_TIMEOUT_SECS,
     DEFAULT_HTTP_EXPECTED_STATUS, DEFAULT_PRIORITY, DEFAULT_RESTART_DEBOUNCE_SECS,
     DEFAULT_START_RETRIES, DEFAULT_START_SECS, DEFAULT_STOP_WAIT_SECS, bool_value,
-    default_exit_codes, u16_value, u32_value, u64_value,
+    default_exit_codes, duration_value, u16_value, u32_value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(
     Debug,
@@ -147,7 +148,7 @@ pub struct ProgramLogsConfig {
     #[serde(default)]
     pub stderr: Option<PathBuf>,
     #[serde(default)]
-    pub max_bytes: Option<String>,
+    pub max_bytes: Option<crate::serde_util::ByteSize>,
     #[serde(default)]
     pub backups: Option<usize>,
     #[serde(default)]
@@ -223,14 +224,20 @@ pub struct ProgramConfig {
     pub autostart: bool,
     #[serde(default)]
     pub autorestart: AutoRestartPolicy,
-    #[serde(default = "u64_value::<DEFAULT_START_SECS>")]
-    pub start_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_START_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub start_secs: Duration,
     #[serde(default = "u32_value::<DEFAULT_START_RETRIES>")]
     pub start_retries: u32,
     #[serde(default)]
     pub stop_signal: StopSignal,
-    #[serde(default = "u64_value::<DEFAULT_STOP_WAIT_SECS>")]
-    pub stop_wait_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_STOP_WAIT_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub stop_wait_secs: Duration,
     #[serde(default = "default_exit_codes")]
     pub exit_codes: Vec<i32>,
     #[serde(default)]
@@ -253,8 +260,11 @@ pub struct ProgramConfig {
     pub pre_stop: Option<String>,
     #[serde(default)]
     pub pre_start_ignore_failure: bool,
-    #[serde(default = "u64_value::<DEFAULT_HOOK_TIMEOUT_SECS>")]
-    pub hook_timeout_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_HOOK_TIMEOUT_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub hook_timeout_secs: Duration,
     #[serde(default)]
     pub restart_when_binary_changed: bool,
     #[serde(default)]
@@ -269,8 +279,11 @@ pub struct ProgramConfig {
     pub restart_signal_when_file_changed: Option<StopSignal>,
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
-    #[serde(default = "u64_value::<DEFAULT_RESTART_DEBOUNCE_SECS>")]
-    pub restart_debounce_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_RESTART_DEBOUNCE_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub restart_debounce_secs: Duration,
     #[serde(default)]
     pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
 }
@@ -295,14 +308,23 @@ pub enum HealthCheckType {
 pub struct HealthCheckConfig {
     #[serde(flatten)]
     pub check_type: HealthCheckType,
-    #[serde(default = "u64_value::<DEFAULT_HEALTH_INTERVAL_SECS>")]
-    pub interval_secs: u64,
-    #[serde(default = "u64_value::<DEFAULT_HEALTH_TIMEOUT_SECS>")]
-    pub timeout_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_HEALTH_INTERVAL_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub interval_secs: Duration,
+    #[serde(
+        default = "duration_value::<DEFAULT_HEALTH_TIMEOUT_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub timeout_secs: Duration,
     #[serde(default = "u32_value::<DEFAULT_HEALTH_FAILURE_THRESHOLD>")]
     pub failure_threshold: u32,
-    #[serde(default = "u64_value::<DEFAULT_HEALTH_INITIAL_DELAY_SECS>")]
-    pub initial_delay_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_HEALTH_INITIAL_DELAY_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub initial_delay_secs: Duration,
 }
 
 impl ProgramConfig {
@@ -321,10 +343,10 @@ impl ProgramConfig {
             depends_on: Vec::new(),
             autostart: true,
             autorestart: AutoRestartPolicy::default(),
-            start_secs: DEFAULT_START_SECS,
+            start_secs: Duration::from_secs(DEFAULT_START_SECS),
             start_retries: DEFAULT_START_RETRIES,
             stop_signal: StopSignal::default(),
-            stop_wait_secs: DEFAULT_STOP_WAIT_SECS,
+            stop_wait_secs: Duration::from_secs(DEFAULT_STOP_WAIT_SECS),
             exit_codes: default_exit_codes(),
             umask: None,
             logs: ProgramLogsConfig::default(),
@@ -334,7 +356,7 @@ impl ProgramConfig {
             pre_start: None,
             pre_stop: None,
             pre_start_ignore_failure: false,
-            hook_timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
+            hook_timeout_secs: Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
             restart_when_binary_changed: false,
             restart_signal_when_binary_changed: None,
             restart_cmd_when_binary_changed: None,
@@ -342,7 +364,7 @@ impl ProgramConfig {
             restart_file_pattern: None,
             restart_signal_when_file_changed: None,
             restart_cmd_when_file_changed: None,
-            restart_debounce_secs: DEFAULT_RESTART_DEBOUNCE_SECS,
+            restart_debounce_secs: Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS),
             event_listener: None,
         }
     }
@@ -413,7 +435,9 @@ impl ProgramConfig {
             )));
         }
         if let Some(ref mb) = self.logs.max_bytes {
-            crate::logging::parse_byte_size(mb)?;
+            // Already parsed at the serde boundary; keep a cheap re-check for
+            // programmatically-built configs that bypass deserialize.
+            let _ = mb.bytes();
         }
         if let Some(ref expr) = self.cron
             && let Err(e) = expr.parse::<croner::Cron>()

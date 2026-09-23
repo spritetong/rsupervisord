@@ -742,7 +742,10 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
         map.insert("process_prio".to_string(), Value::Int(cfg.priority as i32));
         map.insert("command".to_string(), Value::String(cfg.full_command()));
         map.insert("autostart".to_string(), Value::Boolean(cfg.autostart));
-        map.insert("startsecs".to_string(), Value::Int(cfg.start_secs as i32));
+        map.insert(
+            "startsecs".to_string(),
+            Value::Int(cfg.start_secs.as_secs() as i32),
+        );
         map.insert(
             "startretries".to_string(),
             Value::Int(cfg.start_retries as i32),
@@ -759,7 +762,7 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
         );
         map.insert(
             "stopwaitsecs".to_string(),
-            Value::Int(cfg.stop_wait_secs as i32),
+            Value::Int(cfg.stop_wait_secs.as_secs() as i32),
         );
         map.insert(
             "directory".to_string(),
@@ -804,8 +807,8 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
         let stdout_maxbytes = cfg
             .logs
             .max_bytes
-            .as_deref()
-            .and_then(|s| crate::logging::parse_byte_size(s).ok())
+            .as_ref()
+            .map(|b| b.bytes())
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         map.insert(
             "stdout_logfile_maxbytes".to_string(),

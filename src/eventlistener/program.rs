@@ -244,7 +244,7 @@ impl EventListenerActor {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     if let Some(mut c) = child_process.take() {
-                        self.stop_child(&mut c, Duration::from_secs(self.config.stop_wait_secs)).await;
+                        self.stop_child(&mut c, self.config.stop_wait_secs).await;
                     }
                     break;
                 }

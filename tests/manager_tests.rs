@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use std::time::Duration;
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
 use rsupervisord::program::{ProgramState, StopSignal};
@@ -236,7 +237,7 @@ fn test_config_example_yaml_parsing() {
         micro.restart_signal_when_file_changed,
         Some(StopSignal::Hup)
     );
-    assert_eq!(micro.restart_debounce_secs, 5);
+    assert_eq!(micro.restart_debounce_secs, Duration::from_secs(5));
 }
 
 #[tokio::test]

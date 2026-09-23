@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use std::time::Duration;
 use rsupervisord::config::schema::SupervisorConfig;
 use std::path::Path;
 
@@ -57,7 +58,7 @@ fn test_load_compat_supervisord_conf() {
                 .to_string_lossy()
                 .ends_with("logs\\supervisord.log")
     );
-    assert_eq!(config.logging.max_bytes.as_deref(), Some("5MB"));
+    assert_eq!(config.logging.max_bytes.as_ref().map(|b| b.raw()), Some("5MB"));
     assert_eq!(config.logging.backups, 3);
     assert_eq!(config.logging.level, "info");
 
@@ -119,11 +120,11 @@ fn test_load_compat_supervisord_conf() {
         ticker.stop_signal,
         rsupervisord::program::config::StopSignal::Term
     );
-    assert_eq!(ticker.stop_wait_secs, 5);
+    assert_eq!(ticker.stop_wait_secs, Duration::from_secs(5));
 
     // Echo program details
     let echo = resolved.get("echo").unwrap();
-    assert_eq!(echo.start_secs, 0);
+    assert_eq!(echo.start_secs, Duration::from_secs(0));
     assert_eq!(echo.exit_codes, vec![0]);
     assert!(echo.logs.redirect_stderr);
 
@@ -150,7 +151,7 @@ fn test_ini_chmod_maps_to_uds_chmod() {
     "#;
     let config = SupervisorConfig::from_ini_str(ini_str).expect("parse ini");
 
-    assert_eq!(config.server.uds_chmod.as_deref(), Some("0755"));
+    assert_eq!(config.server.uds_chmod.map(|m| m.mode()), Some(0o755));
     assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o755);
     assert_eq!(config.server.uds_username.as_deref(), Some("alice"));
 }
@@ -293,15 +294,15 @@ fn test_program_default_inheritance() {
         worker.autorestart,
         rsupervisord::program::config::AutoRestartPolicy::Always
     );
-    assert_eq!(worker.start_secs, 10);
+    assert_eq!(worker.start_secs, Duration::from_secs(10));
     assert_eq!(worker.start_retries, 5);
     assert_eq!(
         worker.stop_signal,
         rsupervisord::program::config::StopSignal::Int
     );
-    assert_eq!(worker.stop_wait_secs, 20);
+    assert_eq!(worker.stop_wait_secs, Duration::from_secs(20));
     assert_eq!(worker.priority, 300);
-    assert_eq!(worker.logs.max_bytes.as_deref(), Some("50MB"));
+    assert_eq!(worker.logs.max_bytes.as_ref().map(|b| b.raw()), Some("50MB"));
     assert_eq!(worker.logs.backups, Some(10));
 }
 

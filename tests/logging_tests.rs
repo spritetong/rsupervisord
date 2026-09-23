@@ -85,7 +85,7 @@ async fn test_process_stdout_capture_into_ring_buffer() {
     let mut config = ProgramConfig::new("echo_test", cmd);
     config.args = args;
     config.autorestart = AutoRestartPolicy::Never;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
@@ -143,12 +143,12 @@ async fn test_process_stdout_file_logging_and_rotation() {
     let mut config = ProgramConfig::new("rotate_test", cmd);
     config.args = args;
     config.autorestart = AutoRestartPolicy::Never;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.logs = ProgramLogsConfig {
         enabled: true,
         stdout: Some(stdout_log.clone()),
         stderr: None,
-        max_bytes: Some("25B".to_string()), // Low threshold to force rotation
+        max_bytes: Some(rsupervisord::serde_util::ByteSize::parse("25B").unwrap()), // Low threshold to force rotation
         backups: Some(3),
         redirect_stderr: true,
         stdout_events_enabled: false,
@@ -193,7 +193,7 @@ async fn test_process_live_log_subscription() {
     let mut config = ProgramConfig::new("live_sub_test", cmd);
     config.args = args;
     config.autorestart = AutoRestartPolicy::Never;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let program = ProcessProgram::new(config).unwrap();
     let mut rx = program.subscribe_logs();

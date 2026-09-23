@@ -758,8 +758,8 @@ impl SupervisorManagerBuilder {
 
         let activity_tracker = self.activity_tracker.unwrap_or_else(|| {
             crate::manager::ActivityTracker::with_interval(
-                self.config.metrics.idle_timeout_secs,
-                self.config.metrics.interval_secs,
+                self.config.metrics.idle_timeout_secs.as_secs(),
+                self.config.metrics.interval_secs.as_secs(),
                 self.config.metrics.enabled,
             )
         });
@@ -1271,8 +1271,8 @@ impl ManagerActor {
                 .configs
                 .get(name)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
-            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(name) {
                 prog.stop(period).await?;
             }
@@ -1321,8 +1321,8 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
-            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.stop(period).await?;
             }
@@ -1346,8 +1346,8 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
-            let period = grace_period.unwrap_or_else(|| Duration::from_secs(default_wait));
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.restart(period).await?;
             }
@@ -1389,8 +1389,8 @@ impl ManagerActor {
                     .configs
                     .get(name)
                     .map(|c| c.stop_wait_secs)
-                    .unwrap_or(DEFAULT_STOP_WAIT_SECS);
-                let dur = grace_period.unwrap_or_else(|| Duration::from_secs(wait_secs));
+                    .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+                let dur = grace_period.unwrap_or(wait_secs);
                 if let Some(prog) = self.programs.get(name) {
                     let state = prog.status().state;
                     if state != ProgramState::Stopped {
@@ -1443,7 +1443,7 @@ impl ManagerActor {
         for new_cfg in diff.modified {
             let name = &new_cfg.name;
             if let Some(prog) = self.programs.get_mut(name) {
-                let _ = prog.stop(Duration::from_secs(new_cfg.stop_wait_secs)).await;
+                let _ = prog.stop(new_cfg.stop_wait_secs).await;
                 let _ = prog.shutdown().await;
             }
 

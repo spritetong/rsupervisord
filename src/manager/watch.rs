@@ -330,7 +330,7 @@ impl WatchService {
         let platform = crate::platform::native_platform();
 
         for (name, cfg) in configs {
-            let debounce = Duration::from_secs(cfg.restart_debounce_secs);
+            let debounce = cfg.restart_debounce_secs;
 
             // 1. Binary change monitor
             if cfg.restart_when_binary_changed {

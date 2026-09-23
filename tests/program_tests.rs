@@ -73,8 +73,8 @@ async fn test_program_lifecycle_start_and_stop() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("test_sleep", cmd);
     config.args = args;
-    config.start_secs = 1;
-    config.stop_wait_secs = 3;
+    config.start_secs = Duration::from_secs(1);
+    config.stop_wait_secs = Duration::from_secs(3);
 
     let mut program = ProcessProgram::new(config).expect("Failed to create ProcessProgram");
     assert_eq!(program.status().state, ProgramState::Stopped);
@@ -112,7 +112,7 @@ async fn test_program_restart() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("test_restart", cmd);
     config.args = args;
-    config.start_secs = 0; // Transition to Running immediately
+    config.start_secs = Duration::from_secs(0); // Transition to Running immediately
 
     let mut program = ProcessProgram::new(config).expect("Failed to create ProcessProgram");
     program.start().await.expect("Failed to start program");
@@ -145,7 +145,7 @@ async fn test_program_restart_with_start_secs() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("test_restart_start_secs", cmd);
     config.args = args;
-    config.start_secs = 1;
+    config.start_secs = Duration::from_secs(1);
 
     let mut program = ProcessProgram::new(config).expect("Failed to create ProcessProgram");
     program.start().await.expect("Failed to start program");
@@ -191,7 +191,7 @@ async fn test_program_normal_exit_detection() {
     let (cmd, args) = get_exit_command(0);
     let mut config = ProgramConfig::new("test_normal_exit", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.autorestart = AutoRestartPolicy::Unexpected; // Do not restart on expected exit
     config.exit_codes = vec![0];
 
@@ -218,7 +218,7 @@ async fn test_program_trait_object_safety() {
     let (cmd, args) = get_sleep_command(5);
     let mut config = ProgramConfig::new("test_dyn", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let program: Box<dyn Program> = Box::new(ProcessProgram::new(config).expect("create"));
     assert_eq!(program.name(), "test_dyn");
@@ -233,8 +233,8 @@ async fn test_unix_process_group_cleanup() {
     let script = "sleep 10 & wait";
     let mut config = ProgramConfig::new("test_pgid_tree", "sh");
     config.args = vec!["-c".to_string(), script.to_string()];
-    config.start_secs = 0;
-    config.stop_wait_secs = 2;
+    config.start_secs = Duration::from_secs(0);
+    config.stop_wait_secs = Duration::from_secs(2);
 
     let mut program = ProcessProgram::new(config).expect("create");
     program.start().await.expect("start");
@@ -274,7 +274,7 @@ async fn test_grandchild_pipe_retention_bounded_drain() {
 
     let mut config = ProgramConfig::new("grandchild_pipe", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.autorestart = AutoRestartPolicy::Never;
 
     let mut program = ProcessProgram::new(config).expect("create");
@@ -308,7 +308,7 @@ async fn test_backoff_stop_cancellation() {
     let (cmd, args) = get_exit_command(1);
     let mut config = ProgramConfig::new("backoff_cancel", cmd);
     config.args = args;
-    config.start_secs = 3;
+    config.start_secs = Duration::from_secs(3);
     config.start_retries = 3;
     config.autorestart = AutoRestartPolicy::Never;
 
@@ -343,7 +343,7 @@ async fn test_autorestart_never_startup_retries() {
     let (cmd, args) = get_exit_command(1);
     let mut config = ProgramConfig::new("retry_never", cmd);
     config.args = args;
-    config.start_secs = 2;
+    config.start_secs = Duration::from_secs(2);
     config.start_retries = 1;
     config.autorestart = AutoRestartPolicy::Never;
 
@@ -371,7 +371,7 @@ async fn test_program_no_restart_during_shutdown_or_stop() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("test_always_no_restart", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.autorestart = AutoRestartPolicy::Always; // Even with Always policy!
 
     let mut program = ProcessProgram::new(config).expect("create");
@@ -398,7 +398,7 @@ async fn test_program_backoff_cancelled_on_shutdown() {
     let (cmd, args) = get_exit_command(1);
     let mut config = ProgramConfig::new("backoff_shutdown", cmd);
     config.args = args;
-    config.start_secs = 3;
+    config.start_secs = Duration::from_secs(3);
     config.start_retries = 3;
     config.autorestart = AutoRestartPolicy::Always;
 
@@ -435,7 +435,7 @@ async fn test_pre_start_hook_success_and_marker() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("pre_start_ok_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let hook = format!("echo ok > \"{}\"", marker.display());
     config.pre_start = Some(hook);
@@ -455,7 +455,7 @@ async fn test_pre_start_hook_failure_blocks_start() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("pre_start_fail_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.pre_start = Some(get_hook_exit_command(1));
     config.pre_start_ignore_failure = false;
 
@@ -475,7 +475,7 @@ async fn test_pre_start_hook_failure_degradation_ignored() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("pre_start_degrade_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
     config.pre_start = Some(get_hook_exit_command(1));
     config.pre_start_ignore_failure = true; // Degrade gracefully
 
@@ -499,7 +499,7 @@ async fn test_pre_stop_hook_executed_and_failure_degradation() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("pre_stop_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let hook = format!("echo stopped > \"{}\"", marker.display());
     config.pre_stop = Some(hook);
@@ -519,7 +519,7 @@ async fn test_pre_stop_hook_executed_and_failure_degradation() {
     let (cmd2, args2) = get_sleep_command(10);
     let mut config2 = ProgramConfig::new("pre_stop_fail_test", cmd2);
     config2.args = args2;
-    config2.start_secs = 0;
+    config2.start_secs = Duration::from_secs(0);
     config2.pre_stop = Some(get_hook_exit_command(42));
 
     let mut program2 = ProcessProgram::new(config2).expect("create");
@@ -542,7 +542,7 @@ async fn test_process_send_stdin_success_echo() {
     let (cmd, args) = get_stdin_echo_command();
     let mut config = ProgramConfig::new("stdin_echo_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let mut program = ProcessProgram::new(config).expect("create");
     program.start().await.expect("start");
@@ -576,7 +576,7 @@ async fn test_process_send_stdin_not_running() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("stdin_stopped_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let program = ProcessProgram::new(config).expect("create");
     // Program is not started yet
@@ -592,7 +592,7 @@ async fn test_process_send_stdin_fresh_pipe_after_restart() {
     let (cmd, args) = get_sleep_command(10);
     let mut config = ProgramConfig::new("stdin_restart_test", cmd);
     config.args = args;
-    config.start_secs = 0;
+    config.start_secs = Duration::from_secs(0);
 
     let mut program = ProcessProgram::new(config).expect("create");
     program.start().await.expect("start");

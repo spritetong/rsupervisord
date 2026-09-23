@@ -285,7 +285,7 @@ impl Program for ProcessProgram {
             .await
             .is_ok()
         {
-            let timeout_dur = Duration::from_secs(self.config.stop_wait_secs + 2);
+            let timeout_dur = self.config.stop_wait_secs + std::time::Duration::from_secs(2);
             let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
         }
         self.cancel_token.cancel();
@@ -541,12 +541,12 @@ impl ProgramActor {
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
 
-        let max_bytes = match &config.logs.max_bytes {
-            Some(s) => {
-                crate::logging::parse_byte_size(s).unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
-            }
-            None => crate::consts::DEFAULT_LOG_MAX_BYTES,
-        };
+        let max_bytes = config
+            .logs
+            .max_bytes
+            .as_ref()
+            .map(|b| b.bytes())
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         let backups = config
             .logs
             .backups
@@ -639,7 +639,7 @@ impl ProgramActor {
                     self.is_shutting_down = true;
                     self.manual_stop = true;
                     self.backoff_deadline = None;
-                    self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
+                                self.stop_current_child(self.config.stop_wait_secs).await;
                     break;
                 }
 
@@ -651,10 +651,9 @@ impl ProgramActor {
                             .as_ref()
                             .map(|c| c.marked_running)
                             .unwrap_or(false);
-                        if !marked_running && self.config.start_secs > 0 {
+                        if !marked_running && !self.config.start_secs.is_zero() {
                             start_deadline = Some(
-                                tokio::time::Instant::now()
-                                    + Duration::from_secs(self.config.start_secs),
+                                tokio::time::Instant::now() + self.config.start_secs,
                             );
                         } else {
                             start_deadline = None;
@@ -706,7 +705,7 @@ impl ProgramActor {
                                     program = %self.config.name,
                                     "Program health check failed consecutively; restarting child process"
                                 );
-                                self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs)).await;
+                    self.stop_current_child(self.config.stop_wait_secs).await;
                                 if let Err(e) = self.spawn_child().await {
                                     tracing::error!(program = %self.config.name, error = %e, "Failed to restart child after health check failure");
                                     start_deadline = None;
@@ -716,8 +715,8 @@ impl ProgramActor {
                                         None,
                                         format!("Health check restart failed: {}", e),
                                     );
-                                } else if self.config.start_secs > 0 {
-                                    start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                                } else if !self.config.start_secs.is_zero() {
+                                    start_deadline = Some(tokio::time::Instant::now() + self.config.start_secs);
                                 } else {
                                     start_deadline = None;
                                 }
@@ -743,8 +742,8 @@ impl ProgramActor {
                             None,
                             format!("Spawn failed after backoff: {}", e),
                         );
-                    } else if self.config.start_secs > 0 {
-                        start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                    } else if !self.config.start_secs.is_zero() {
+                        start_deadline = Some(tokio::time::Instant::now() + self.config.start_secs);
                     }
                 }
 
@@ -765,8 +764,8 @@ impl ProgramActor {
                 }, if has_child => {
                     start_deadline = None;
                     let restarted = self.handle_child_exit(exit_res).await;
-                    if restarted && self.config.start_secs > 0 {
-                        start_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(self.config.start_secs));
+                    if restarted && !self.config.start_secs.is_zero() {
+                        start_deadline = Some(tokio::time::Instant::now() + self.config.start_secs);
                     }
                 }
 
@@ -840,7 +839,7 @@ impl ProgramActor {
                 self.is_shutting_down = true;
                 self.manual_stop = true;
                 self.backoff_deadline = None;
-                self.stop_current_child(Duration::from_secs(self.config.stop_wait_secs))
+                self.stop_current_child(self.config.stop_wait_secs)
                     .await;
                 let _ = reply.send(Ok(()));
                 self.cancel_token.cancel();
@@ -895,7 +894,7 @@ impl ProgramActor {
                     command: hook.clone(),
                 });
 
-            let timeout_dur = Duration::from_secs(self.config.hook_timeout_secs);
+            let timeout_dur = self.config.hook_timeout_secs;
             if let Err(err) = self.run_hook(hook, timeout_dur).await {
                 self.event_hub
                     .publish_system(crate::manager::SystemEvent::ProcessPreStartFailed {
@@ -1054,7 +1053,7 @@ impl ProgramActor {
             crate::program::state::HealthStatus::None
         };
 
-        let marked_running = self.config.start_secs == 0;
+        let marked_running = self.config.start_secs.is_zero();
         let initial_state = if marked_running {
             ProgramState::Running
         } else {
@@ -1115,7 +1114,7 @@ impl ProgramActor {
                         command: hook.clone(),
                     });
 
-                let timeout_dur = Duration::from_secs(self.config.hook_timeout_secs);
+                let timeout_dur = self.config.hook_timeout_secs;
                 if let Err(err) = self.run_hook(hook, timeout_dur).await {
                     self.event_hub.publish_system(
                         crate::manager::SystemEvent::ProcessPreStopFailed {
