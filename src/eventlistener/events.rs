@@ -6,19 +6,6 @@
 
 use crate::program::state::ProgramState;
 
-/// Converts a `ProgramState` enum into its standard supervisor state string.
-pub fn state_to_supervisor_name(state: ProgramState) -> &'static str {
-    match state {
-        ProgramState::Stopped => "STOPPED",
-        ProgramState::Starting => "STARTING",
-        ProgramState::Running => "RUNNING",
-        ProgramState::Backoff => "BACKOFF",
-        ProgramState::Stopping => "STOPPING",
-        ProgramState::Exited => "EXITED",
-        ProgramState::Fatal => "FATAL",
-    }
-}
-
 /// Generates the standard supervisor event name and payload for a process state transition.
 pub fn format_process_state_event(
     process_name: &str,
@@ -29,7 +16,7 @@ pub fn format_process_state_event(
     expected: bool,
     tries: u32,
 ) -> (&'static str, String) {
-    let from_state = state_to_supervisor_name(old_state);
+    let from_state = old_state.supervisor_name();
     let effective_pid = pid.unwrap_or(0);
 
     match new_state {

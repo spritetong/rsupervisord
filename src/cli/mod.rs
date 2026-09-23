@@ -217,8 +217,8 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
         CliCommand::Update { names } => commands::handle_update(&client, &names).await?,
         CliCommand::Pid { names } => commands::handle_pid(&client, &names).await?,
         CliCommand::Shutdown => commands::handle_shutdown(&client).await?,
-        CliCommand::Version => commands::handle_version().await?,
-        CliCommand::Help { command } => commands::handle_help(command.as_deref(), bin_name).await?,
+        CliCommand::Version => commands::handle_version()?,
+        CliCommand::Help { command } => commands::handle_help(command.as_deref(), bin_name)?,
         CliCommand::Signal { signal, names } => {
             commands::handle_signal(&client, &signal, &names).await?
         }
@@ -240,7 +240,7 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
         CliCommand::Clear { names } => commands::handle_clear(&client, &names).await?,
         CliCommand::Add { names } => commands::handle_add(&client, &names).await?,
         CliCommand::Remove { names } => commands::handle_remove(&client, &names).await?,
-        CliCommand::Open { url } => commands::handle_open(&client, &url).await?,
+        CliCommand::Open { url } => commands::handle_open(&client, &url)?,
         CliCommand::Fg { name } => commands::handle_fg(&client, &name).await?,
         CliCommand::Events => commands::handle_events(&client).await?,
         CliCommand::Stdin { name, chars } => commands::handle_stdin(&client, &name, &chars).await?,

@@ -10,9 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 /// Strongly-typed system lifecycle and status mutation events.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum SystemEvent {
     /// Fired whenever a managed program transitions across states.

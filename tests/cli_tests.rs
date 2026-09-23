@@ -106,29 +106,22 @@ fn test_cli_args_parsing() {
     assert!(CliArgs::try_parse_from(["supervisorctl", "service"]).is_err());
 }
 
-#[tokio::test]
-async fn test_cli_help_bridges_to_clap() {
+#[test]
+fn test_cli_help_bridges_to_clap() {
     // Bare `help` renders the full command surface derived from CliArgs.
-    let code = rsupervisord::cli::commands::handle_help(None, None)
-        .await
-        .unwrap();
+    let code = rsupervisord::cli::commands::handle_help(None, None).unwrap();
     assert_eq!(code, 0);
 
     // Per-command help, including alias-only names, with a bin_name override
     // (the `supervisord ctl ...` invocation form).
-    let code = rsupervisord::cli::commands::handle_help(Some("status"), Some("supervisord ctl"))
-        .await
-        .unwrap();
+    let code =
+        rsupervisord::cli::commands::handle_help(Some("status"), Some("supervisord ctl")).unwrap();
     assert_eq!(code, 0);
-    let code = rsupervisord::cli::commands::handle_help(Some("send-stdin"), None)
-        .await
-        .unwrap();
+    let code = rsupervisord::cli::commands::handle_help(Some("send-stdin"), None).unwrap();
     assert_eq!(code, 0);
 
     // Unknown command reports an error exit code (wording is UX, not asserted).
-    let code = rsupervisord::cli::commands::handle_help(Some("no-such-cmd"), None)
-        .await
-        .unwrap();
+    let code = rsupervisord::cli::commands::handle_help(Some("no-such-cmd"), None).unwrap();
     assert_eq!(code, 1);
 }
 

@@ -12,21 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Default,
-    strum::EnumString,
-    strum::Display,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
-    strum::EnumIter,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, strum::EnumString)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum AutoRestartPolicy {
@@ -49,18 +35,7 @@ impl AutoRestartPolicy {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    strum::EnumString,
-    strum::Display,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
-    strum::EnumIter,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
 )]
 #[strum(serialize_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]

@@ -7,21 +7,7 @@
 use crate::platform::traits::ProcessMetrics;
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Default,
-    strum::EnumString,
-    strum::Display,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
-    strum::EnumIter,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, strum::Display)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HealthStatus {
@@ -54,18 +40,7 @@ impl HealthStatus {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    strum::EnumString,
-    strum::Display,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
-    strum::EnumIter,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -80,6 +55,12 @@ pub enum ProgramState {
 }
 
 impl ProgramState {
+    /// Returns the standard supervisor state name (e.g. `RUNNING`, `STOPPED`).
+    #[inline]
+    pub fn supervisor_name(self) -> &'static str {
+        self.into()
+    }
+
     /// Returns true if the process is in an active lifecycle state (Starting, Running, Stopping).
     #[inline]
     pub fn is_active(&self) -> bool {

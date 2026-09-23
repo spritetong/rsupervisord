@@ -602,7 +602,7 @@ pub async fn handle_shutdown(client: &SupervisorClient) -> Result<i32> {
 }
 
 /// Executes the 'version' command.
-pub async fn handle_version() -> Result<i32> {
+pub fn handle_version() -> Result<i32> {
     println!("supervisorctl 0.1.0 (protocol supervisor 4.2.5)");
     Ok(0)
 }
@@ -611,7 +611,7 @@ pub async fn handle_version() -> Result<i32> {
 /// pipeline (catching the `DisplayHelp` short-circuit instead of exiting), so
 /// output is byte-identical to `<bin> [--help|-h]` and the command surface is
 /// defined once in `CliArgs` (see `CLI_COMPAT.md` §6.1.1).
-pub async fn handle_help(command: Option<&str>, bin_name: Option<&str>) -> Result<i32> {
+pub fn handle_help(command: Option<&str>, bin_name: Option<&str>) -> Result<i32> {
     let mut probe = CliArgs::command();
     if let Some(b) = bin_name {
         probe = probe.bin_name(b);
@@ -833,7 +833,7 @@ pub async fn handle_remove(client: &SupervisorClient, names: &[String]) -> Resul
 }
 
 /// Executes the 'open' command.
-pub async fn handle_open(_client: &SupervisorClient, url: &str) -> Result<i32> {
+pub fn handle_open(_client: &SupervisorClient, url: &str) -> Result<i32> {
     println!("Session server URL changed to: {}", url.cyan());
     Ok(0)
 }
