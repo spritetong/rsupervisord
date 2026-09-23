@@ -4,10 +4,10 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use std::time::Duration;
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
 use rsupervisord::program::{ProgramState, StopSignal};
+use std::time::Duration;
 
 fn get_sleep_cmd(secs: u64) -> String {
     #[cfg(unix)]

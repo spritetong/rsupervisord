@@ -908,7 +908,9 @@ pub async fn handle_maintail(
         let xml = client.call_xmlrpc("supervisor.readLog", &param).await?;
         let text = extract_xml_tag(&xml, "string").unwrap_or_default();
         if text.is_empty() {
-            let log_lines = client.read_logs("all", lines.unwrap_or(DEFAULT_LOG_LINES)).await?;
+            let log_lines = client
+                .read_logs("all", lines.unwrap_or(DEFAULT_LOG_LINES))
+                .await?;
             for l in log_lines {
                 println!("{}", l);
             }

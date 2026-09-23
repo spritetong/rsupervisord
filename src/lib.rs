@@ -16,8 +16,8 @@ pub mod logging;
 pub mod manager;
 pub mod platform;
 pub mod program;
-pub mod server;
 pub mod serde_util;
+pub mod server;
 pub mod service;
 
 pub use config::{ConfigDiff, StringExpression, SupervisorConfig};

@@ -147,8 +147,8 @@ pub struct ProgramLogsConfig {
     pub stdout: Option<PathBuf>,
     #[serde(default)]
     pub stderr: Option<PathBuf>,
-    #[serde(default)]
-    pub max_bytes: Option<crate::serde_util::ByteSize>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub max_bytes: Option<usize>,
     #[serde(default)]
     pub backups: Option<usize>,
     #[serde(default)]
@@ -434,11 +434,7 @@ impl ProgramConfig {
                 self.name
             )));
         }
-        if let Some(ref mb) = self.logs.max_bytes {
-            // Already parsed at the serde boundary; keep a cheap re-check for
-            // programmatically-built configs that bypass deserialize.
-            let _ = mb.bytes();
-        }
+
         if let Some(ref expr) = self.cron
             && let Err(e) = expr.parse::<croner::Cron>()
         {

@@ -37,10 +37,10 @@ fn parse_opt_duration(
 fn parse_opt_bytesize(
     map: &HashMap<String, String>,
     keys: &[&str],
-) -> Result<Option<crate::serde_util::ByteSize>, ProgramError> {
+) -> Result<Option<usize>, ProgramError> {
     keys.iter()
         .find_map(|k| map.get(*k))
-        .map(|s| crate::serde_util::ByteSize::parse(s))
+        .map(|s| crate::logging::parse_byte_size(s))
         .transpose()
 }
 
@@ -95,7 +95,7 @@ pub fn adapt_ini_to_config(
             }
         }
         if let Some(maxbytes) = sec.get("logfile_maxbytes") {
-            config.logging.max_bytes = Some(crate::serde_util::ByteSize::parse(maxbytes)?);
+            config.logging.max_bytes = Some(crate::logging::parse_byte_size(maxbytes)?);
         }
         if let Some(backups_str) = sec.get("logfile_backups")
             && let Ok(backups) = backups_str.parse::<usize>()
@@ -250,12 +250,13 @@ fn parse_program_config(
         .map(|s| parse_stop_signal(s))
         .transpose()?;
 
-    let stop_wait_secs = parse_opt_duration(sec, &["stopwaitsecs", "stop_wait_secs"]).map_err(|e| {
-        ProgramError::ConfigError(format!(
-            "Program '{}' invalid stopwaitsecs: {}",
-            prog_name, e
-        ))
-    })?;
+    let stop_wait_secs =
+        parse_opt_duration(sec, &["stopwaitsecs", "stop_wait_secs"]).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "Program '{}' invalid stopwaitsecs: {}",
+                prog_name, e
+            ))
+        })?;
 
     let directory = sec.get("directory").map(PathBuf::from);
     let user = sec.get("user").cloned();
@@ -730,8 +731,8 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
             .map(|s| parse_stop_signal(s))
             .transpose()?,
         restart_cmd_when_file_changed: sec.get("restart_cmd_when_file_changed").cloned(),
-        restart_debounce_secs: parse_opt_duration(sec, &["restart_debounce_secs"]).map_err(|e| {
-            ProgramError::ConfigError(format!("Invalid default restart_debounce_secs: {}", e))
-        })?,
+        restart_debounce_secs: parse_opt_duration(sec, &["restart_debounce_secs"]).map_err(
+            |e| ProgramError::ConfigError(format!("Invalid default restart_debounce_secs: {}", e)),
+        )?,
     })
 }

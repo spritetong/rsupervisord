@@ -63,73 +63,148 @@ pub mod option_duration_secs {
 }
 
 // ---------------------------------------------------------------------------
-// ByteSize: human string on the wire, parsed bytes at runtime
+// Byte size ↔ human-readable string (wire: "50MB", "10KB", "25B")
 // ---------------------------------------------------------------------------
 
-/// Log-size threshold parsed from a human string (`"50MB"`) and round-tripped
-/// back to the original spelling so config JSON stays a string.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ByteSize {
-    bytes: usize,
-    raw: String,
-}
+/// Serializes/deserializes a numeric byte size `usize` as a canonical
+/// human-readable string on the wire (e.g. `"50MB"`, `"10KB"`), while accepting
+/// both strings and plain integer byte counts during deserialization.
+pub mod byte_size {
+    use super::*;
+    use serde::{Deserializer, Serializer, de};
 
-impl ByteSize {
-    pub fn new(bytes: usize, raw: impl Into<String>) -> Self {
-        Self {
-            bytes,
-            raw: raw.into(),
-        }
-    }
-
-    /// Parses a human-readable size (`"50MB"`, `"10KB"`, `"1024"`).
-    pub fn parse(s: &str) -> Result<Self, ProgramError> {
-        let bytes = crate::logging::parse_byte_size(s)?;
-        Ok(Self::new(bytes, s.trim().to_string()))
-    }
-
-    #[inline]
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
-
-    #[inline]
-    pub fn raw(&self) -> &str {
-        &self.raw
-    }
-}
-
-impl From<usize> for ByteSize {
-    fn from(bytes: usize) -> Self {
-        Self {
-            bytes,
-            raw: bytes.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for ByteSize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.raw)
-    }
-}
-
-impl Serialize for ByteSize {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.raw)
+        serializer.serialize_str(&crate::logging::format_byte_size(*value))
     }
-}
 
-impl<'de> Deserialize<'de> for ByteSize {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<usize, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        ByteSize::parse(&s).map_err(de::Error::custom)
+        struct ByteSizeVisitor;
+
+        impl<'de> de::Visitor<'de> for ByteSizeVisitor {
+            type Value = usize;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a byte size string (e.g. '50MB') or an integer byte count")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                crate::logging::parse_byte_size(v).map_err(de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(v as usize)
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("byte size cannot be negative"));
+                }
+                Ok(v as usize)
+            }
+        }
+
+        deserializer.deserialize_any(ByteSizeVisitor)
+    }
+}
+
+/// Serde helpers for `Option<usize>` byte size fields: absent stays `None`,
+/// present values are serialized as canonical human-readable strings and
+/// deserialized from strings (`"50MB"`, `"10KB"`) or raw integers.
+pub mod option_byte_size {
+    use super::*;
+    use serde::{Deserializer, Serializer, de};
+
+    pub fn serialize<S>(value: &Option<usize>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => serializer.serialize_str(&crate::logging::format_byte_size(*bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OptionByteSizeVisitor;
+
+        impl<'de> de::Visitor<'de> for OptionByteSizeVisitor {
+            type Value = Option<usize>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an optional byte size string (e.g. '50MB') or integer byte count")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                crate::logging::parse_byte_size(trimmed)
+                    .map(Some)
+                    .map_err(de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Some(v as usize))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v < 0 {
+                    return Err(de::Error::custom("byte size cannot be negative"));
+                }
+                Ok(Some(v as usize))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+        }
+
+        deserializer.deserialize_option(OptionByteSizeVisitor)
     }
 }
 
@@ -214,8 +289,62 @@ where
     match value {
         None => Ok(None),
         Some(s) if s.trim().is_empty() => Ok(None),
-        Some(s) => ChmodMode::parse(&s)
-            .map(Some)
-            .map_err(de::Error::custom),
+        Some(s) => ChmodMode::parse(&s).map(Some).map_err(de::Error::custom),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct DummyConfig {
+        #[serde(default, with = "option_byte_size")]
+        max_bytes: Option<usize>,
+    }
+
+    #[test]
+    fn test_option_byte_size_serde_round_trip() {
+        // String deserialization
+        let json_input = r#"{"max_bytes":"50MB"}"#;
+        let parsed: DummyConfig = serde_json::from_str(json_input).unwrap();
+        assert_eq!(parsed.max_bytes, Some(50 * 1024 * 1024));
+
+        // Serialization perfectly restores canonical string
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(reserialized, r#"{"max_bytes":"50MB"}"#);
+
+        // Numeric deserialization also works
+        let num_input = r#"{"max_bytes":52428800}"#;
+        let parsed_num: DummyConfig = serde_json::from_str(num_input).unwrap();
+        assert_eq!(parsed_num.max_bytes, Some(50 * 1024 * 1024));
+        assert_eq!(
+            serde_json::to_string(&parsed_num).unwrap(),
+            r#"{"max_bytes":"50MB"}"#
+        );
+
+        // Small byte sizes
+        let small_input = r#"{"max_bytes":"25B"}"#;
+        let parsed_small: DummyConfig = serde_json::from_str(small_input).unwrap();
+        assert_eq!(parsed_small.max_bytes, Some(25));
+        assert_eq!(
+            serde_json::to_string(&parsed_small).unwrap(),
+            r#"{"max_bytes":"25B"}"#
+        );
+
+        // None / null handling
+        let null_input = r#"{"max_bytes":null}"#;
+        let parsed_null: DummyConfig = serde_json::from_str(null_input).unwrap();
+        assert_eq!(parsed_null.max_bytes, None);
+        assert_eq!(
+            serde_json::to_string(&parsed_null).unwrap(),
+            r#"{"max_bytes":null}"#
+        );
+
+        // Absent field
+        let empty_input = r#"{}"#;
+        let parsed_empty: DummyConfig = serde_json::from_str(empty_input).unwrap();
+        assert_eq!(parsed_empty.max_bytes, None);
     }
 }

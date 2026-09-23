@@ -544,8 +544,6 @@ impl ProgramActor {
         let max_bytes = config
             .logs
             .max_bytes
-            .as_ref()
-            .map(|b| b.bytes())
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         let backups = config
             .logs
@@ -839,8 +837,7 @@ impl ProgramActor {
                 self.is_shutting_down = true;
                 self.manual_stop = true;
                 self.backoff_deadline = None;
-                self.stop_current_child(self.config.stop_wait_secs)
-                    .await;
+                self.stop_current_child(self.config.stop_wait_secs).await;
                 let _ = reply.send(Ok(()));
                 self.cancel_token.cancel();
             }

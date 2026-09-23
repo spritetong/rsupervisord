@@ -807,8 +807,6 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
         let stdout_maxbytes = cfg
             .logs
             .max_bytes
-            .as_ref()
-            .map(|b| b.bytes())
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         map.insert(
             "stdout_logfile_maxbytes".to_string(),

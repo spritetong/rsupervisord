@@ -10,4 +10,4 @@ pub mod rotator;
 
 pub use pump::{LogPumpBuilder, spawn_log_pump};
 pub use ring_buffer::RingBuffer;
-pub use rotator::{LogRotator, parse_byte_size};
+pub use rotator::{LogRotator, format_byte_size, parse_byte_size};

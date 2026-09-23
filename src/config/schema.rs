@@ -44,7 +44,11 @@ pub struct ServerConfig {
     /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
     /// `0o770` on Windows (owner + Administrators) or `0o700` on Unix, or
     /// `0o777` when `allow_unelevated` is true so local CLI can connect.
-    #[serde(default, alias = "chmod", deserialize_with = "crate::serde_util::optional_chmod")]
+    #[serde(
+        default,
+        alias = "chmod",
+        deserialize_with = "crate::serde_util::optional_chmod"
+    )]
     pub uds_chmod: Option<crate::serde_util::ChmodMode>,
     #[serde(default)]
     pub uds_username: Option<String>,
@@ -118,7 +122,10 @@ impl ServerConfig {
     /// `allow_unelevated` is set, else `0o770` on Windows (owner + Administrators)
     /// or `0o700` on Unix. Fails on invalid octal input.
     pub fn resolved_uds_chmod(&self) -> Result<u32, ProgramError> {
-        Ok(self.uds_chmod.map(|m| m.mode()).unwrap_or_else(|| self.default_uds_chmod()))
+        Ok(self
+            .uds_chmod
+            .map(|m| m.mode())
+            .unwrap_or_else(|| self.default_uds_chmod()))
     }
 
     fn default_uds_chmod(&self) -> u32 {
@@ -163,8 +170,8 @@ pub struct LoggingConfig {
     pub file: Option<PathBuf>,
     #[serde(default = "default_log_level")]
     pub level: String,
-    #[serde(default)]
-    pub max_bytes: Option<crate::serde_util::ByteSize>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub max_bytes: Option<usize>,
     #[serde(default = "usize_value::<DEFAULT_LOG_BACKUPS>")]
     pub backups: usize,
 }
@@ -202,10 +209,7 @@ impl Default for LoggingConfig {
             enabled: true,
             file: None,
             level: default_log_level(),
-            max_bytes: Some(crate::serde_util::ByteSize::new(
-                DEFAULT_LOG_MAX_BYTES,
-                DEFAULT_LOG_MAX_BYTES_HUMAN,
-            )),
+            max_bytes: Some(DEFAULT_LOG_MAX_BYTES),
             backups: DEFAULT_LOG_BACKUPS,
         }
     }
@@ -275,8 +279,8 @@ pub struct ProgramLogsConfigRaw {
     pub stdout: Option<PathBuf>,
     #[serde(default)]
     pub stderr: Option<PathBuf>,
-    #[serde(default)]
-    pub max_bytes: Option<crate::serde_util::ByteSize>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub max_bytes: Option<usize>,
     #[serde(default)]
     pub backups: Option<usize>,
     #[serde(default)]
@@ -546,8 +550,8 @@ impl SupervisorConfig {
                     name
                 )));
             }
-            let priority = inherit!(raw, self.program_defaults, priority)
-                .unwrap_or(DEFAULT_PRIORITY);
+            let priority =
+                inherit!(raw, self.program_defaults, priority).unwrap_or(DEFAULT_PRIORITY);
             if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 999]",
@@ -653,8 +657,7 @@ impl SupervisorConfig {
 
         for (base_name, raw) in &self.programs {
             let numprocs = inherit!(raw, self.program_defaults, numprocs).unwrap_or(1);
-            let numprocs_start =
-                inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
+            let numprocs_start = inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
             let process_name_template = inherit_ref!(raw, self.program_defaults, process_name);
 
             let group = if let Some(ref g) = raw.group {
@@ -704,11 +707,10 @@ impl SupervisorConfig {
 
         for (base_name, raw) in &self.programs {
             let numprocs = inherit!(raw, self.program_defaults, numprocs).unwrap_or(1);
-            let numprocs_start =
-                inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
+            let numprocs_start = inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
 
-            let priority = inherit!(raw, self.program_defaults, priority)
-                .unwrap_or(DEFAULT_PRIORITY);
+            let priority =
+                inherit!(raw, self.program_defaults, priority).unwrap_or(DEFAULT_PRIORITY);
             if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' priority {} must be in range [0, 999]",
@@ -716,16 +718,16 @@ impl SupervisorConfig {
                 )));
             }
 
-            let autostart = inherit!(raw, self.program_defaults, autostart)
-                .unwrap_or(raw.cron.is_none());
+            let autostart =
+                inherit!(raw, self.program_defaults, autostart).unwrap_or(raw.cron.is_none());
 
             let autorestart = inherit!(raw, self.program_defaults, autorestart).unwrap_or_default();
 
             let start_secs = inherit!(raw, self.program_defaults, start_secs)
                 .unwrap_or_else(|| Duration::from_secs(DEFAULT_START_SECS));
 
-            let start_retries =
-                inherit!(raw, self.program_defaults, start_retries).unwrap_or(DEFAULT_START_RETRIES);
+            let start_retries = inherit!(raw, self.program_defaults, start_retries)
+                .unwrap_or(DEFAULT_START_RETRIES);
 
             let stop_signal = inherit!(raw, self.program_defaults, stop_signal).unwrap_or_default();
 
@@ -872,8 +874,8 @@ impl SupervisorConfig {
                     };
 
                     let max_bytes = raw_logs
-                        .and_then(|l| l.max_bytes.clone())
-                        .or_else(|| def_logs.and_then(|l| l.max_bytes.clone()));
+                        .and_then(|l| l.max_bytes)
+                        .or_else(|| def_logs.and_then(|l| l.max_bytes));
 
                     let backups = raw_logs
                         .and_then(|l| l.backups)
@@ -939,32 +941,35 @@ impl SupervisorConfig {
                 };
 
                 // Evaluate hooks
-                let pre_start = if let Some(hook) =
-                    inherit_ref!(raw, self.program_defaults, pre_start)
-                {
-                    Some(
-                        expr.eval_named(hook, "pre_start")
-                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
-                    )
-                } else {
-                    None
-                };
+                let pre_start =
+                    if let Some(hook) = inherit_ref!(raw, self.program_defaults, pre_start) {
+                        Some(
+                            expr.eval_named(hook, "pre_start")
+                                .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
 
-                let pre_stop = if let Some(hook) = inherit_ref!(raw, self.program_defaults, pre_stop)
-                {
-                    Some(
-                        expr.eval_named(hook, "pre_stop")
-                            .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
-                    )
-                } else {
-                    None
-                };
+                let pre_stop =
+                    if let Some(hook) = inherit_ref!(raw, self.program_defaults, pre_stop) {
+                        Some(
+                            expr.eval_named(hook, "pre_stop")
+                                .map_err(|e| ProgramError::ConfigError(e.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
 
                 let restart_when_binary_changed =
-                    inherit!(raw, self.program_defaults, restart_when_binary_changed).unwrap_or(false);
+                    inherit!(raw, self.program_defaults, restart_when_binary_changed)
+                        .unwrap_or(false);
 
-                let restart_signal_when_binary_changed =
-                    inherit!(raw, self.program_defaults, restart_signal_when_binary_changed);
+                let restart_signal_when_binary_changed = inherit!(
+                    raw,
+                    self.program_defaults,
+                    restart_signal_when_binary_changed
+                );
 
                 let restart_cmd_when_binary_changed = if let Some(cmd) =
                     inherit_ref!(raw, self.program_defaults, restart_cmd_when_binary_changed)
@@ -1005,8 +1010,9 @@ impl SupervisorConfig {
                     None
                 };
 
-                let restart_debounce_secs = inherit!(raw, self.program_defaults, restart_debounce_secs)
-                    .unwrap_or_else(|| Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS));
+                let restart_debounce_secs =
+                    inherit!(raw, self.program_defaults, restart_debounce_secs)
+                        .unwrap_or_else(|| Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS));
 
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
@@ -1555,10 +1561,7 @@ server:
 programs: {}
 "#;
         let config = SupervisorConfig::from_yaml_str(yaml).expect("valid yaml");
-        assert_eq!(
-            config.server.uds_chmod.map(|m| m.mode()),
-            Some(0o750)
-        );
+        assert_eq!(config.server.uds_chmod.map(|m| m.mode()), Some(0o750));
         assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o750);
 
         // Quoted string form (primary field name)

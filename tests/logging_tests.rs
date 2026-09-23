@@ -148,7 +148,7 @@ async fn test_process_stdout_file_logging_and_rotation() {
         enabled: true,
         stdout: Some(stdout_log.clone()),
         stderr: None,
-        max_bytes: Some(rsupervisord::serde_util::ByteSize::parse("25B").unwrap()), // Low threshold to force rotation
+        max_bytes: Some(25), // Low threshold to force rotation
         backups: Some(3),
         redirect_stderr: true,
         stdout_events_enabled: false,

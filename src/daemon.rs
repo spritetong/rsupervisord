@@ -147,8 +147,6 @@ impl SupervisorDaemon {
                 let max_bytes = config
                     .logging
                     .max_bytes
-                    .as_ref()
-                    .map(|b| b.bytes())
                     .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
                 let file_rotator = file_rotate::FileRotate::new(
                     log_file,

@@ -4,9 +4,9 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use std::time::Duration;
 use rsupervisord::config::schema::SupervisorConfig;
 use std::path::Path;
+use std::time::Duration;
 
 #[test]
 fn test_load_compat_supervisord_conf() {
@@ -58,7 +58,7 @@ fn test_load_compat_supervisord_conf() {
                 .to_string_lossy()
                 .ends_with("logs\\supervisord.log")
     );
-    assert_eq!(config.logging.max_bytes.as_ref().map(|b| b.raw()), Some("5MB"));
+    assert_eq!(config.logging.max_bytes, Some(5 * 1024 * 1024));
     assert_eq!(config.logging.backups, 3);
     assert_eq!(config.logging.level, "info");
 
@@ -302,7 +302,7 @@ fn test_program_default_inheritance() {
     );
     assert_eq!(worker.stop_wait_secs, Duration::from_secs(20));
     assert_eq!(worker.priority, 300);
-    assert_eq!(worker.logs.max_bytes.as_ref().map(|b| b.raw()), Some("50MB"));
+    assert_eq!(worker.logs.max_bytes, Some(50 * 1024 * 1024));
     assert_eq!(worker.logs.backups, Some(10));
 }
 
