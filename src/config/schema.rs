@@ -9,6 +9,7 @@ use crate::error::ProgramError;
 use crate::program::config::{
     AutoRestartPolicy, HealthCheckConfig, ProgramConfig, ProgramLogsConfig, StopSignal,
 };
+use crate::serde_util::duration_secs;
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
 use std::collections::HashMap;
@@ -164,17 +165,11 @@ pub struct MetricsConfig {
     #[serde(default = "bool_value::<true>")]
     #[default(true)]
     pub enabled: bool,
-    #[serde(
-        default = "duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>",
-        with = "crate::serde_util::duration_secs"
-    )]
-    #[default(duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>())]
+    #[serde(default = "default_metrics_idle_timeout", with = "duration_secs")]
+    #[default(DEFAULT_METRICS_IDLE_TIMEOUT)]
     pub idle_timeout_secs: Duration,
-    #[serde(
-        default = "duration_value::<DEFAULT_METRICS_INTERVAL_SECS>",
-        with = "crate::serde_util::duration_secs"
-    )]
-    #[default(duration_value::<DEFAULT_METRICS_INTERVAL_SECS>())]
+    #[serde(default = "default_metrics_interval", with = "duration_secs")]
+    #[default(DEFAULT_METRICS_INTERVAL)]
     pub interval_secs: Duration,
 }
 
@@ -521,8 +516,8 @@ impl SupervisorConfig {
                     name, priority
                 )));
             }
-            let stop_wait = inherit!(raw, self.program_defaults, stop_wait_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let stop_wait =
+                inherit!(raw, self.program_defaults, stop_wait_secs).unwrap_or(DEFAULT_STOP_WAIT);
             if stop_wait > MAX_TIMEOUT {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' stop_wait_secs {} exceeds maximum 86400",
@@ -686,16 +681,16 @@ impl SupervisorConfig {
 
             let autorestart = inherit!(raw, self.program_defaults, autorestart).unwrap_or_default();
 
-            let start_secs = inherit!(raw, self.program_defaults, start_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_START_SECS));
+            let start_secs =
+                inherit!(raw, self.program_defaults, start_secs).unwrap_or(DEFAULT_START);
 
             let start_retries = inherit!(raw, self.program_defaults, start_retries)
                 .unwrap_or(DEFAULT_START_RETRIES);
 
             let stop_signal = inherit!(raw, self.program_defaults, stop_signal).unwrap_or_default();
 
-            let stop_wait_secs = inherit!(raw, self.program_defaults, stop_wait_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let stop_wait_secs =
+                inherit!(raw, self.program_defaults, stop_wait_secs).unwrap_or(DEFAULT_STOP_WAIT);
 
             let exit_codes = raw.exit_codes.clone().unwrap_or_else(default_exit_codes);
 
@@ -703,7 +698,7 @@ impl SupervisorConfig {
                 inherit!(raw, self.program_defaults, pre_start_ignore_failure).unwrap_or(false);
 
             let hook_timeout_secs = inherit!(raw, self.program_defaults, hook_timeout_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS));
+                .unwrap_or(DEFAULT_HOOK_TIMEOUT);
 
             let group = if let Some(ref g) = raw.group {
                 g.clone()
@@ -975,7 +970,7 @@ impl SupervisorConfig {
 
                 let restart_debounce_secs =
                     inherit!(raw, self.program_defaults, restart_debounce_secs)
-                        .unwrap_or_else(|| Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS));
+                        .unwrap_or(DEFAULT_RESTART_DEBOUNCE);
 
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
@@ -1040,14 +1035,10 @@ impl SupervisorConfig {
             };
             let autostart = raw.autostart.unwrap_or(true);
             let autorestart = raw.autorestart.unwrap_or_default();
-            let start_secs = raw
-                .start_secs
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_START_SECS));
+            let start_secs = raw.start_secs.unwrap_or(DEFAULT_START);
             let start_retries = raw.start_retries.unwrap_or(DEFAULT_START_RETRIES);
             let stop_signal = raw.stop_signal.unwrap_or_default();
-            let stop_wait_secs = raw
-                .stop_wait_secs
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            let stop_wait_secs = raw.stop_wait_secs.unwrap_or(DEFAULT_STOP_WAIT);
             let group_priority = 0;
 
             let mut instances = Vec::with_capacity(numprocs);
@@ -1186,7 +1177,7 @@ impl SupervisorConfig {
                     pre_start: None,
                     pre_stop: None,
                     pre_start_ignore_failure: false,
-                    hook_timeout_secs: Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
+                    hook_timeout_secs: DEFAULT_HOOK_TIMEOUT,
                     restart_when_binary_changed: false,
                     restart_signal_when_binary_changed: None,
                     restart_cmd_when_binary_changed: None,
@@ -1194,7 +1185,7 @@ impl SupervisorConfig {
                     restart_file_pattern: None,
                     restart_signal_when_file_changed: None,
                     restart_cmd_when_file_changed: None,
-                    restart_debounce_secs: Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS),
+                    restart_debounce_secs: DEFAULT_RESTART_DEBOUNCE,
                     event_listener,
                 };
 

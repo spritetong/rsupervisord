@@ -49,9 +49,16 @@ pub const fn usize_value<const N: usize>() -> usize {
     N
 }
 
-/// Returns a `Duration` default from a const seconds value.
-pub const fn duration_value<const N: u64>() -> Duration {
-    Duration::from_secs(N)
+/// Builds a public constant and a corresponding function.
+macro_rules! pub_const {
+    ($name:ident: $ty:ty = $value:expr) => {
+        paste::paste! {
+            pub const $name: $ty = $value;
+            pub const fn [<$name:lower>]() -> $ty {
+                $value
+            }
+        }
+    };
 }
 
 /// Builds a serde default function for types that cannot be expressed with
@@ -97,8 +104,8 @@ pub const AWAIT_STDIN: Duration = Duration::from_secs(15);
 // Runtime: stop / grace / drain
 // ---------------------------------------------------------------------------
 
-/// Default graceful-stop wait when `stop_wait_secs` is absent.
-pub const DEFAULT_STOP_WAIT_SECS: u64 = 10;
+// Default graceful-stop wait when `stop_wait_secs` is absent.
+pub_const!(DEFAULT_STOP_WAIT: Duration = Duration::from_secs(10));
 /// Manager-level extra headroom on top of grace for stop oneshot await.
 pub const STOP_GRACE_EXTRA: Duration = Duration::from_secs(15);
 /// Manager-level extra headroom on top of grace for restart oneshot await.
@@ -126,28 +133,28 @@ pub const DEFAULT_PRIORITY: u32 = 50;
 pub const DEFAULT_GROUP_PRIORITY: u32 = 999;
 /// Maximum accepted priority (validation bound).
 pub const MAX_PRIORITY: u32 = 999;
-/// Startup success window in seconds.
-pub const DEFAULT_START_SECS: u64 = 1;
+// Startup success window.
+pub_const!(DEFAULT_START: Duration = Duration::from_secs(1));
 /// Startup retry count before fatal.
 pub const DEFAULT_START_RETRIES: u32 = 3;
-/// pre_start / pre_stop hook timeout in seconds.
-pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 15;
-/// File-change restart debounce in seconds.
-pub const DEFAULT_RESTART_DEBOUNCE_SECS: u64 = 5;
-/// Health probe interval in seconds.
-pub const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 10;
-/// Single health probe timeout in seconds.
-pub const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 2;
+// pre_start / pre_stop hook timeout.
+pub_const!(DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(15));
+// File-change restart debounce.
+pub_const!(DEFAULT_RESTART_DEBOUNCE: Duration = Duration::from_secs(5));
+// Health probe interval.
+pub_const!(DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(10));
+// Single health probe timeout.
+pub_const!(DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(2));
 /// Consecutive health failures before marking unhealthy.
 pub const DEFAULT_HEALTH_FAILURE_THRESHOLD: u32 = 3;
-/// Delay before the first health probe in seconds.
-pub const DEFAULT_HEALTH_INITIAL_DELAY_SECS: u64 = 0;
+// Delay before the first health probe.
+pub_const!(DEFAULT_HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(0));
 /// Expected HTTP status for HTTP health checks.
 pub const DEFAULT_HTTP_EXPECTED_STATUS: u16 = 200;
-/// Metrics idle timeout in seconds (0 = never).
-pub const DEFAULT_METRICS_IDLE_TIMEOUT_SECS: u64 = 30;
-/// Metrics sampling interval in seconds.
-pub const DEFAULT_METRICS_INTERVAL_SECS: u64 = 2;
+// Metrics idle timeout (0 = never).
+pub_const!(DEFAULT_METRICS_IDLE_TIMEOUT: Duration = Duration::from_secs(30));
+// Metrics sampling interval.
+pub_const!(DEFAULT_METRICS_INTERVAL: Duration = Duration::from_secs(2));
 /// Default action timeout (seconds) for API/CLI/JSON-RPC lifecycle ops.
 pub const DEFAULT_ACTION_TIMEOUT_SECS: u64 = 30;
 /// Default event-listener result buffer size.

@@ -4,13 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::consts::{
-    DEFAULT_GROUP_PRIORITY, DEFAULT_HEALTH_FAILURE_THRESHOLD, DEFAULT_HEALTH_INITIAL_DELAY_SECS,
-    DEFAULT_HEALTH_INTERVAL_SECS, DEFAULT_HEALTH_TIMEOUT_SECS, DEFAULT_HOOK_TIMEOUT_SECS,
-    DEFAULT_HTTP_EXPECTED_STATUS, DEFAULT_PRIORITY, DEFAULT_RESTART_DEBOUNCE_SECS,
-    DEFAULT_START_RETRIES, DEFAULT_START_SECS, DEFAULT_STOP_WAIT_SECS, bool_value,
-    default_exit_codes, duration_value, u16_value, u32_value,
-};
+use crate::consts::*;
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
 use std::collections::HashMap;
@@ -212,11 +206,8 @@ pub struct ProgramConfig {
     pub autostart: bool,
     #[serde(default)]
     pub autorestart: AutoRestartPolicy,
-    #[serde(
-        default = "duration_value::<DEFAULT_START_SECS>",
-        with = "crate::serde_util::duration_secs"
-    )]
-    #[default(Duration::from_secs(DEFAULT_START_SECS))]
+    #[serde(default = "default_start", with = "crate::serde_util::duration_secs")]
+    #[default(DEFAULT_START)]
     pub start_secs: Duration,
     #[serde(default = "u32_value::<DEFAULT_START_RETRIES>")]
     #[default(DEFAULT_START_RETRIES)]
@@ -224,10 +215,10 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub stop_signal: StopSignal,
     #[serde(
-        default = "duration_value::<DEFAULT_STOP_WAIT_SECS>",
+        default = "default_stop_wait",
         with = "crate::serde_util::duration_secs"
     )]
-    #[default(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))]
+    #[default(DEFAULT_STOP_WAIT)]
     pub stop_wait_secs: Duration,
     #[serde(default = "default_exit_codes")]
     #[default(default_exit_codes())]
@@ -254,10 +245,10 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub pre_start_ignore_failure: bool,
     #[serde(
-        default = "duration_value::<DEFAULT_HOOK_TIMEOUT_SECS>",
+        default = "default_hook_timeout",
         with = "crate::serde_util::duration_secs"
     )]
-    #[default(Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS))]
+    #[default(DEFAULT_HOOK_TIMEOUT)]
     pub hook_timeout_secs: Duration,
     #[serde(default)]
     pub restart_when_binary_changed: bool,
@@ -274,10 +265,10 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
     #[serde(
-        default = "duration_value::<DEFAULT_RESTART_DEBOUNCE_SECS>",
+        default = "default_restart_debounce",
         with = "crate::serde_util::duration_secs"
     )]
-    #[default(Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS))]
+    #[default(DEFAULT_RESTART_DEBOUNCE)]
     pub restart_debounce_secs: Duration,
     #[serde(default)]
     pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
@@ -304,19 +295,19 @@ pub struct HealthCheckConfig {
     #[serde(flatten)]
     pub check_type: HealthCheckType,
     #[serde(
-        default = "duration_value::<DEFAULT_HEALTH_INTERVAL_SECS>",
+        default = "default_health_interval",
         with = "crate::serde_util::duration_secs"
     )]
     pub interval_secs: Duration,
     #[serde(
-        default = "duration_value::<DEFAULT_HEALTH_TIMEOUT_SECS>",
+        default = "default_health_timeout",
         with = "crate::serde_util::duration_secs"
     )]
     pub timeout_secs: Duration,
     #[serde(default = "u32_value::<DEFAULT_HEALTH_FAILURE_THRESHOLD>")]
     pub failure_threshold: u32,
     #[serde(
-        default = "duration_value::<DEFAULT_HEALTH_INITIAL_DELAY_SECS>",
+        default = "default_health_initial_delay",
         with = "crate::serde_util::duration_secs"
     )]
     pub initial_delay_secs: Duration,

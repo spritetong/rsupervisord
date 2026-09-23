@@ -8,7 +8,7 @@ use crate::config::diff::ConfigDiff;
 use crate::config::schema::SupervisorConfig;
 use crate::consts::{
     AWAIT_ACTION, AWAIT_BULK, AWAIT_GROUP, AWAIT_QUERY, AWAIT_STDIN, DEFAULT_PRIORITY,
-    DEFAULT_STOP_WAIT_SECS, MAX_TIMEOUT, RESTART_GRACE_EXTRA, STOP_GRACE_EXTRA,
+    DEFAULT_STOP_WAIT, MAX_TIMEOUT, RESTART_GRACE_EXTRA, STOP_GRACE_EXTRA,
 };
 use crate::error::ProgramError;
 use crate::eventlistener::pool::EventListenerPool;
@@ -225,7 +225,7 @@ impl ManagerHandle {
             })?;
 
         let timeout_dur = grace_period
-            .unwrap_or(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))
+            .unwrap_or(DEFAULT_STOP_WAIT)
             .checked_add(STOP_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -257,7 +257,7 @@ impl ManagerHandle {
             })?;
 
         let timeout_dur = grace_period
-            .unwrap_or(Duration::from_secs(DEFAULT_STOP_WAIT_SECS))
+            .unwrap_or(DEFAULT_STOP_WAIT)
             .checked_add(RESTART_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -1271,7 +1271,7 @@ impl ManagerActor {
                 .configs
                 .get(name)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+                .unwrap_or_else(|| DEFAULT_STOP_WAIT);
             let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(name) {
                 prog.stop(period).await?;
@@ -1321,7 +1321,7 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+                .unwrap_or_else(|| DEFAULT_STOP_WAIT);
             let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.stop(period).await?;
@@ -1346,7 +1346,7 @@ impl ManagerActor {
                 .configs
                 .get(target)
                 .map(|c| c.stop_wait_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+                .unwrap_or_else(|| DEFAULT_STOP_WAIT);
             let period = grace_period.unwrap_or(default_wait);
             if let Some(prog) = self.programs.get_mut(target) {
                 prog.restart(period).await?;
@@ -1389,7 +1389,7 @@ impl ManagerActor {
                     .configs
                     .get(name)
                     .map(|c| c.stop_wait_secs)
-                    .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+                    .unwrap_or_else(|| DEFAULT_STOP_WAIT);
                 let dur = grace_period.unwrap_or(wait_secs);
                 if let Some(prog) = self.programs.get(name) {
                     let state = prog.status().state;
@@ -1433,7 +1433,7 @@ impl ManagerActor {
         // 1. Removed programs: gracefully stop, clean up and unregister
         for name in &diff.removed {
             if let Some(mut prog) = self.programs.remove(name) {
-                let _ = prog.stop(Duration::from_secs(DEFAULT_STOP_WAIT_SECS)).await;
+                let _ = prog.stop(DEFAULT_STOP_WAIT).await;
                 let _ = prog.shutdown().await;
             }
             self.configs.remove(name);
@@ -1629,7 +1629,7 @@ impl ManagerActor {
 
         for name in &active {
             if let Some(mut prog) = self.programs.remove(name) {
-                let _ = prog.stop(Duration::from_secs(DEFAULT_STOP_WAIT_SECS)).await;
+                let _ = prog.stop(DEFAULT_STOP_WAIT).await;
                 let _ = prog.shutdown().await;
             }
             self.configs.remove(name);

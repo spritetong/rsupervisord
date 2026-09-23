@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::{DEFAULT_METRICS_IDLE_TIMEOUT, DEFAULT_METRICS_INTERVAL};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -36,7 +37,11 @@ impl ActivityTracker {
     /// If `idle_timeout_secs` is 0, the tracker is always active (never times out).
     /// If `enabled` is false, metrics collection is globally disabled.
     pub fn new(idle_timeout_secs: u64, enabled: bool) -> Self {
-        Self::with_interval(idle_timeout_secs, 2, enabled)
+        Self::with_interval(
+            idle_timeout_secs,
+            DEFAULT_METRICS_INTERVAL.as_secs(),
+            enabled,
+        )
     }
 
     /// Creates an ActivityTracker with custom sampling interval in seconds.
@@ -117,6 +122,10 @@ impl ActivityTracker {
 
 impl Default for ActivityTracker {
     fn default() -> Self {
-        Self::with_interval(30, 2, true)
+        Self::with_interval(
+            DEFAULT_METRICS_IDLE_TIMEOUT.as_secs(),
+            DEFAULT_METRICS_INTERVAL.as_secs(),
+            true,
+        )
     }
 }
