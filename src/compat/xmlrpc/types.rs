@@ -38,16 +38,6 @@ impl ProcessStateCode {
     }
 }
 
-/// Saturated integer conversion for Unix epoch seconds (protecting 32-bit i4 values).
-#[inline]
-pub fn saturate_i4(timestamp: u64) -> i32 {
-    if timestamp > (i32::MAX as u64) {
-        i32::MAX
-    } else {
-        timestamp as i32
-    }
-}
-
 /// Formats description string according to Python Supervisor `_interpretProcessInfo`.
 pub fn format_description(
     state: ProgramState,
@@ -106,7 +96,7 @@ pub fn program_status_to_process_info(
     let (state_code, state_name) = ProcessStateCode::from_program_state(status.state);
 
     let start_sec = if let Some(up) = status.uptime_secs {
-        saturate_i4(now.saturating_sub(up))
+        crate::serde_util::u64_to_i32(now.saturating_sub(up))
     } else {
         0
     };
@@ -114,7 +104,7 @@ pub fn program_status_to_process_info(
     let stop_sec = if status.state.is_running() {
         0
     } else {
-        saturate_i4(now)
+        crate::serde_util::u64_to_i32(now)
     };
 
     let stdout_path = stdout_logfile.unwrap_or("").to_string();
@@ -129,7 +119,10 @@ pub fn program_status_to_process_info(
     map.insert("description".to_string(), Value::String(desc));
     map.insert("start".to_string(), Value::Int(start_sec));
     map.insert("stop".to_string(), Value::Int(stop_sec));
-    map.insert("now".to_string(), Value::Int(saturate_i4(now)));
+    map.insert(
+        "now".to_string(),
+        Value::Int(crate::serde_util::u64_to_i32(now)),
+    );
     map.insert("state".to_string(), Value::Int(state_code));
     map.insert(
         "statename".to_string(),

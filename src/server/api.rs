@@ -245,17 +245,6 @@ async fn auth_logout(
         .into_response()
 }
 
-/// Formats duration seconds into human readable format (e.g. 45s, 12m 30s, 1h 45m).
-fn format_duration_secs(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
 /// GET /api/v1/status
 async fn get_status(
     State(state): State<AppState>,
@@ -279,7 +268,7 @@ async fn get_status(
                 .unwrap_or_else(|| "-".to_string());
             let uptime = s
                 .uptime_secs
-                .map(format_duration_secs)
+                .map(crate::serde_util::duration_secs_to_string)
                 .unwrap_or_else(|| "-".to_string());
 
             ProgramStatusDto {

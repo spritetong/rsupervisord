@@ -183,7 +183,7 @@ pub const DEFAULT_LOG_BACKUPS: usize = 10;
 pub const UDS_CHMOD_UNELEVATED: u32 = 0o777;
 /// Default IPC mode: owner + Administrators on Windows, owner only on Unix.
 pub const UDS_CHMOD: u32 = if cfg!(windows) { 0o770 } else { 0o700 };
-/// Permission bits accepted by `parse_chmod` (mode + setuid/setgid/sticky).
+/// Permission bits accepted by `string_to_chmod` (mode + setuid/setgid/sticky).
 pub const CHMOD_MASK: u32 = 0o7777;
 /// umask applied while binding the Unix socket to close the bind→chmod race.
 pub const BIND_UMASK: u32 = 0o077;

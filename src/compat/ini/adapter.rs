@@ -6,17 +6,19 @@
 
 use crate::compat::ini::parser::ParsedIni;
 use crate::compat::ini::values::{
-    parse_autorestart, parse_environment, parse_exitcodes, parse_list, parse_log_path,
-    parse_loose_bool, parse_stop_signal, parse_umask,
+    parse_autorestart, parse_environment, parse_log_path, parse_stop_signal,
 };
 use crate::config::schema::{
     GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw, SupervisorConfig,
-    normalize_http_bind,
 };
 use crate::consts::{
     DEFAULT_EVENT_BUFFER_SIZE, DEFAULT_EVENTLISTENER_PRIORITY, default_result_handler,
 };
 use crate::error::ProgramError;
+use crate::serde_util::{
+    normalize_http_bind, string_to_bool, string_to_bytes, string_to_chmod, string_to_duration,
+    string_to_i32_list, string_to_str_list, string_to_umask,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,12 +28,7 @@ fn parse_opt_duration(
     keys: &[&str],
 ) -> Result<Option<Duration>, ProgramError> {
     let raw = keys.iter().find_map(|k| map.get(*k));
-    raw.map(|s| {
-        s.parse::<u64>()
-            .map(Duration::from_secs)
-            .map_err(|e| ProgramError::ConfigError(format!("invalid duration '{}': {}", s, e)))
-    })
-    .transpose()
+    raw.map(|s| string_to_duration(s)).transpose()
 }
 
 fn parse_opt_bytesize(
@@ -40,7 +37,7 @@ fn parse_opt_bytesize(
 ) -> Result<Option<usize>, ProgramError> {
     keys.iter()
         .find_map(|k| map.get(*k))
-        .map(|s| crate::logging::parse_byte_size(s))
+        .map(|s| string_to_bytes(s))
         .transpose()
 }
 
@@ -60,7 +57,7 @@ pub fn adapt_ini_to_config(
             config.server.uds_path = PathBuf::from(file);
         }
         if let Some(chmod) = sec.get("chmod") {
-            config.server.uds_chmod = Some(crate::config::schema::parse_chmod(chmod)?);
+            config.server.uds_chmod = Some(string_to_chmod(chmod)?);
         }
         if let Some(username) = sec.get("username") {
             config.server.uds_username = Some(username.clone());
@@ -95,7 +92,7 @@ pub fn adapt_ini_to_config(
             }
         }
         if let Some(maxbytes) = sec.get("logfile_maxbytes") {
-            config.logging.max_bytes = Some(crate::logging::parse_byte_size(maxbytes)?);
+            config.logging.max_bytes = Some(string_to_bytes(maxbytes)?);
         }
         if let Some(backups_str) = sec.get("logfile_backups")
             && let Ok(backups) = backups_str.parse::<usize>()
@@ -215,7 +212,7 @@ fn parse_program_config(
 
     let autostart = sec
         .get("autostart")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let autorestart = sec
         .get("autorestart")
@@ -241,7 +238,7 @@ fn parse_program_config(
     let exit_codes = sec
         .get("exitcodes")
         .or_else(|| sec.get("exit_codes"))
-        .map(|s| parse_exitcodes(s))
+        .map(|s| string_to_i32_list(s))
         .transpose()?;
 
     let stop_signal = sec
@@ -260,7 +257,7 @@ fn parse_program_config(
 
     let directory = sec.get("directory").map(PathBuf::from);
     let user = sec.get("user").cloned();
-    let umask = sec.get("umask").map(|s| parse_umask(s)).transpose()?;
+    let umask = sec.get("umask").map(|s| string_to_umask(s)).transpose()?;
 
     let environment = if let Some(env_str) = sec.get("environment") {
         parse_environment(env_str)?
@@ -270,7 +267,7 @@ fn parse_program_config(
 
     let redirect_stderr = sec
         .get("redirect_stderr")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
 
     // Build log configuration
@@ -294,11 +291,11 @@ fn parse_program_config(
 
     let stdout_events_enabled = sec
         .get("stdout_events_enabled")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let stderr_events_enabled = sec
         .get("stderr_events_enabled")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
 
     let logs = if stdout_path.is_some()
@@ -326,7 +323,7 @@ fn parse_program_config(
     // Extended fields
     let depends_on = sec
         .get("depends_on")
-        .map(|s| parse_list(s))
+        .map(|s| string_to_str_list(s))
         .unwrap_or_default();
     let cron = sec.get("cron").cloned();
     let cron_stop = sec
@@ -343,7 +340,7 @@ fn parse_program_config(
         .cloned();
     let pre_start_ignore_failure = sec
         .get("pre_start_ignore_failure")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let hook_timeout_secs = parse_opt_duration(sec, &["hook_timeout_secs"]).map_err(|e| {
         ProgramError::ConfigError(format!(
@@ -354,7 +351,7 @@ fn parse_program_config(
 
     let restart_when_binary_changed = sec
         .get("restart_when_binary_changed")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let restart_signal_when_binary_changed = sec
         .get("restart_signal_when_binary_changed")
@@ -463,7 +460,7 @@ fn parse_event_listener_config(
 
     let redirect_stderr = sec
         .get("redirect_stderr")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     if redirect_stderr == Some(true) {
         return Err(ProgramError::ConfigError(format!(
@@ -491,7 +488,7 @@ fn parse_event_listener_config(
 
     let autostart = sec
         .get("autostart")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let autorestart = sec
         .get("autorestart")
@@ -551,7 +548,7 @@ fn parse_event_listener_config(
 
     let directory = sec.get("directory").map(PathBuf::from);
     let user = sec.get("user").cloned();
-    let umask = sec.get("umask").map(|s| parse_umask(s)).transpose()?;
+    let umask = sec.get("umask").map(|s| string_to_umask(s)).transpose()?;
     let environment = if let Some(env_str) = sec.get("environment") {
         parse_environment(env_str)?
     } else {
@@ -589,7 +586,7 @@ fn parse_event_listener_config(
 fn parse_group_config(sec: &HashMap<String, String>) -> Result<GroupConfigRaw, ProgramError> {
     let programs = sec
         .get("programs")
-        .map(|s| parse_list(s))
+        .map(|s| string_to_str_list(s))
         .unwrap_or_default();
     let priority = sec
         .get("priority")
@@ -603,7 +600,7 @@ fn parse_group_config(sec: &HashMap<String, String>) -> Result<GroupConfigRaw, P
 fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaults, ProgramError> {
     let autostart = sec
         .get("autostart")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let autorestart = sec
         .get("autorestart")
@@ -642,15 +639,15 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         .map_err(|e| ProgramError::ConfigError(format!("Invalid default backups: {}", e)))?;
     let redirect_stderr = sec
         .get("redirect_stderr")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let stdout_events_enabled = sec
         .get("stdout_events_enabled")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
     let stderr_events_enabled = sec
         .get("stderr_events_enabled")
-        .map(|s| parse_loose_bool(s))
+        .map(|s| string_to_bool(s))
         .transpose()?;
 
     let logs = if stdout_path.is_some()
@@ -707,7 +704,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
             .cloned(),
         pre_start_ignore_failure: sec
             .get("pre_start_ignore_failure")
-            .map(|s| parse_loose_bool(s))
+            .map(|s| string_to_bool(s))
             .transpose()?,
         hook_timeout_secs: parse_opt_duration(sec, &["hook_timeout_secs"]).map_err(|e| {
             ProgramError::ConfigError(format!("Invalid default hook_timeout_secs: {}", e))
@@ -717,7 +714,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         process_name,
         restart_when_binary_changed: sec
             .get("restart_when_binary_changed")
-            .map(|s| parse_loose_bool(s))
+            .map(|s| string_to_bool(s))
             .transpose()?,
         restart_signal_when_binary_changed: sec
             .get("restart_signal_when_binary_changed")

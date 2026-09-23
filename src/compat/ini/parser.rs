@@ -4,8 +4,8 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::compat::ini::values::parse_list;
 use crate::error::ProgramError;
+use crate::serde_util::string_to_str_list;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -305,7 +305,7 @@ pub fn load_ini_file_with_includes(
 
     if allow_includes && let Some(include_files_val) = main_ini.get("include", "files") {
         let here_str = here_dir.to_string_lossy().to_string().replace('\\', "/");
-        let patterns = parse_list(include_files_val);
+        let patterns = string_to_str_list(include_files_val);
 
         for pattern_raw in patterns {
             let pattern_expanded = pattern_raw.replace("%(here)s", &here_str);

@@ -10,31 +10,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Parses loose booleans accepted by Python Supervisor:
-/// `1`, `true`, `yes`, `on` -> `true`
-/// `0`, `false`, `no`, `off` -> `false`
-pub fn parse_loose_bool(s: &str) -> Result<bool, ProgramError> {
-    let trimmed = s.trim();
-    if trimmed.eq_ignore_ascii_case("1")
-        || trimmed.eq_ignore_ascii_case("true")
-        || trimmed.eq_ignore_ascii_case("yes")
-        || trimmed.eq_ignore_ascii_case("on")
-    {
-        Ok(true)
-    } else if trimmed.eq_ignore_ascii_case("0")
-        || trimmed.eq_ignore_ascii_case("false")
-        || trimmed.eq_ignore_ascii_case("no")
-        || trimmed.eq_ignore_ascii_case("off")
-    {
-        Ok(false)
-    } else {
-        Err(ProgramError::ConfigError(format!(
-            "Invalid boolean value '{}'",
-            trimmed
-        )))
-    }
-}
-
 /// Parses autorestart policies accepted by Python Supervisor:
 /// `false`, `no`, `never`, `0` -> `AutoRestartPolicy::Never`
 /// `true`, `yes`, `always`, `1` -> `AutoRestartPolicy::Always`
@@ -60,26 +35,6 @@ pub fn parse_autorestart(s: &str) -> Result<AutoRestartPolicy, ProgramError> {
             ProgramError::ConfigError(format!("Invalid autorestart policy '{}'", trimmed))
         })
     }
-}
-
-/// Parses exit codes: comma- or whitespace-separated list of integers.
-/// Example: `0,2` -> `vec![0, 2]`
-pub fn parse_exitcodes(s: &str) -> Result<Vec<i32>, ProgramError> {
-    let mut codes = Vec::new();
-    for token in s.split([',', ' ', '\t', '\r', '\n']) {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let code = token.parse::<i32>().map_err(|e| {
-            ProgramError::ConfigError(format!(
-                "Invalid exit code '{}' in exitcodes list: {}",
-                token, e
-            ))
-        })?;
-        codes.push(code);
-    }
-    Ok(codes)
 }
 
 /// Parses Python Supervisor environment variable string:
@@ -184,14 +139,6 @@ pub fn parse_environment(s: &str) -> Result<HashMap<String, String>, ProgramErro
     Ok(env)
 }
 
-/// Splits comma- or whitespace-separated list of items (e.g. `programs` or `files`).
-pub fn parse_list(s: &str) -> Vec<String> {
-    s.split([',', ' ', '\t', '\r', '\n'])
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-        .collect()
-}
-
 /// Normalizes log file path:
 /// - `AUTO` (case-insensitive) -> `None` (use rsupervisord default path)
 /// - `NONE` / `OFF` / `NULL` / `/dev/null` -> `Some(PathBuf::from("/dev/null"))`
@@ -219,47 +166,9 @@ pub fn parse_stop_signal(s: &str) -> Result<StopSignal, ProgramError> {
         .map_err(|_| ProgramError::ConfigError(format!("Invalid stop signal '{}'", trimmed)))
 }
 
-/// Parses umask, supporting octal notations like `022` or `0o22`.
-pub fn parse_umask(s: &str) -> Result<u32, ProgramError> {
-    let trimmed = s.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("0o")
-        .or_else(|| trimmed.strip_prefix("0O"))
-    {
-        u32::from_str_radix(rest, 8).map_err(|e| {
-            ProgramError::ConfigError(format!("Invalid octal umask '{}': {}", trimmed, e))
-        })
-    } else if trimmed.starts_with('0') && trimmed.len() > 1 {
-        u32::from_str_radix(trimmed, 8).map_err(|e| {
-            ProgramError::ConfigError(format!("Invalid octal umask '{}': {}", trimmed, e))
-        })
-    } else {
-        trimmed
-            .parse::<u32>()
-            .map_err(|e| ProgramError::ConfigError(format!("Invalid umask '{}': {}", trimmed, e)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_loose_bool() {
-        assert!(parse_loose_bool("true").unwrap());
-        assert!(parse_loose_bool("TRUE").unwrap());
-        assert!(parse_loose_bool("yes").unwrap());
-        assert!(parse_loose_bool("1").unwrap());
-        assert!(parse_loose_bool("on").unwrap());
-
-        assert!(!parse_loose_bool("false").unwrap());
-        assert!(!parse_loose_bool("FALSE").unwrap());
-        assert!(!parse_loose_bool("no").unwrap());
-        assert!(!parse_loose_bool("0").unwrap());
-        assert!(!parse_loose_bool("off").unwrap());
-
-        assert!(parse_loose_bool("invalid").is_err());
-    }
 
     #[test]
     fn test_parse_autorestart() {
@@ -290,16 +199,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_exitcodes() {
-        assert_eq!(parse_exitcodes("0,2").unwrap(), vec![0, 2]);
-        assert_eq!(parse_exitcodes("0, 2").unwrap(), vec![0, 2]);
-        assert_eq!(parse_exitcodes("0 2 3").unwrap(), vec![0, 2, 3]);
-        assert_eq!(parse_exitcodes("0").unwrap(), vec![0]);
-        assert!(parse_exitcodes("").unwrap().is_empty());
-        assert!(parse_exitcodes("abc").is_err());
-    }
-
-    #[test]
     fn test_parse_environment() {
         let env = parse_environment(r#"KEY="val1",KEY2="val2",PORT="8080""#).unwrap();
         assert_eq!(env.get("KEY").unwrap(), "val1");
@@ -316,19 +215,6 @@ mod tests {
             parse_environment(r#"PROC="%(process_num)02d",TAG="%(ENV_COMPAT_TAG)s""#).unwrap();
         assert_eq!(env3.get("PROC").unwrap(), "%(process_num)02d");
         assert_eq!(env3.get("TAG").unwrap(), "%(ENV_COMPAT_TAG)s");
-    }
-
-    #[test]
-    fn test_parse_list() {
-        assert_eq!(parse_list("ticker,catx"), vec!["ticker", "catx"]);
-        assert_eq!(
-            parse_list("ticker  catx \n worker"),
-            vec!["ticker", "catx", "worker"]
-        );
-        assert_eq!(
-            parse_list("conf.d/*.ini\nother/*.conf"),
-            vec!["conf.d/*.ini", "other/*.conf"]
-        );
     }
 
     #[test]
@@ -353,12 +239,5 @@ mod tests {
         assert_eq!(parse_stop_signal("SIGTERM").unwrap(), StopSignal::Term);
         assert_eq!(parse_stop_signal("QUIT").unwrap(), StopSignal::Quit);
         assert_eq!(parse_stop_signal("KILL").unwrap(), StopSignal::Kill);
-    }
-
-    #[test]
-    fn test_parse_umask() {
-        assert_eq!(parse_umask("022").unwrap(), 0o22);
-        assert_eq!(parse_umask("0o22").unwrap(), 0o22);
-        assert_eq!(parse_umask("18").unwrap(), 18);
     }
 }

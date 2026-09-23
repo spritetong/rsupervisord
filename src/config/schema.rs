@@ -81,24 +81,6 @@ fn default_uds_path() -> PathBuf {
     crate::config::paths::default_uds_path(&cmd_name, None)
 }
 
-/// Parses an octal file mode string (`"0700"`, `"0o700"`, `"700"`).
-/// Result is masked to `0o7777` (permission + setuid/setgid/sticky bits).
-pub fn parse_chmod(s: &str) -> Result<u32, ProgramError> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Err(ProgramError::ConfigError(
-            "Invalid octal mode '': empty value".to_string(),
-        ));
-    }
-    let digits = trimmed
-        .strip_prefix("0o")
-        .or_else(|| trimmed.strip_prefix("0O"))
-        .unwrap_or(trimmed);
-    u32::from_str_radix(digits, 8)
-        .map(|mode| mode & CHMOD_MASK)
-        .map_err(|e| ProgramError::ConfigError(format!("Invalid octal mode '{}': {}", trimmed, e)))
-}
-
 impl ServerConfig {
     /// Resolves the effective IPC mode: explicit `uds_chmod`, else `0o777` when
     /// `allow_unelevated` is set, else `0o770` on Windows (owner + Administrators)
@@ -115,28 +97,6 @@ impl ServerConfig {
             // elevated admin CLI can pass the OS authorization layer.
             UDS_CHMOD
         }
-    }
-}
-
-/// Normalizes an HTTP bind address according to standard supervisor conventions:
-/// - `:9001` -> `0.0.0.0:9001`
-/// - `*:9001` -> `0.0.0.0:9001`
-/// - `9001` -> `0.0.0.0:9001`
-/// - `127.0.0.1:9001` -> `127.0.0.1:9001`
-pub fn normalize_http_bind(bind: &str) -> String {
-    let trimmed = bind.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if let Some(port) = trimmed.strip_prefix('*') {
-        let port_part = port.strip_prefix(':').unwrap_or(port);
-        format!("0.0.0.0:{}", port_part)
-    } else if let Some(port) = trimmed.strip_prefix(':') {
-        format!("0.0.0.0:{}", port)
-    } else if trimmed.chars().all(|c| c.is_ascii_digit()) {
-        format!("0.0.0.0:{}", trimmed)
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -1446,20 +1406,6 @@ programs: {}
     }
 
     #[test]
-    fn test_parse_chmod() {
-        assert_eq!(parse_chmod("0700").unwrap(), 0o700);
-        assert_eq!(parse_chmod("700").unwrap(), 0o700);
-        assert_eq!(parse_chmod("0o700").unwrap(), 0o700);
-        assert_eq!(parse_chmod("0O700").unwrap(), 0o700);
-        assert_eq!(parse_chmod(" 0755 ").unwrap(), 0o755);
-        // Mask to 0o7777 (permission + setuid/setgid/sticky)
-        assert_eq!(parse_chmod("7777").unwrap(), 0o7777);
-        assert!(parse_chmod("").is_err());
-        assert!(parse_chmod("xyz").is_err());
-        assert!(parse_chmod("8").is_err());
-    }
-
-    #[test]
     fn test_resolved_uds_chmod_defaults() {
         // allow_unelevated=false → 0o770 on Windows, 0o700 elsewhere
         let s = ServerConfig {
@@ -1604,15 +1550,6 @@ programs:
                 .to_string()
                 .contains("unknown program")
         );
-    }
-
-    #[test]
-    fn test_normalize_http_bind() {
-        assert_eq!(normalize_http_bind(":9001"), "0.0.0.0:9001");
-        assert_eq!(normalize_http_bind("*:9001"), "0.0.0.0:9001");
-        assert_eq!(normalize_http_bind("9001"), "0.0.0.0:9001");
-        assert_eq!(normalize_http_bind("127.0.0.1:9001"), "127.0.0.1:9001");
-        assert_eq!(normalize_http_bind("localhost:9001"), "localhost:9001");
     }
 
     #[test]

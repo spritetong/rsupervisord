@@ -11,63 +11,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Parses human-readable byte sizes into numeric bytes.
-/// Supports units: B, KB, K, MB, M, GB, G (case-insensitive).
-pub fn parse_byte_size(s: &str) -> Result<usize, ProgramError> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Err(ProgramError::ConfigError(
-            "Byte size string cannot be empty".to_string(),
-        ));
-    }
-
-    let upper = trimmed.to_uppercase();
-    if let Some(num) = upper.strip_suffix("GB").or_else(|| upper.strip_suffix('G')) {
-        let val: f64 = num.trim().parse().map_err(|_| {
-            ProgramError::ConfigError(format!("Invalid gigabyte value: '{}'", trimmed))
-        })?;
-        Ok((val * 1024.0 * 1024.0 * 1024.0) as usize)
-    } else if let Some(num) = upper.strip_suffix("MB").or_else(|| upper.strip_suffix('M')) {
-        let val: f64 = num.trim().parse().map_err(|_| {
-            ProgramError::ConfigError(format!("Invalid megabyte value: '{}'", trimmed))
-        })?;
-        Ok((val * 1024.0 * 1024.0) as usize)
-    } else if let Some(num) = upper.strip_suffix("KB").or_else(|| upper.strip_suffix('K')) {
-        let val: f64 = num.trim().parse().map_err(|_| {
-            ProgramError::ConfigError(format!("Invalid kilobyte value: '{}'", trimmed))
-        })?;
-        Ok((val * 1024.0) as usize)
-    } else if let Some(num) = upper.strip_suffix('B') {
-        let val: usize = num
-            .trim()
-            .parse()
-            .map_err(|_| ProgramError::ConfigError(format!("Invalid byte value: '{}'", trimmed)))?;
-        Ok(val)
-    } else {
-        let val: usize = upper.parse().map_err(|_| {
-            ProgramError::ConfigError(format!("Invalid numeric byte value: '{}'", trimmed))
-        })?;
-        Ok(val)
-    }
-}
-
-/// Formats numeric bytes into a canonical human-readable string (e.g. "50MB", "10KB", "25B").
-pub fn format_byte_size(bytes: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
-    const GB: usize = 1024 * MB;
-
-    if bytes > 0 && bytes.is_multiple_of(GB) {
-        format!("{}GB", bytes / GB)
-    } else if bytes > 0 && bytes.is_multiple_of(MB) {
-        format!("{}MB", bytes / MB)
-    } else if bytes > 0 && bytes.is_multiple_of(KB) {
-        format!("{}KB", bytes / KB)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
 /// Thread-safe file rotator wrapping `file_rotate::FileRotate`.
 #[derive(Clone)]
 pub struct LogRotator {
@@ -158,40 +101,6 @@ impl LogRotator {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_parse_byte_size() {
-        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
-        assert_eq!(parse_byte_size("1024B").unwrap(), 1024);
-        assert_eq!(parse_byte_size("10KB").unwrap(), 10240);
-        assert_eq!(parse_byte_size("10K").unwrap(), 10240);
-        assert_eq!(parse_byte_size("20MB").unwrap(), 20 * 1024 * 1024);
-        assert_eq!(parse_byte_size("20M").unwrap(), 20 * 1024 * 1024);
-        assert_eq!(parse_byte_size("1GB").unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(
-            parse_byte_size("1.5MB").unwrap(),
-            (1.5 * 1024.0 * 1024.0) as usize
-        );
-        assert!(parse_byte_size("").is_err());
-        assert!(parse_byte_size("invalid").is_err());
-    }
-
-    #[test]
-    fn test_format_byte_size() {
-        assert_eq!(format_byte_size(50 * 1024 * 1024), "50MB");
-        assert_eq!(format_byte_size(10 * 1024 * 1024), "10MB");
-        assert_eq!(format_byte_size(1024 * 1024 * 1024), "1GB");
-        assert_eq!(format_byte_size(10240), "10KB");
-        assert_eq!(format_byte_size(1024), "1KB");
-        assert_eq!(format_byte_size(25), "25B");
-        assert_eq!(format_byte_size(0), "0B");
-        assert_eq!(format_byte_size(1500), "1500B");
-
-        // Verify round-trip identity with parse_byte_size
-        for sz in [0, 25, 1024, 10240, 52428800, 1073741824] {
-            assert_eq!(parse_byte_size(&format_byte_size(sz)).unwrap(), sz);
-        }
-    }
 
     #[test]
     fn test_log_rotator_rotation() {

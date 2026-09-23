@@ -4,10 +4,11 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use rsupervisord::logging::{LogRotator, RingBuffer, parse_byte_size};
+use rsupervisord::logging::{LogRotator, RingBuffer};
 use rsupervisord::program::ProcessProgram;
 use rsupervisord::program::config::{AutoRestartPolicy, ProgramConfig, ProgramLogsConfig};
 use rsupervisord::program::traits::Program;
+use rsupervisord::serde_util::string_to_bytes;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -39,10 +40,10 @@ async fn test_ring_buffer_streaming() {
 
 #[test]
 fn test_byte_size_parsing() {
-    assert_eq!(parse_byte_size("500B").unwrap(), 500);
-    assert_eq!(parse_byte_size("10KB").unwrap(), 10240);
-    assert_eq!(parse_byte_size("5MB").unwrap(), 5 * 1024 * 1024);
-    assert_eq!(parse_byte_size("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
+    assert_eq!(string_to_bytes("500B").unwrap(), 500);
+    assert_eq!(string_to_bytes("10KB").unwrap(), 10240);
+    assert_eq!(string_to_bytes("5MB").unwrap(), 5 * 1024 * 1024);
+    assert_eq!(string_to_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
 }
 
 #[test]
