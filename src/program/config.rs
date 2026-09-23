@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::consts::*;
+use crate::serde_util::{duration_secs, option_byte_size};
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
 use std::collections::HashMap;
@@ -143,7 +144,7 @@ pub struct ProgramLogsConfig {
     pub stdout: Option<PathBuf>,
     #[serde(default)]
     pub stderr: Option<PathBuf>,
-    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    #[serde(default, with = "option_byte_size")]
     pub max_bytes: Option<usize>,
     #[serde(default)]
     pub backups: Option<usize>,
@@ -196,7 +197,7 @@ pub struct ProgramConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub environment: HashMap<String, String>,
-    #[serde(default = "u32_value::<DEFAULT_PRIORITY>")]
+    #[serde(default = "default_priority")]
     #[default(DEFAULT_PRIORITY)]
     pub priority: u32,
     #[serde(default)]
@@ -206,18 +207,15 @@ pub struct ProgramConfig {
     pub autostart: bool,
     #[serde(default)]
     pub autorestart: AutoRestartPolicy,
-    #[serde(default = "default_start", with = "crate::serde_util::duration_secs")]
+    #[serde(default = "default_start", with = "duration_secs")]
     #[default(DEFAULT_START)]
     pub start_secs: Duration,
-    #[serde(default = "u32_value::<DEFAULT_START_RETRIES>")]
+    #[serde(default = "default_start_retries")]
     #[default(DEFAULT_START_RETRIES)]
     pub start_retries: u32,
     #[serde(default)]
     pub stop_signal: StopSignal,
-    #[serde(
-        default = "default_stop_wait",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_stop_wait", with = "duration_secs")]
     #[default(DEFAULT_STOP_WAIT)]
     pub stop_wait_secs: Duration,
     #[serde(default = "default_exit_codes")]
@@ -231,7 +229,7 @@ pub struct ProgramConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub group: String,
-    #[serde(default = "u32_value::<DEFAULT_GROUP_PRIORITY>")]
+    #[serde(default = "default_group_priority")]
     #[default(DEFAULT_GROUP_PRIORITY)]
     pub group_priority: u32,
     #[serde(default)]
@@ -244,10 +242,7 @@ pub struct ProgramConfig {
     pub pre_stop: Option<String>,
     #[serde(default)]
     pub pre_start_ignore_failure: bool,
-    #[serde(
-        default = "default_hook_timeout",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_hook_timeout", with = "duration_secs")]
     #[default(DEFAULT_HOOK_TIMEOUT)]
     pub hook_timeout_secs: Duration,
     #[serde(default)]
@@ -264,10 +259,7 @@ pub struct ProgramConfig {
     pub restart_signal_when_file_changed: Option<StopSignal>,
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
-    #[serde(
-        default = "default_restart_debounce",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_restart_debounce", with = "duration_secs")]
     #[default(DEFAULT_RESTART_DEBOUNCE)]
     pub restart_debounce_secs: Duration,
     #[serde(default)]
@@ -279,7 +271,7 @@ pub struct ProgramConfig {
 pub enum HealthCheckType {
     Http {
         url: String,
-        #[serde(default = "u16_value::<DEFAULT_HTTP_EXPECTED_STATUS>")]
+        #[serde(default = "default_http_expected_status")]
         expected_status: u16,
     },
     Tcp {
@@ -294,22 +286,13 @@ pub enum HealthCheckType {
 pub struct HealthCheckConfig {
     #[serde(flatten)]
     pub check_type: HealthCheckType,
-    #[serde(
-        default = "default_health_interval",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_health_interval", with = "duration_secs")]
     pub interval_secs: Duration,
-    #[serde(
-        default = "default_health_timeout",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_health_timeout", with = "duration_secs")]
     pub timeout_secs: Duration,
-    #[serde(default = "u32_value::<DEFAULT_HEALTH_FAILURE_THRESHOLD>")]
+    #[serde(default = "default_health_failure_threshold")]
     pub failure_threshold: u32,
-    #[serde(
-        default = "default_health_initial_delay",
-        with = "crate::serde_util::duration_secs"
-    )]
+    #[serde(default = "default_health_initial_delay", with = "duration_secs")]
     pub initial_delay_secs: Duration,
 }
 

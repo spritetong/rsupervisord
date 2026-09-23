@@ -16,37 +16,12 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 // Generic serde `default = "..."` helpers
 // ---------------------------------------------------------------------------
-// Usage: #[serde(default = "u64_value::<DEFAULT_PRIORITY>")]
+// Usage: #[serde(default = "bool_value::<true>")]
 // Import the helper and the constant at the top of the defining module.
 
 /// Returns the const `bool` (serde default for `bool` fields).
 pub const fn bool_value<const B: bool>() -> bool {
     B
-}
-
-/// Returns the const `u64` (serde default for `u64` fields).
-pub const fn u64_value<const N: u64>() -> u64 {
-    N
-}
-
-/// Returns the const `u32` (serde default for `u32` fields).
-pub const fn u32_value<const N: u32>() -> u32 {
-    N
-}
-
-/// Returns the const `u16` (serde default for `u16` fields).
-pub const fn u16_value<const N: u16>() -> u16 {
-    N
-}
-
-/// Returns the const `i32` (serde default for `i32` fields).
-pub const fn i32_value<const N: i32>() -> i32 {
-    N
-}
-
-/// Returns the const `usize` (serde default for `usize` fields).
-pub const fn usize_value<const N: usize>() -> usize {
-    N
 }
 
 /// Builds a public constant and a corresponding function.
@@ -127,16 +102,16 @@ pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 // Config defaults (values shared by serde defaults and runtime fallbacks)
 // ---------------------------------------------------------------------------
 
-/// Default program priority (also the fallback when a name is missing).
-pub const DEFAULT_PRIORITY: u32 = 50;
-/// Default group priority (sorts groups after specific programs).
-pub const DEFAULT_GROUP_PRIORITY: u32 = 999;
+// Default program priority (also the fallback when a name is missing).
+pub_const!(DEFAULT_PRIORITY: u32 = 50);
+// Default group priority (sorts groups after specific programs).
+pub_const!(DEFAULT_GROUP_PRIORITY: u32 = 999);
 /// Maximum accepted priority (validation bound).
 pub const MAX_PRIORITY: u32 = 999;
 // Startup success window.
 pub_const!(DEFAULT_START: Duration = Duration::from_secs(1));
-/// Startup retry count before fatal.
-pub const DEFAULT_START_RETRIES: u32 = 3;
+// Startup retry count before fatal.
+pub_const!(DEFAULT_START_RETRIES: u32 = 3);
 // pre_start / pre_stop hook timeout.
 pub_const!(DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(15));
 // File-change restart debounce.
@@ -145,24 +120,24 @@ pub_const!(DEFAULT_RESTART_DEBOUNCE: Duration = Duration::from_secs(5));
 pub_const!(DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(10));
 // Single health probe timeout.
 pub_const!(DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(2));
-/// Consecutive health failures before marking unhealthy.
-pub const DEFAULT_HEALTH_FAILURE_THRESHOLD: u32 = 3;
+// Consecutive health failures before marking unhealthy.
+pub_const!(DEFAULT_HEALTH_FAILURE_THRESHOLD: u32 = 3);
 // Delay before the first health probe.
 pub_const!(DEFAULT_HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(0));
-/// Expected HTTP status for HTTP health checks.
-pub const DEFAULT_HTTP_EXPECTED_STATUS: u16 = 200;
+// Expected HTTP status for HTTP health checks.
+pub_const!(DEFAULT_HTTP_EXPECTED_STATUS: u16 = 200);
 // Metrics idle timeout (0 = never).
 pub_const!(DEFAULT_METRICS_IDLE_TIMEOUT: Duration = Duration::from_secs(30));
 // Metrics sampling interval.
 pub_const!(DEFAULT_METRICS_INTERVAL: Duration = Duration::from_secs(2));
-/// Default action timeout (seconds) for API/CLI/JSON-RPC lifecycle ops.
-pub const DEFAULT_ACTION_TIMEOUT_SECS: u64 = 30;
-/// Default event-listener result buffer size.
-pub const DEFAULT_EVENT_BUFFER_SIZE: usize = 10;
-/// Default event-listener priority (runs before program events).
-pub const DEFAULT_EVENTLISTENER_PRIORITY: i32 = -1;
-/// Default line count for `tail`-style log APIs.
-pub const DEFAULT_LOG_LINES: usize = 100;
+// Default action timeout (seconds) for API/CLI/JSON-RPC lifecycle ops.
+pub_const!(DEFAULT_ACTION_TIMEOUT_SECS: u64 = 30);
+// Default event-listener result buffer size.
+pub_const!(DEFAULT_EVENT_BUFFER_SIZE: usize = 10);
+// Default event-listener priority (runs before program events).
+pub_const!(DEFAULT_EVENTLISTENER_PRIORITY: i32 = -1);
+// Default line count for `tail`-style log APIs.
+pub_const!(DEFAULT_LOG_LINES: usize = 100);
 
 // ---------------------------------------------------------------------------
 // Logging rotation defaults (aligned with Python supervisor)
@@ -172,8 +147,8 @@ pub const DEFAULT_LOG_LINES: usize = 100;
 pub const DEFAULT_LOG_MAX_BYTES: usize = 50 * 1024 * 1024;
 /// Human-readable form of [`DEFAULT_LOG_MAX_BYTES`] for string-typed fields.
 pub const DEFAULT_LOG_MAX_BYTES_HUMAN: &str = "50MB";
-/// Default number of rotated log backups (Python parity).
-pub const DEFAULT_LOG_BACKUPS: usize = 10;
+// Default number of rotated log backups (Python parity).
+pub_const!(DEFAULT_LOG_BACKUPS: usize = 10);
 
 // ---------------------------------------------------------------------------
 // Permissions / umask

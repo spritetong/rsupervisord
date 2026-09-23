@@ -4,7 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::consts::{DEFAULT_ACTION_TIMEOUT_SECS, bool_value, u64_value};
+use crate::consts::*;
 use crate::program::state::ProgramState;
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
@@ -102,7 +102,7 @@ pub struct ActionRequest {
     #[serde(default = "bool_value::<true>")]
     #[default(true)]
     pub sync: bool,
-    #[serde(default = "u64_value::<DEFAULT_ACTION_TIMEOUT_SECS>")]
+    #[serde(default = "default_action_timeout_secs")]
     #[default(DEFAULT_ACTION_TIMEOUT_SECS)]
     pub timeout_secs: u64,
 }

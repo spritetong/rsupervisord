@@ -4,7 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::consts::DEFAULT_ACTION_TIMEOUT_SECS;
+use crate::consts::*;
 use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

@@ -4,62 +4,66 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::consts::{
-    DEFAULT_EVENT_BUFFER_SIZE, DEFAULT_EVENTLISTENER_PRIORITY, default_result_handler, i32_value,
-    usize_value,
-};
+use crate::consts::*;
 use crate::error::ProgramError;
 use crate::program::config::{AutoRestartPolicy, StopSignal};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// Standard known supervisor event types and families (Python supervisor 4.2.5).
-pub static KNOWN_EVENT_TYPES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    let mut s = HashSet::new();
-    // Root family
-    s.insert("EVENT");
-    // Process state family
-    s.insert("PROCESS_STATE");
-    s.insert("PROCESS_STATE_STARTING");
-    s.insert("PROCESS_STATE_RUNNING");
-    s.insert("PROCESS_STATE_BACKOFF");
-    s.insert("PROCESS_STATE_STOPPING");
-    s.insert("PROCESS_STATE_EXITED");
-    s.insert("PROCESS_STATE_STOPPED");
-    s.insert("PROCESS_STATE_FATAL");
-    s.insert("PROCESS_STATE_UNKNOWN");
-    // Process log family
-    s.insert("PROCESS_LOG");
-    s.insert("PROCESS_LOG_STDOUT");
-    s.insert("PROCESS_LOG_STDERR");
-    // Process communication family
-    s.insert("PROCESS_COMMUNICATION");
-    s.insert("PROCESS_COMMUNICATION_STDOUT");
-    s.insert("PROCESS_COMMUNICATION_STDERR");
-    // Remote communication
-    s.insert("REMOTE_COMMUNICATION");
-    // Tick family
-    s.insert("TICK");
-    s.insert("TICK_5");
-    s.insert("TICK_60");
-    s.insert("TICK_3600");
-    // Process group family
-    s.insert("PROCESS_GROUP");
-    s.insert("PROCESS_GROUP_ADDED");
-    s.insert("PROCESS_GROUP_REMOVED");
-    // Supervisor state change family
-    s.insert("SUPERVISOR_STATE_CHANGE");
-    s.insert("SUPERVISOR_STATE_CHANGE_RUNNING");
-    s.insert("SUPERVISOR_STATE_CHANGE_STOPPING");
-    s
+static KNOWN_EVENT_TYPES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut v = vec![
+        // Root family
+        "EVENT",
+        // Process state family
+        "PROCESS_STATE",
+        "PROCESS_STATE_STARTING",
+        "PROCESS_STATE_RUNNING",
+        "PROCESS_STATE_BACKOFF",
+        "PROCESS_STATE_STOPPING",
+        "PROCESS_STATE_EXITED",
+        "PROCESS_STATE_STOPPED",
+        "PROCESS_STATE_FATAL",
+        "PROCESS_STATE_UNKNOWN",
+        // Process log family
+        "PROCESS_LOG",
+        "PROCESS_LOG_STDOUT",
+        "PROCESS_LOG_STDERR",
+        // Process communication family
+        "PROCESS_COMMUNICATION",
+        "PROCESS_COMMUNICATION_STDOUT",
+        "PROCESS_COMMUNICATION_STDERR",
+        // Remote communication
+        "REMOTE_COMMUNICATION",
+        // Tick family
+        "TICK",
+        "TICK_5",
+        "TICK_60",
+        "TICK_3600",
+        // Process group family
+        "PROCESS_GROUP",
+        "PROCESS_GROUP_ADDED",
+        "PROCESS_GROUP_REMOVED",
+        // Supervisor state change family
+        "SUPERVISOR_STATE_CHANGE",
+        "SUPERVISOR_STATE_CHANGE_RUNNING",
+        "SUPERVISOR_STATE_CHANGE_STOPPING",
+    ];
+    v.sort();
+    v
 });
 
 /// Validates whether an event name is a known supervisor event type or family.
 pub fn is_valid_event_type(name: &str) -> bool {
-    let upper = name.trim().to_ascii_uppercase();
-    KNOWN_EVENT_TYPES.contains(upper.as_str())
+    KNOWN_EVENT_TYPES
+        .binary_search_by(|&probe| {
+            let it_probe = probe.bytes().map(|b| b.to_ascii_lowercase());
+            let it_target = name.bytes().map(|b| b.to_ascii_lowercase());
+            it_probe.cmp(it_target)
+        })
+        .is_ok()
 }
 
 /// Validates a list of event subscriptions.
@@ -89,11 +93,11 @@ pub struct EventListenerConfigRaw {
     pub args: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,
-    #[serde(default = "usize_value::<DEFAULT_EVENT_BUFFER_SIZE>")]
+    #[serde(default = "default_event_buffer_size")]
     pub buffer_size: usize,
     #[serde(default = "default_result_handler")]
     pub result_handler: String,
-    #[serde(default = "i32_value::<DEFAULT_EVENTLISTENER_PRIORITY>")]
+    #[serde(default = "default_eventlistener_priority")]
     pub priority: i32,
     #[serde(default)]
     pub numprocs: Option<usize>,

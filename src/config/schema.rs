@@ -114,7 +114,7 @@ pub struct LoggingConfig {
     #[serde(default, with = "crate::serde_util::option_byte_size")]
     #[default(Some(DEFAULT_LOG_MAX_BYTES))]
     pub max_bytes: Option<usize>,
-    #[serde(default = "usize_value::<DEFAULT_LOG_BACKUPS>")]
+    #[serde(default = "default_log_backups")]
     #[default(DEFAULT_LOG_BACKUPS)]
     pub backups: usize,
 }

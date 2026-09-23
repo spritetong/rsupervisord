@@ -6,7 +6,7 @@
 
 use crate::cli::args::CliArgs;
 use crate::cli::client::SupervisorClient;
-use crate::consts::{DEFAULT_LOG_LINES, DEFAULT_TAIL_BYTES};
+use crate::consts::*;
 use crate::control::protocol::ProgramStatusDto;
 use anyhow::Result;
 use clap::CommandFactory;

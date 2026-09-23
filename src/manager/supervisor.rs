@@ -6,10 +6,7 @@
 
 use crate::config::diff::ConfigDiff;
 use crate::config::schema::SupervisorConfig;
-use crate::consts::{
-    AWAIT_ACTION, AWAIT_BULK, AWAIT_GROUP, AWAIT_QUERY, AWAIT_STDIN, DEFAULT_PRIORITY,
-    DEFAULT_STOP_WAIT, MAX_TIMEOUT, RESTART_GRACE_EXTRA, STOP_GRACE_EXTRA,
-};
+use crate::consts::*;
 use crate::error::ProgramError;
 use crate::eventlistener::pool::EventListenerPool;
 use crate::eventlistener::program::EventListenerProgram;

@@ -5,10 +5,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::SupervisorConfig;
-use crate::consts::{
-    DEFAULT_ACTION_TIMEOUT_SECS, DEFAULT_LOG_LINES, SSE_KEEPALIVE, bool_value, u64_value,
-    usize_value,
-};
+use crate::consts::*;
 use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
     ReloadResponse,
@@ -70,13 +67,13 @@ impl AppState {
 pub struct ActionQuery {
     #[serde(default = "bool_value::<true>")]
     pub sync: bool,
-    #[serde(default = "u64_value::<DEFAULT_ACTION_TIMEOUT_SECS>")]
+    #[serde(default = "default_action_timeout_secs")]
     pub timeout: u64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LogsQuery {
-    #[serde(default = "usize_value::<DEFAULT_LOG_LINES>")]
+    #[serde(default = "default_log_lines")]
     pub lines: usize,
 }
 
