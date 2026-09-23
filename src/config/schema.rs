@@ -12,6 +12,28 @@ use crate::program::config::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Program field inheritance: prefer the program's own value, else `[program_defaults]`.
+macro_rules! inherit {
+    ($raw:expr, $defaults:expr, $field:ident) => {
+        $raw.$field.or($defaults.$field)
+    };
+}
+
+/// Borrowing variant of [`inherit`] for non-`Copy` fields (avoids cloning).
+macro_rules! inherit_ref {
+    ($raw:expr, $defaults:expr, $field:ident) => {
+        $raw.$field.as_ref().or($defaults.$field.as_ref())
+    };
+}
+
+/// Owned-clone variant of [`inherit`] for non-`Copy` fields used by value.
+macro_rules! inherit_clone {
+    ($raw:expr, $defaults:expr, $field:ident) => {
+        $raw.$field.clone().or_else(|| $defaults.$field.clone())
+    };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,13 +44,13 @@ pub struct ServerConfig {
     /// Alias `chmod` matches `[unix_http_server]`. When omitted, defaults to
     /// `0o770` on Windows (owner + Administrators) or `0o700` on Unix, or
     /// `0o777` when `allow_unelevated` is true so local CLI can connect.
-    #[serde(default, alias = "chmod")]
-    pub uds_chmod: Option<String>,
+    #[serde(default, alias = "chmod", deserialize_with = "crate::serde_util::optional_chmod")]
+    pub uds_chmod: Option<crate::serde_util::ChmodMode>,
     #[serde(default)]
     pub uds_username: Option<String>,
     #[serde(default)]
     pub uds_password: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_util::optional_http_bind")]
     pub http_bind: Option<String>,
     #[serde(default, alias = "http_username")]
     pub username: Option<String>,
@@ -96,11 +118,7 @@ impl ServerConfig {
     /// `allow_unelevated` is set, else `0o770` on Windows (owner + Administrators)
     /// or `0o700` on Unix. Fails on invalid octal input.
     pub fn resolved_uds_chmod(&self) -> Result<u32, ProgramError> {
-        match self.uds_chmod.as_deref() {
-            Some(s) if s.trim().is_empty() => Ok(self.default_uds_chmod()),
-            Some(s) => parse_chmod(s),
-            None => Ok(self.default_uds_chmod()),
-        }
+        Ok(self.uds_chmod.map(|m| m.mode()).unwrap_or_else(|| self.default_uds_chmod()))
     }
 
     fn default_uds_chmod(&self) -> u32 {
@@ -146,7 +164,7 @@ pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
     #[serde(default)]
-    pub max_bytes: Option<String>,
+    pub max_bytes: Option<crate::serde_util::ByteSize>,
     #[serde(default = "usize_value::<DEFAULT_LOG_BACKUPS>")]
     pub backups: usize,
 }
@@ -156,18 +174,24 @@ pub struct LoggingConfig {
 pub struct MetricsConfig {
     #[serde(default = "bool_value::<true>")]
     pub enabled: bool,
-    #[serde(default = "u64_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>")]
-    pub idle_timeout_secs: u64,
-    #[serde(default = "u64_value::<DEFAULT_METRICS_INTERVAL_SECS>")]
-    pub interval_secs: u64,
+    #[serde(
+        default = "duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub idle_timeout_secs: Duration,
+    #[serde(
+        default = "duration_value::<DEFAULT_METRICS_INTERVAL_SECS>",
+        with = "crate::serde_util::duration_secs"
+    )]
+    pub interval_secs: Duration,
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            idle_timeout_secs: DEFAULT_METRICS_IDLE_TIMEOUT_SECS,
-            interval_secs: DEFAULT_METRICS_INTERVAL_SECS,
+            idle_timeout_secs: duration_value::<DEFAULT_METRICS_IDLE_TIMEOUT_SECS>(),
+            interval_secs: duration_value::<DEFAULT_METRICS_INTERVAL_SECS>(),
         }
     }
 }
@@ -178,7 +202,10 @@ impl Default for LoggingConfig {
             enabled: true,
             file: None,
             level: default_log_level(),
-            max_bytes: Some(DEFAULT_LOG_MAX_BYTES_HUMAN.to_string()),
+            max_bytes: Some(crate::serde_util::ByteSize::new(
+                DEFAULT_LOG_MAX_BYTES,
+                DEFAULT_LOG_MAX_BYTES_HUMAN,
+            )),
             backups: DEFAULT_LOG_BACKUPS,
         }
     }
@@ -192,14 +219,14 @@ pub struct ProgramDefaults {
     pub autostart: Option<bool>,
     #[serde(default)]
     pub autorestart: Option<AutoRestartPolicy>,
-    #[serde(default)]
-    pub start_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub start_secs: Option<Duration>,
     #[serde(default)]
     pub start_retries: Option<u32>,
     #[serde(default)]
     pub stop_signal: Option<StopSignal>,
-    #[serde(default)]
-    pub stop_wait_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub stop_wait_secs: Option<Duration>,
     #[serde(default)]
     pub priority: Option<u32>,
     #[serde(default)]
@@ -212,8 +239,8 @@ pub struct ProgramDefaults {
     pub pre_stop: Option<String>,
     #[serde(default)]
     pub pre_start_ignore_failure: Option<bool>,
-    #[serde(default)]
-    pub hook_timeout_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub hook_timeout_secs: Option<Duration>,
     #[serde(default)]
     pub numprocs: Option<usize>,
     #[serde(default)]
@@ -234,8 +261,8 @@ pub struct ProgramDefaults {
     pub restart_signal_when_file_changed: Option<StopSignal>,
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
-    #[serde(default)]
-    pub restart_debounce_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub restart_debounce_secs: Option<Duration>,
 }
 
 /// Raw representation of program log configuration with optional booleans for inheritance.
@@ -249,7 +276,7 @@ pub struct ProgramLogsConfigRaw {
     #[serde(default)]
     pub stderr: Option<PathBuf>,
     #[serde(default)]
-    pub max_bytes: Option<String>,
+    pub max_bytes: Option<crate::serde_util::ByteSize>,
     #[serde(default)]
     pub backups: Option<usize>,
     #[serde(default)]
@@ -280,14 +307,14 @@ pub struct ProgramConfigRaw {
     pub autostart: Option<bool>,
     #[serde(default)]
     pub autorestart: Option<AutoRestartPolicy>,
-    #[serde(default)]
-    pub start_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub start_secs: Option<Duration>,
     #[serde(default)]
     pub start_retries: Option<u32>,
     #[serde(default)]
     pub stop_signal: Option<StopSignal>,
-    #[serde(default)]
-    pub stop_wait_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub stop_wait_secs: Option<Duration>,
     #[serde(default)]
     pub exit_codes: Option<Vec<i32>>,
     #[serde(default)]
@@ -308,8 +335,8 @@ pub struct ProgramConfigRaw {
     pub pre_stop: Option<String>,
     #[serde(default)]
     pub pre_start_ignore_failure: Option<bool>,
-    #[serde(default)]
-    pub hook_timeout_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub hook_timeout_secs: Option<Duration>,
     #[serde(default)]
     pub numprocs: Option<usize>,
     #[serde(default)]
@@ -330,8 +357,8 @@ pub struct ProgramConfigRaw {
     pub restart_signal_when_file_changed: Option<StopSignal>,
     #[serde(default)]
     pub restart_cmd_when_file_changed: Option<String>,
-    #[serde(default)]
-    pub restart_debounce_secs: Option<u64>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub restart_debounce_secs: Option<Duration>,
     #[serde(default)]
     pub stdout_events_enabled: Option<bool>,
     #[serde(default)]
@@ -353,6 +380,11 @@ pub struct GroupConfigRaw {
 pub struct SupervisorConfig {
     #[serde(default)]
     pub worker_threads: Option<usize>,
+    /// Run in foreground (Python parity `nodaemon`). Daemonize is not yet
+    /// implemented; when false the process still runs in the foreground.
+    // TODO: Python parity double-fork daemonize when nodaemon is false.
+    #[serde(default)]
+    pub nodaemon: bool,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -375,6 +407,7 @@ impl Default for SupervisorConfig {
     fn default() -> Self {
         let mut config = Self {
             worker_threads: None,
+            nodaemon: false,
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
@@ -501,9 +534,6 @@ impl SupervisorConfig {
         if self.logging.enabled && self.logging.file.is_none() {
             self.logging.file = Some(resolver.default_daemon_log_path());
         }
-        if let Some(ref bind) = self.server.http_bind {
-            self.server.http_bind = Some(normalize_http_bind(bind));
-        }
     }
 
     pub fn validate(&self) -> Result<(), ProgramError> {
@@ -516,9 +546,7 @@ impl SupervisorConfig {
                     name
                 )));
             }
-            let priority = raw
-                .priority
-                .or(self.program_defaults.priority)
+            let priority = inherit!(raw, self.program_defaults, priority)
                 .unwrap_or(DEFAULT_PRIORITY);
             if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
@@ -526,14 +554,13 @@ impl SupervisorConfig {
                     name, priority
                 )));
             }
-            let stop_wait = raw
-                .stop_wait_secs
-                .or(self.program_defaults.stop_wait_secs)
-                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
-            if stop_wait > MAX_TIMEOUT.as_secs() {
+            let stop_wait = inherit!(raw, self.program_defaults, stop_wait_secs)
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
+            if stop_wait > MAX_TIMEOUT {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' stop_wait_secs {} exceeds maximum 86400",
-                    name, stop_wait
+                    name,
+                    stop_wait.as_secs()
                 )));
             }
             if let Some(ref expr) = raw.cron
@@ -555,7 +582,7 @@ impl SupervisorConfig {
                 });
             }
 
-            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
+            let numprocs = inherit!(raw, self.program_defaults, numprocs).unwrap_or(1);
             if numprocs == 0 {
                 return Err(ProgramError::ConfigError(format!(
                     "Program '{}' numprocs must be greater than 0",
@@ -563,10 +590,7 @@ impl SupervisorConfig {
                 )));
             }
             if numprocs > 1
-                && let Some(p_template) = raw
-                    .process_name
-                    .as_ref()
-                    .or(self.program_defaults.process_name.as_ref())
+                && let Some(p_template) = inherit_ref!(raw, self.program_defaults, process_name)
                 && !p_template.contains("process_num")
             {
                 return Err(ProgramError::ConfigError(format!(
@@ -628,15 +652,10 @@ impl SupervisorConfig {
             HashMap::with_capacity(self.programs.len());
 
         for (base_name, raw) in &self.programs {
-            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
-            let numprocs_start = raw
-                .numprocs_start
-                .or(self.program_defaults.numprocs_start)
-                .unwrap_or(0);
-            let process_name_template = raw
-                .process_name
-                .as_ref()
-                .or(self.program_defaults.process_name.as_ref());
+            let numprocs = inherit!(raw, self.program_defaults, numprocs).unwrap_or(1);
+            let numprocs_start =
+                inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
+            let process_name_template = inherit_ref!(raw, self.program_defaults, process_name);
 
             let group = if let Some(ref g) = raw.group {
                 g.clone()
@@ -684,15 +703,11 @@ impl SupervisorConfig {
         let mut resolved: HashMap<String, ProgramConfig> = HashMap::new();
 
         for (base_name, raw) in &self.programs {
-            let numprocs = raw.numprocs.or(self.program_defaults.numprocs).unwrap_or(1);
-            let numprocs_start = raw
-                .numprocs_start
-                .or(self.program_defaults.numprocs_start)
-                .unwrap_or(0);
+            let numprocs = inherit!(raw, self.program_defaults, numprocs).unwrap_or(1);
+            let numprocs_start =
+                inherit!(raw, self.program_defaults, numprocs_start).unwrap_or(0);
 
-            let priority = raw
-                .priority
-                .or(self.program_defaults.priority)
+            let priority = inherit!(raw, self.program_defaults, priority)
                 .unwrap_or(DEFAULT_PRIORITY);
             if priority > MAX_PRIORITY {
                 return Err(ProgramError::ConfigError(format!(
@@ -701,47 +716,29 @@ impl SupervisorConfig {
                 )));
             }
 
-            let autostart = raw
-                .autostart
-                .or(self.program_defaults.autostart)
+            let autostart = inherit!(raw, self.program_defaults, autostart)
                 .unwrap_or(raw.cron.is_none());
 
-            let autorestart = raw
-                .autorestart
-                .or(self.program_defaults.autorestart)
-                .unwrap_or_default();
+            let autorestart = inherit!(raw, self.program_defaults, autorestart).unwrap_or_default();
 
-            let start_secs = raw
-                .start_secs
-                .or(self.program_defaults.start_secs)
-                .unwrap_or(DEFAULT_START_SECS);
+            let start_secs = inherit!(raw, self.program_defaults, start_secs)
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_START_SECS));
 
-            let start_retries = raw
-                .start_retries
-                .or(self.program_defaults.start_retries)
-                .unwrap_or(DEFAULT_START_RETRIES);
+            let start_retries =
+                inherit!(raw, self.program_defaults, start_retries).unwrap_or(DEFAULT_START_RETRIES);
 
-            let stop_signal = raw
-                .stop_signal
-                .or(self.program_defaults.stop_signal)
-                .unwrap_or_default();
+            let stop_signal = inherit!(raw, self.program_defaults, stop_signal).unwrap_or_default();
 
-            let stop_wait_secs = raw
-                .stop_wait_secs
-                .or(self.program_defaults.stop_wait_secs)
-                .unwrap_or(DEFAULT_STOP_WAIT_SECS);
+            let stop_wait_secs = inherit!(raw, self.program_defaults, stop_wait_secs)
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
 
             let exit_codes = raw.exit_codes.clone().unwrap_or_else(default_exit_codes);
 
-            let pre_start_ignore_failure = raw
-                .pre_start_ignore_failure
-                .or(self.program_defaults.pre_start_ignore_failure)
-                .unwrap_or(false);
+            let pre_start_ignore_failure =
+                inherit!(raw, self.program_defaults, pre_start_ignore_failure).unwrap_or(false);
 
-            let hook_timeout_secs = raw
-                .hook_timeout_secs
-                .or(self.program_defaults.hook_timeout_secs)
-                .unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
+            let hook_timeout_secs = inherit!(raw, self.program_defaults, hook_timeout_secs)
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS));
 
             let group = if let Some(ref g) = raw.group {
                 g.clone()
@@ -942,10 +939,8 @@ impl SupervisorConfig {
                 };
 
                 // Evaluate hooks
-                let pre_start = if let Some(hook) = raw
-                    .pre_start
-                    .as_ref()
-                    .or(self.program_defaults.pre_start.as_ref())
+                let pre_start = if let Some(hook) =
+                    inherit_ref!(raw, self.program_defaults, pre_start)
                 {
                     Some(
                         expr.eval_named(hook, "pre_start")
@@ -955,10 +950,7 @@ impl SupervisorConfig {
                     None
                 };
 
-                let pre_stop = if let Some(hook) = raw
-                    .pre_stop
-                    .as_ref()
-                    .or(self.program_defaults.pre_stop.as_ref())
+                let pre_stop = if let Some(hook) = inherit_ref!(raw, self.program_defaults, pre_stop)
                 {
                     Some(
                         expr.eval_named(hook, "pre_stop")
@@ -968,20 +960,14 @@ impl SupervisorConfig {
                     None
                 };
 
-                let restart_when_binary_changed = raw
-                    .restart_when_binary_changed
-                    .or(self.program_defaults.restart_when_binary_changed)
-                    .unwrap_or(false);
+                let restart_when_binary_changed =
+                    inherit!(raw, self.program_defaults, restart_when_binary_changed).unwrap_or(false);
 
-                let restart_signal_when_binary_changed = raw
-                    .restart_signal_when_binary_changed
-                    .or(self.program_defaults.restart_signal_when_binary_changed);
+                let restart_signal_when_binary_changed =
+                    inherit!(raw, self.program_defaults, restart_signal_when_binary_changed);
 
                 let restart_cmd_when_binary_changed = if let Some(cmd) =
-                    raw.restart_cmd_when_binary_changed.as_ref().or(self
-                        .program_defaults
-                        .restart_cmd_when_binary_changed
-                        .as_ref())
+                    inherit_ref!(raw, self.program_defaults, restart_cmd_when_binary_changed)
                 {
                     Some(
                         expr.eval_named(cmd, "restart_cmd_when_binary_changed")
@@ -991,10 +977,8 @@ impl SupervisorConfig {
                     None
                 };
 
-                let restart_directory_monitor = if let Some(dir) = raw
-                    .restart_directory_monitor
-                    .as_ref()
-                    .or(self.program_defaults.restart_directory_monitor.as_ref())
+                let restart_directory_monitor = if let Some(dir) =
+                    inherit_ref!(raw, self.program_defaults, restart_directory_monitor)
                 {
                     let evaluated_dir = expr
                         .eval_named(&dir.to_string_lossy(), "restart_directory_monitor")
@@ -1004,19 +988,14 @@ impl SupervisorConfig {
                     None
                 };
 
-                let restart_file_pattern = raw
-                    .restart_file_pattern
-                    .clone()
-                    .or_else(|| self.program_defaults.restart_file_pattern.clone());
+                let restart_file_pattern =
+                    inherit_clone!(raw, self.program_defaults, restart_file_pattern);
 
-                let restart_signal_when_file_changed = raw
-                    .restart_signal_when_file_changed
-                    .or(self.program_defaults.restart_signal_when_file_changed);
+                let restart_signal_when_file_changed =
+                    inherit!(raw, self.program_defaults, restart_signal_when_file_changed);
 
-                let restart_cmd_when_file_changed = if let Some(cmd) = raw
-                    .restart_cmd_when_file_changed
-                    .as_ref()
-                    .or(self.program_defaults.restart_cmd_when_file_changed.as_ref())
+                let restart_cmd_when_file_changed = if let Some(cmd) =
+                    inherit_ref!(raw, self.program_defaults, restart_cmd_when_file_changed)
                 {
                     Some(
                         expr.eval_named(cmd, "restart_cmd_when_file_changed")
@@ -1026,10 +1005,8 @@ impl SupervisorConfig {
                     None
                 };
 
-                let restart_debounce_secs = raw
-                    .restart_debounce_secs
-                    .or(self.program_defaults.restart_debounce_secs)
-                    .unwrap_or(crate::consts::DEFAULT_RESTART_DEBOUNCE_SECS);
+                let restart_debounce_secs = inherit!(raw, self.program_defaults, restart_debounce_secs)
+                    .unwrap_or_else(|| Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS));
 
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
@@ -1094,10 +1071,14 @@ impl SupervisorConfig {
             };
             let autostart = raw.autostart.unwrap_or(true);
             let autorestart = raw.autorestart.unwrap_or_default();
-            let start_secs = raw.start_secs.unwrap_or(DEFAULT_START_SECS);
+            let start_secs = raw
+                .start_secs
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_START_SECS));
             let start_retries = raw.start_retries.unwrap_or(DEFAULT_START_RETRIES);
             let stop_signal = raw.stop_signal.unwrap_or_default();
-            let stop_wait_secs = raw.stop_wait_secs.unwrap_or(DEFAULT_STOP_WAIT_SECS);
+            let stop_wait_secs = raw
+                .stop_wait_secs
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_STOP_WAIT_SECS));
             let group_priority = 0;
 
             let mut instances = Vec::with_capacity(numprocs);
@@ -1236,7 +1217,7 @@ impl SupervisorConfig {
                     pre_start: None,
                     pre_stop: None,
                     pre_start_ignore_failure: false,
-                    hook_timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
+                    hook_timeout_secs: Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
                     restart_when_binary_changed: false,
                     restart_signal_when_binary_changed: None,
                     restart_cmd_when_binary_changed: None,
@@ -1244,7 +1225,7 @@ impl SupervisorConfig {
                     restart_file_pattern: None,
                     restart_signal_when_file_changed: None,
                     restart_cmd_when_file_changed: None,
-                    restart_debounce_secs: crate::consts::DEFAULT_RESTART_DEBOUNCE_SECS,
+                    restart_debounce_secs: Duration::from_secs(DEFAULT_RESTART_DEBOUNCE_SECS),
                     event_listener,
                 };
 
@@ -1542,26 +1523,27 @@ programs: {}
         // Explicit uds_chmod always wins
         let s = ServerConfig {
             allow_unelevated: true,
-            uds_chmod: Some("0755".to_string()),
+            uds_chmod: Some(crate::serde_util::ChmodMode::parse("0755").unwrap()),
             ..Default::default()
         };
         assert_eq!(s.resolved_uds_chmod().unwrap(), 0o755);
 
-        // Empty string falls back to default
+        // Empty string becomes None at deserialize → platform default
+        // (covered by optional_chmod; construct None explicitly here)
         let s = ServerConfig {
             allow_unelevated: true,
-            uds_chmod: Some("".to_string()),
+            uds_chmod: None,
             ..Default::default()
         };
         assert_eq!(s.resolved_uds_chmod().unwrap(), 0o777);
 
-        // Invalid explicit value fails
-        let s = ServerConfig {
-            allow_unelevated: true,
-            uds_chmod: Some("not-octal".to_string()),
-            ..Default::default()
-        };
-        assert!(s.resolved_uds_chmod().is_err());
+        // Invalid explicit value fails at parse boundary (deserialize_with)
+        let bad = r#"
+server:
+  uds_chmod: "not-octal"
+programs: {}
+"#;
+        assert!(SupervisorConfig::from_yaml_str(bad).is_err());
     }
 
     #[test]
@@ -1573,7 +1555,10 @@ server:
 programs: {}
 "#;
         let config = SupervisorConfig::from_yaml_str(yaml).expect("valid yaml");
-        assert_eq!(config.server.uds_chmod.as_deref(), Some("0750"));
+        assert_eq!(
+            config.server.uds_chmod.map(|m| m.mode()),
+            Some(0o750)
+        );
         assert_eq!(config.server.resolved_uds_chmod().unwrap(), 0o750);
 
         // Quoted string form (primary field name)
@@ -1583,7 +1568,7 @@ server:
 programs: {}
 "#;
         let config2 = SupervisorConfig::from_yaml_str(yaml2).expect("valid yaml");
-        assert_eq!(config2.server.uds_chmod.as_deref(), Some("0700"));
+        assert_eq!(config2.server.uds_chmod.map(|m| m.mode()), Some(0o700));
 
         // deny_unknown_fields still rejects unknown keys
         let bad = r#"
@@ -1700,7 +1685,7 @@ programs:
         let p1 = &resolved["default_debounce_prog"];
         assert!(p1.restart_when_binary_changed);
         assert_eq!(p1.restart_signal_when_binary_changed, Some(StopSignal::Hup));
-        assert_eq!(p1.restart_debounce_secs, 10); // Inherited from defaults
+        assert_eq!(p1.restart_debounce_secs, Duration::from_secs(10)); // Inherited from defaults
 
         let p2 = &resolved["custom_debounce_prog"];
         assert_eq!(
@@ -1708,11 +1693,11 @@ programs:
             Some(PathBuf::from("src/custom_debounce_prog"))
         );
         assert_eq!(p2.restart_file_pattern.as_deref(), Some("*.rs"));
-        assert_eq!(p2.restart_debounce_secs, 2); // Overridden
+        assert_eq!(p2.restart_debounce_secs, Duration::from_secs(2)); // Overridden
         assert_eq!(p2.restart_signal_when_file_changed, Some(StopSignal::Term));
 
         let p3 = &resolved["vanilla_prog"];
         assert!(!p3.restart_when_binary_changed);
-        assert_eq!(p3.restart_debounce_secs, 10); // Inherited from defaults
+        assert_eq!(p3.restart_debounce_secs, Duration::from_secs(10)); // Inherited from defaults
     }
 }

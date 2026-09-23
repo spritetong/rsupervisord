@@ -19,6 +19,30 @@ use crate::consts::{
 use crate::error::ProgramError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+fn parse_opt_duration(
+    map: &HashMap<String, String>,
+    keys: &[&str],
+) -> Result<Option<Duration>, ProgramError> {
+    let raw = keys.iter().find_map(|k| map.get(*k));
+    raw.map(|s| {
+        s.parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|e| ProgramError::ConfigError(format!("invalid duration '{}': {}", s, e)))
+    })
+    .transpose()
+}
+
+fn parse_opt_bytesize(
+    map: &HashMap<String, String>,
+    keys: &[&str],
+) -> Result<Option<crate::serde_util::ByteSize>, ProgramError> {
+    keys.iter()
+        .find_map(|k| map.get(*k))
+        .map(|s| crate::serde_util::ByteSize::parse(s))
+        .transpose()
+}
 
 /// Adapts a `ParsedIni` into a standard `SupervisorConfig`.
 pub fn adapt_ini_to_config(
@@ -36,7 +60,7 @@ pub fn adapt_ini_to_config(
             config.server.uds_path = PathBuf::from(file);
         }
         if let Some(chmod) = sec.get("chmod") {
-            config.server.uds_chmod = Some(chmod.clone());
+            config.server.uds_chmod = crate::serde_util::ChmodMode::parse(chmod).map(Some)?;
         }
         if let Some(username) = sec.get("username") {
             config.server.uds_username = Some(username.clone());
@@ -71,7 +95,7 @@ pub fn adapt_ini_to_config(
             }
         }
         if let Some(maxbytes) = sec.get("logfile_maxbytes") {
-            config.logging.max_bytes = Some(maxbytes.clone());
+            config.logging.max_bytes = Some(crate::serde_util::ByteSize::parse(maxbytes)?);
         }
         if let Some(backups_str) = sec.get("logfile_backups")
             && let Ok(backups) = backups_str.parse::<usize>()
@@ -83,6 +107,11 @@ pub fn adapt_ini_to_config(
         }
         if let Some(ident) = sec.get("identifier") {
             config.server.identifier = Some(ident.clone());
+        }
+        if let Some(nodaemon) = sec.get("nodaemon")
+            && let Ok(flag) = nodaemon.parse::<bool>()
+        {
+            config.nodaemon = flag;
         }
         if let Some(env_str) = sec.get("environment")
             && let Ok(env_map) = parse_environment(env_str)
@@ -193,14 +222,9 @@ fn parse_program_config(
         .map(|s| parse_autorestart(s))
         .transpose()?;
 
-    let start_secs = sec
-        .get("startsecs")
-        .or_else(|| sec.get("start_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
-            ProgramError::ConfigError(format!("Program '{}' invalid startsecs: {}", prog_name, e))
-        })?;
+    let start_secs = parse_opt_duration(sec, &["startsecs", "start_secs"]).map_err(|e| {
+        ProgramError::ConfigError(format!("Program '{}' invalid startsecs: {}", prog_name, e))
+    })?;
 
     let start_retries = sec
         .get("startretries")
@@ -226,17 +250,12 @@ fn parse_program_config(
         .map(|s| parse_stop_signal(s))
         .transpose()?;
 
-    let stop_wait_secs = sec
-        .get("stopwaitsecs")
-        .or_else(|| sec.get("stop_wait_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
-            ProgramError::ConfigError(format!(
-                "Program '{}' invalid stopwaitsecs: {}",
-                prog_name, e
-            ))
-        })?;
+    let stop_wait_secs = parse_opt_duration(sec, &["stopwaitsecs", "stop_wait_secs"]).map_err(|e| {
+        ProgramError::ConfigError(format!(
+            "Program '{}' invalid stopwaitsecs: {}",
+            prog_name, e
+        ))
+    })?;
 
     let directory = sec.get("directory").map(PathBuf::from);
     let user = sec.get("user").cloned();
@@ -257,10 +276,8 @@ fn parse_program_config(
     let stdout_path = sec.get("stdout_logfile").and_then(|s| parse_log_path(s));
     let stderr_path = sec.get("stderr_logfile").and_then(|s| parse_log_path(s));
 
-    let max_bytes = sec
-        .get("stdout_logfile_maxbytes")
-        .or_else(|| sec.get("stderr_logfile_maxbytes"))
-        .cloned();
+    let max_bytes =
+        parse_opt_bytesize(sec, &["stdout_logfile_maxbytes", "stderr_logfile_maxbytes"])?;
 
     let backups = sec
         .get("stdout_logfile_backups")
@@ -327,16 +344,12 @@ fn parse_program_config(
         .get("pre_start_ignore_failure")
         .map(|s| parse_loose_bool(s))
         .transpose()?;
-    let hook_timeout_secs = sec
-        .get("hook_timeout_secs")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
-            ProgramError::ConfigError(format!(
-                "Program '{}' invalid hook_timeout_secs: {}",
-                prog_name, e
-            ))
-        })?;
+    let hook_timeout_secs = parse_opt_duration(sec, &["hook_timeout_secs"]).map_err(|e| {
+        ProgramError::ConfigError(format!(
+            "Program '{}' invalid hook_timeout_secs: {}",
+            prog_name, e
+        ))
+    })?;
 
     let restart_when_binary_changed = sec
         .get("restart_when_binary_changed")
@@ -354,11 +367,8 @@ fn parse_program_config(
         .map(|s| parse_stop_signal(s))
         .transpose()?;
     let restart_cmd_when_file_changed = sec.get("restart_cmd_when_file_changed").cloned();
-    let restart_debounce_secs = sec
-        .get("restart_debounce_secs")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
+    let restart_debounce_secs =
+        parse_opt_duration(sec, &["restart_debounce_secs"]).map_err(|e| {
             ProgramError::ConfigError(format!(
                 "Program '{}' invalid restart_debounce_secs: {}",
                 prog_name, e
@@ -486,17 +496,12 @@ fn parse_event_listener_config(
         .get("autorestart")
         .map(|s| parse_autorestart(s))
         .transpose()?;
-    let start_secs = sec
-        .get("startsecs")
-        .or_else(|| sec.get("start_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
-            ProgramError::ConfigError(format!(
-                "EventListener '{}' invalid startsecs: {}",
-                pool_name, e
-            ))
-        })?;
+    let start_secs = parse_opt_duration(sec, &["startsecs", "start_secs"]).map_err(|e| {
+        ProgramError::ConfigError(format!(
+            "EventListener '{}' invalid startsecs: {}",
+            pool_name, e
+        ))
+    })?;
     let start_retries = sec
         .get("startretries")
         .or_else(|| sec.get("start_retries"))
@@ -513,12 +518,8 @@ fn parse_event_listener_config(
         .or_else(|| sec.get("stop_signal"))
         .map(|s| parse_stop_signal(s))
         .transpose()?;
-    let stop_wait_secs = sec
-        .get("stopwaitsecs")
-        .or_else(|| sec.get("stop_wait_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| {
+    let stop_wait_secs =
+        parse_opt_duration(sec, &["stopwaitsecs", "stop_wait_secs"]).map_err(|e| {
             ProgramError::ConfigError(format!(
                 "EventListener '{}' invalid stopwaitsecs: {}",
                 pool_name, e
@@ -607,11 +608,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         .get("autorestart")
         .map(|s| parse_autorestart(s))
         .transpose()?;
-    let start_secs = sec
-        .get("startsecs")
-        .or_else(|| sec.get("start_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
+    let start_secs = parse_opt_duration(sec, &["startsecs", "start_secs"])
         .map_err(|e| ProgramError::ConfigError(format!("Invalid default startsecs: {}", e)))?;
     let start_retries = sec
         .get("startretries")
@@ -624,11 +621,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         .or_else(|| sec.get("stop_signal"))
         .map(|s| parse_stop_signal(s))
         .transpose()?;
-    let stop_wait_secs = sec
-        .get("stopwaitsecs")
-        .or_else(|| sec.get("stop_wait_secs"))
-        .map(|s| s.parse::<u64>())
-        .transpose()
+    let stop_wait_secs = parse_opt_duration(sec, &["stopwaitsecs", "stop_wait_secs"])
         .map_err(|e| ProgramError::ConfigError(format!("Invalid default stopwaitsecs: {}", e)))?;
     let priority = sec
         .get("priority")
@@ -638,10 +631,8 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
 
     let stdout_path = sec.get("stdout_logfile").and_then(|s| parse_log_path(s));
     let stderr_path = sec.get("stderr_logfile").and_then(|s| parse_log_path(s));
-    let max_bytes = sec
-        .get("stdout_logfile_maxbytes")
-        .or_else(|| sec.get("stderr_logfile_maxbytes"))
-        .cloned();
+    let max_bytes =
+        parse_opt_bytesize(sec, &["stdout_logfile_maxbytes", "stderr_logfile_maxbytes"])?;
     let backups = sec
         .get("stdout_logfile_backups")
         .or_else(|| sec.get("stderr_logfile_backups"))
@@ -717,13 +708,9 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
             .get("pre_start_ignore_failure")
             .map(|s| parse_loose_bool(s))
             .transpose()?,
-        hook_timeout_secs: sec
-            .get("hook_timeout_secs")
-            .map(|s| s.parse::<u64>())
-            .transpose()
-            .map_err(|e| {
-                ProgramError::ConfigError(format!("Invalid default hook_timeout_secs: {}", e))
-            })?,
+        hook_timeout_secs: parse_opt_duration(sec, &["hook_timeout_secs"]).map_err(|e| {
+            ProgramError::ConfigError(format!("Invalid default hook_timeout_secs: {}", e))
+        })?,
         numprocs,
         numprocs_start,
         process_name,
@@ -743,12 +730,8 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
             .map(|s| parse_stop_signal(s))
             .transpose()?,
         restart_cmd_when_file_changed: sec.get("restart_cmd_when_file_changed").cloned(),
-        restart_debounce_secs: sec
-            .get("restart_debounce_secs")
-            .map(|s| s.parse::<u64>())
-            .transpose()
-            .map_err(|e| {
-                ProgramError::ConfigError(format!("Invalid default restart_debounce_secs: {}", e))
-            })?,
+        restart_debounce_secs: parse_opt_duration(sec, &["restart_debounce_secs"]).map_err(|e| {
+            ProgramError::ConfigError(format!("Invalid default restart_debounce_secs: {}", e))
+        })?,
     })
 }
