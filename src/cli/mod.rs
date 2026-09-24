@@ -22,36 +22,89 @@ use std::ffi::OsString;
 fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> {
     match (u, p) {
         (Some(u), Some(p)) if !u.is_empty() || !p.is_empty() => Some((u, p)),
+        (Some(u), None) if !u.is_empty() => Some((u, String::new())),
+        (None, Some(p)) if !p.is_empty() => Some((String::new(), p)),
         _ => None,
     }
 }
 
-type ResolvedCandidates = (
+/// Endpoint candidate chain plus optional CLI/`[supervisorctl]` basic auth and token.
+pub type ResolvedCandidates = (
     Vec<EndpointCandidate>,
     Option<(String, String)>,
     Option<String>,
 );
 
-/// Resolves the ordered endpoint candidate chain when `-s` is not provided.
+/// Resolves the ordered endpoint candidate chain.
 ///
-/// Windows: named pipe (default local) first, then configured `uds_path`,
-/// then TCP `http_bind`. Authorization errors fail closed; only
-/// not-found/refused advance to the next candidate.
-/// Unix / other: preserves existing single-endpoint behavior
-/// (TCP if `http_bind` set, else IPC path, else default local).
-fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
+/// Endpoint priority:
+/// 1. explicit `-s/--server`
+/// 2. `[supervisorctl] serverurl` from config (OI-1)
+/// 3. config-derived candidate chain (Windows: pipe → uds → TCP; Unix: TCP or UDS)
+///
+/// Basic-credential priority (second tuple element, applied as override):
+/// 1. CLI `-u`/`-p`
+/// 2. `[supervisorctl] username`/`password` (OI-1)
+/// 3. `None` — each candidate carries its own server-section credentials
+///
+/// Config is always loaded when available so credentials/token apply even
+/// with explicit `-s` (CLI flags still win at the call site).
+///
+/// Public for integration tests covering OI-1 (`[supervisorctl]` defaults).
+pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
     let cmd_name = crate::config::paths::get_cmd_name();
     let cfg_path = args
         .config
         .clone()
         .or_else(|| crate::config::paths::find_default_config_path(&cmd_name));
 
-    if let Some(ref path) = cfg_path
-        && let Ok(cfg) = crate::config::SupervisorConfig::from_file(path)
-    {
-        let tcp_basic = basic_pair(cfg.server.username, cfg.server.password);
-        let uds_basic = basic_pair(cfg.server.uds_username, cfg.server.uds_password);
-        let token = cfg.server.auth_token;
+    let cfg = match cfg_path {
+        Some(ref path) => crate::config::SupervisorConfig::from_file(path).ok(),
+        None => None,
+    };
+
+    let cli_defaults = cfg.as_ref().and_then(|c| c.cli_defaults.as_ref());
+    let token = cfg.as_ref().and_then(|c| c.server.auth_token.clone());
+
+    let cli_basic = match (args.user.clone(), args.password.clone()) {
+        (Some(u), Some(p)) => Some((u, p)),
+        (Some(u), None) => Some((u, String::new())),
+        (None, Some(p)) => Some((String::new(), p)),
+        (None, None) => {
+            cli_defaults.and_then(|d| basic_pair(d.username.clone(), d.password.clone()))
+        }
+    };
+
+    // 1. Explicit -s
+    if let Some(ref s) = args.server {
+        return Ok((
+            vec![EndpointCandidate {
+                endpoint: Endpoint::parse(s),
+                basic: None,
+            }],
+            cli_basic,
+            token,
+        ));
+    }
+
+    if let Some(cfg) = cfg.as_ref() {
+        // 2. [supervisorctl] serverurl seeds the endpoint when -s is absent (OI-1).
+        if let Some(url) = cli_defaults.and_then(|d| d.serverurl.as_ref()) {
+            return Ok((
+                vec![EndpointCandidate {
+                    endpoint: Endpoint::parse(url),
+                    basic: None,
+                }],
+                cli_basic,
+                token,
+            ));
+        }
+
+        let tcp_basic = basic_pair(cfg.server.username.clone(), cfg.server.password.clone());
+        let uds_basic = basic_pair(
+            cfg.server.uds_username.clone(),
+            cfg.server.uds_password.clone(),
+        );
 
         #[cfg(windows)]
         {
@@ -78,7 +131,7 @@ fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
                 });
             }
 
-            return Ok((candidates, None, token));
+            return Ok((candidates, cli_basic, token));
         }
 
         #[cfg(not(windows))]
@@ -96,7 +149,7 @@ fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
                     basic: uds_basic.clone(),
                 }
             };
-            return Ok((vec![candidate], None, token));
+            return Ok((vec![candidate], cli_basic, token));
         }
     }
 
@@ -106,8 +159,8 @@ fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
             endpoint: Endpoint::default_local(),
             basic: None,
         }],
-        None,
-        None,
+        cli_basic,
+        token,
     ))
 }
 
@@ -161,22 +214,14 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
     let service_config = args.config.clone();
 
     // Determine target daemon endpoint candidates & configuration credentials.
-    // Explicit `-s` yields a single endpoint with no config-derived credentials
-    // (matching prior behavior). Otherwise walk the candidate chain.
-    let (candidates, cfg_basic_auth, cfg_token) = if let Some(ref s) = args.server {
-        (
-            vec![EndpointCandidate {
-                endpoint: Endpoint::parse(s),
-                basic: None,
-            }],
-            None,
-            None,
-        )
-    } else {
-        resolve_endpoint_candidates(&args)?
-    };
+    // Explicit `-s` still loads config so `-c` + `[supervisorctl]` defaults apply;
+    // CLI `-u`/`-p` always override config-derived credentials (OI-1).
+    let (candidates, cfg_basic_auth, cfg_token) = resolve_endpoint_candidates(&args)?;
 
     // CLI -u/-p override config-derived basic auth for all candidates.
+    // resolve_endpoint_candidates already folds CLI flags / [supervisorctl] into
+    // cfg_basic_auth; re-apply CLI flags here so they always win if something
+    // upstream changed.
     let basic_auth = match (args.user, args.password) {
         (Some(u), Some(p)) => Some((u, p)),
         (Some(u), None) => Some((u, String::new())),

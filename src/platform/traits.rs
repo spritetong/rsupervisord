@@ -67,10 +67,17 @@ pub trait PlatformBackend: Send + Sync {
     ) -> Result<(), ProgramError>;
 
     /// Attaches to a freshly spawned child process and returns an OS-level guard.
+    ///
+    /// `stop_as_group` / `kill_as_group` control whether stop/kill signals target
+    /// the process group (Unix `kill(-pgid)`) or only the primary PID (Python
+    /// `stopasgroup`/`killasgroup` semantics). Windows ignores these flags
+    /// (Job Object always covers the tree).
     fn attach_child(
         &self,
         child: &tokio::process::Child,
         pid: u32,
+        stop_as_group: bool,
+        kill_as_group: bool,
     ) -> Result<Box<dyn PlatformProcessGuard>, ProgramError>;
 
     /// Returns the platform default path for Unix Domain Sockets (UDS).

@@ -116,6 +116,48 @@ impl SupervisorDaemon {
             config.nodaemon = true;
         }
 
+        // OI-6: apply `[supervisord] environment` at daemon startup (not parse time),
+        // before any children spawn so they inherit the expanded environment.
+        for (k, v) in &config.environment {
+            tracing::debug!(key = %k, "applying supervisord environment");
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+
+        // OI-8: raise soft rlimits best-effort (Unix only; Windows has no rlimit).
+        #[cfg(unix)]
+        {
+            if let Some(minfds) = config.minfds {
+                apply_rlimit(
+                    nix::sys::resource::Resource::RLIMIT_NOFILE,
+                    minfds,
+                    "minfds",
+                );
+            }
+            if let Some(minprocs) = config.minprocs {
+                apply_rlimit(
+                    nix::sys::resource::Resource::RLIMIT_NPROC,
+                    minprocs,
+                    "minprocs",
+                );
+            }
+        }
+
+        // OI-8: write pidfile on startup; removed on clean shutdown below.
+        let pidfile_path = config.pidfile.clone();
+        if let Some(ref pidfile) = pidfile_path {
+            if let Some(parent) = pidfile.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(pidfile, format!("{}\n", std::process::id())) {
+                Ok(()) => tracing::info!("Wrote pidfile {:?}", pidfile),
+                Err(e) => tracing::warn!("Failed to write pidfile {:?}: {}", pidfile, e),
+            }
+        }
+
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
@@ -138,41 +180,52 @@ impl SupervisorDaemon {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-            let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+            // OI-4: `silent` suppresses the console layer; file layer still applies.
+            // Build the file layer inside each branch so `Layer<S>` types match
+            // the subscriber stack (filter-only vs filter+console).
+            let silent = config.logging.silent;
+            let log_file = config.logging.file.clone();
 
-            if let Some(ref log_file) = config.logging.file {
-                if let Some(parent) = log_file.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let max_bytes = config
-                    .logging
-                    .max_bytes
-                    .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-                let file_rotator = file_rotate::FileRotate::new(
-                    log_file,
-                    file_rotate::suffix::AppendCount::new(config.logging.backups),
-                    file_rotate::ContentLimit::Bytes(max_bytes),
-                    file_rotate::compression::Compression::None,
-                    None,
-                );
-                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
-                let make_writer = move || MutexWriter(file_writer_arc.clone());
+            macro_rules! try_with_file {
+                ($reg:expr) => {
+                    if let Some(ref path) = log_file {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let max_bytes = config
+                            .logging
+                            .max_bytes
+                            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
+                        let file_rotator = file_rotate::FileRotate::new(
+                            path,
+                            file_rotate::suffix::AppendCount::new(config.logging.backups),
+                            file_rotate::ContentLimit::Bytes(max_bytes),
+                            file_rotate::compression::Compression::None,
+                            None,
+                        );
+                        let file_writer_arc =
+                            std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
+                        let make_writer = move || MutexWriter(file_writer_arc.clone());
+                        let file_layer = tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_target(false)
+                            .with_writer(make_writer);
+                        let _ = $reg.with(file_layer).try_init();
+                    } else {
+                        let _ = $reg.try_init();
+                    }
+                };
+            }
 
-                let file_layer = tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_target(false)
-                    .with_writer(make_writer);
-
-                let _ = tracing_subscriber::registry()
-                    .with(filter)
-                    .with(console_layer)
-                    .with(file_layer)
-                    .try_init();
+            if silent {
+                try_with_file!(tracing_subscriber::registry().with(filter));
             } else {
-                let _ = tracing_subscriber::registry()
-                    .with(filter)
-                    .with(console_layer)
-                    .try_init();
+                let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+                try_with_file!(
+                    tracing_subscriber::registry()
+                        .with(filter)
+                        .with(console_layer)
+                );
             }
         }
 
@@ -242,8 +295,49 @@ impl SupervisorDaemon {
             tracing::error!("Error shutting down manager: {}", e);
         }
 
+        // OI-8: remove pidfile on clean shutdown.
+        if let Some(ref pidfile) = pidfile_path
+            && let Err(e) = std::fs::remove_file(pidfile)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("Failed to remove pidfile {:?}: {}", pidfile, e);
+        }
+
         tracing::info!("{} shutdown cleanly", cmd_name);
         Ok(())
+    }
+}
+
+/// Best-effort raise of a soft rlimit to at least `min_value` (OI-8).
+/// Logs a warning and continues on failure (matches Python's non-fatal path
+/// when the hard limit cannot be raised without privilege).
+#[cfg(unix)]
+fn apply_rlimit(resource: nix::sys::resource::Resource, min_value: u32, name: &str) {
+    use nix::sys::resource::{getrlimit, setrlimit};
+
+    let want = min_value as u64;
+    match getrlimit(resource) {
+        Ok((soft, hard)) => {
+            if soft >= want {
+                return;
+            }
+            let new_soft = want.min(hard.max(want));
+            // Prefer raising soft only; if hard is below want, try both (needs priv).
+            let new_hard = if hard < want { want } else { hard };
+            if let Err(e) = setrlimit(resource, new_soft.min(new_hard), new_hard) {
+                tracing::warn!(
+                    resource = name,
+                    min = min_value,
+                    "setrlimit failed (continuing): {}",
+                    e
+                );
+            } else {
+                tracing::info!(resource = name, min = min_value, "rlimit raised");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(resource = name, "getrlimit failed (continuing): {}", e);
+        }
     }
 }
 

@@ -928,6 +928,10 @@ impl ProgramActor {
             cmd.current_dir(dir);
         }
 
+        // OI-2: load `.env` files first; program `environment` wins on conflict.
+        for (k, v) in crate::program::envfile::load_env_files(&self.config.env_files) {
+            cmd.env(k, v);
+        }
         for (k, v) in &self.config.environment {
             cmd.env(k, v);
         }
@@ -971,8 +975,13 @@ impl ProgramActor {
         let stdout = child_guard.stdout.take();
         let stderr = child_guard.stderr.take();
 
-        // Attach platform-specific process guard
-        let platform_guard = platform.attach_child(&child_guard, pid)?;
+        // Attach platform-specific process guard (OI-9: group vs single-pid)
+        let platform_guard = platform.attach_child(
+            &child_guard,
+            pid,
+            self.config.stop_as_group,
+            self.config.kill_as_group,
+        )?;
 
         let stdout_pump = if !stdout_disabled {
             stdout.map(|pipe| {
@@ -1141,8 +1150,9 @@ impl ProgramActor {
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
+                    // OI-3: honor per-program killwaitsecs (default = DRAIN_TIMEOUT).
                     let post_kill_wait = tokio::time::timeout(
-                        DRAIN_TIMEOUT,
+                        self.config.kill_wait_secs,
                         child_info.platform_guard.wait_exit(&mut child_info.child),
                     )
                     .await;

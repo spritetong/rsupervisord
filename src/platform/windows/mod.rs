@@ -294,7 +294,13 @@ impl PlatformBackend for WindowsPlatformBackend {
         &self,
         _child: &tokio::process::Child,
         pid: u32,
+        stop_as_group: bool,
+        kill_as_group: bool,
     ) -> Result<Box<dyn PlatformProcessGuard>, ProgramError> {
+        // Windows always terminates the Job Object tree; the group flags are
+        // accepted for API parity with Unix and intentionally ignored.
+        let _ = (stop_as_group, kill_as_group);
+
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,

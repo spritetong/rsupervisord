@@ -24,14 +24,18 @@ use tokio::process::Command as TokioCommand;
 pub struct UnixProcessGuard {
     pub pid: u32,
     pub pgid: i32,
+    stop_as_group: bool,
+    kill_as_group: bool,
     last_cpu_sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 impl UnixProcessGuard {
-    pub fn new(pid: u32) -> Self {
+    pub fn new(pid: u32, stop_as_group: bool, kill_as_group: bool) -> Self {
         Self {
             pid,
             pgid: pid as i32,
+            stop_as_group,
+            kill_as_group,
             last_cpu_sample: std::sync::Mutex::new(None),
         }
     }
@@ -50,6 +54,19 @@ impl UnixProcessGuard {
             Err(e) => Err(ProgramError::PlatformError(format!(
                 "Failed to send signal {:?} to pgid {}: {}",
                 sig, self.pgid, e
+            ))),
+        }
+    }
+
+    /// Sends a POSIX signal to the primary PID only (Python default when
+    /// `stopasgroup`/`killasgroup` are false).
+    fn send_signal_to_pid(&self, sig: Signal) -> Result<(), ProgramError> {
+        let single_pid = Pid::from_raw(self.pid as i32);
+        match signal::kill(single_pid, sig) {
+            Ok(_) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(e) => Err(ProgramError::PlatformError(format!(
+                "Failed to send signal {:?} to pid {}: {}",
+                sig, self.pid, e
             ))),
         }
     }
@@ -84,11 +101,19 @@ impl PlatformProcessGuard for UnixProcessGuard {
 
     fn send_stop_signal(&self, signal: StopSignal) -> Result<(), ProgramError> {
         let nix_sig = to_nix_signal(signal);
-        self.send_signal_to_group(nix_sig)
+        if self.stop_as_group {
+            self.send_signal_to_group(nix_sig)
+        } else {
+            self.send_signal_to_pid(nix_sig)
+        }
     }
 
     fn force_kill(&self) -> Result<(), ProgramError> {
-        self.send_signal_to_group(Signal::SIGKILL)
+        if self.kill_as_group {
+            self.send_signal_to_group(Signal::SIGKILL)
+        } else {
+            self.send_signal_to_pid(Signal::SIGKILL)
+        }
     }
 
     fn pid(&self) -> u32 {
@@ -205,8 +230,14 @@ impl PlatformBackend for UnixPlatformBackend {
         &self,
         _child: &tokio::process::Child,
         pid: u32,
+        stop_as_group: bool,
+        kill_as_group: bool,
     ) -> Result<Box<dyn PlatformProcessGuard>, ProgramError> {
-        Ok(Box::new(UnixProcessGuard::new(pid)))
+        Ok(Box::new(UnixProcessGuard::new(
+            pid,
+            stop_as_group,
+            kill_as_group,
+        )))
     }
 
     fn default_uds_path(&self) -> PathBuf {

@@ -336,6 +336,10 @@ impl EventListenerActor {
             cmd.current_dir(dir);
         }
 
+        // OI-2: load `.env` files first; program `environment` wins on conflict.
+        for (k, v) in crate::program::envfile::load_env_files(&self.config.env_files) {
+            cmd.env(k, v);
+        }
         for (k, v) in &self.config.environment {
             cmd.env(k, v);
         }
@@ -355,7 +359,12 @@ impl EventListenerActor {
             ProgramError::PlatformError("Process spawned without PID".to_string())
         })?;
 
-        let platform_guard = platform.attach_child(&child, pid)?;
+        let platform_guard = platform.attach_child(
+            &child,
+            pid,
+            self.config.stop_as_group,
+            self.config.kill_as_group,
+        )?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             ProgramError::PlatformError("Failed to capture child stdin".to_string())

@@ -69,8 +69,15 @@ fn walk_object(
                     walk_object(v, ctx, expander, expr, child_section, child_in_logs);
                 }
                 Value::Array(arr) => {
+                    let kind = classify(section, in_logs, k);
                     for item in arr.iter_mut() {
-                        walk_scalar_or_container(item, ctx, expander, expr);
+                        if kind == Kind::Path
+                            && let Value::String(s) = item
+                        {
+                            *s = translate_string(s, kind, ctx, expander, expr);
+                        } else {
+                            walk_scalar_or_container(item, ctx, expander, expr);
+                        }
                     }
                 }
                 Value::String(s) => {
@@ -115,6 +122,7 @@ fn descend(section: Section, in_logs: bool, key: &str) -> (Section, bool) {
             "program_defaults" => (ProgramDefaults, false),
             "programs" => (ProgramsMap, false),
             "event_listeners" => (EventListenersMap, false),
+            "pidfile" => (Other, false),
             _ => (Other, false),
         },
         ProgramsMap => (Program, false),
@@ -135,6 +143,7 @@ fn classify(section: Section, in_logs: bool, key: &str) -> Kind {
     match section {
         Server if key == "uds_path" => Path,
         Logging if key == "file" => Path,
+        Root if key == "pidfile" => Path,
         Program | ProgramDefaults if in_logs => {
             if key == "stdout" || key == "stderr" {
                 Path
@@ -143,15 +152,16 @@ fn classify(section: Section, in_logs: bool, key: &str) -> Kind {
             }
         }
         Program | ProgramDefaults => match key {
-            "directory" | "restart_directory_monitor" => Path,
+            "directory" | "restart_directory_monitor" | "env_files" => Path,
             "command" => Command,
             _ => Default,
         },
         EventListener => match key {
-            "directory" | "stdout_logfile" | "stderr_logfile" => Path,
+            "directory" | "stdout_logfile" | "stderr_logfile" | "env_files" => Path,
             "command" => Command,
             _ => Default,
         },
+        Other if key == "pidfile" => Path,
         _ => Default,
     }
 }

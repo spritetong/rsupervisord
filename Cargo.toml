@@ -97,6 +97,7 @@ nix = { version = "0.31", features = [
     "fs",
     "socket",
     "hostname",
+    "resource",
 ] }
 libc = "0.2"
 

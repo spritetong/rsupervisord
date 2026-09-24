@@ -753,7 +753,8 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
             Value::Int(cfg.start_retries as i32),
         );
         map.insert("inuse".to_string(), Value::Boolean(true));
-        map.insert("killasgroup".to_string(), Value::Boolean(false));
+        map.insert("killasgroup".to_string(), Value::Boolean(cfg.kill_as_group));
+        map.insert("stopasgroup".to_string(), Value::Boolean(cfg.stop_as_group));
         map.insert(
             "redirect_stderr".to_string(),
             Value::Boolean(cfg.logs.redirect_stderr),

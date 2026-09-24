@@ -117,6 +117,9 @@ pub struct LoggingConfig {
     #[serde(default = "default_log_backups")]
     #[default(DEFAULT_LOG_BACKUPS)]
     pub backups: usize,
+    /// When true, suppress console (stdout/stderr) log output (INI `silent`).
+    #[serde(default)]
+    pub silent: bool,
 }
 
 #[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
@@ -185,6 +188,14 @@ pub struct ProgramDefaults {
     pub restart_cmd_when_file_changed: Option<String>,
     #[serde(default, with = "crate::serde_util::option_duration_secs")]
     pub restart_debounce_secs: Option<Duration>,
+    #[serde(default)]
+    pub env_files: Option<Vec<PathBuf>>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub kill_wait_secs: Option<Duration>,
+    #[serde(default)]
+    pub stop_as_group: Option<bool>,
+    #[serde(default)]
+    pub kill_as_group: Option<bool>,
 }
 
 /// Raw representation of program log configuration with optional booleans for inheritance.
@@ -285,6 +296,14 @@ pub struct ProgramConfigRaw {
     pub stdout_events_enabled: Option<bool>,
     #[serde(default)]
     pub stderr_events_enabled: Option<bool>,
+    #[serde(default)]
+    pub env_files: Option<Vec<PathBuf>>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub kill_wait_secs: Option<Duration>,
+    #[serde(default)]
+    pub stop_as_group: Option<bool>,
+    #[serde(default)]
+    pub kill_as_group: Option<bool>,
 }
 
 /// Process group configuration definition.
@@ -295,6 +314,21 @@ pub struct GroupConfigRaw {
     pub programs: Vec<String>,
     #[serde(default)]
     pub priority: Option<u32>,
+}
+
+/// Client-side connection defaults from `[supervisorctl]`.
+///
+/// Never applied to the daemon listener credentials (`server.uds_*` /
+/// `server.username`); only consumed by `supervisorctl` endpoint/auth seeding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliDefaults {
+    #[serde(default)]
+    pub serverurl: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +355,22 @@ pub struct SupervisorConfig {
     pub programs: HashMap<String, ProgramConfigRaw>,
     #[serde(default)]
     pub event_listeners: HashMap<String, crate::eventlistener::EventListenerConfigRaw>,
+    /// Daemon-level environment from `[supervisord] environment`.
+    /// Applied at daemon startup (before children spawn), never at parse time.
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
+    /// Optional pidfile path written on startup and removed on shutdown.
+    #[serde(default)]
+    pub pidfile: Option<PathBuf>,
+    /// Minimum open-file soft limit (`minfds`); applied best-effort on Unix.
+    #[serde(default)]
+    pub minfds: Option<u32>,
+    /// Minimum process soft limit (`minprocs`); applied best-effort on Unix.
+    #[serde(default)]
+    pub minprocs: Option<u32>,
+    /// `[supervisorctl]` client defaults (not consumed by the daemon).
+    #[serde(default)]
+    pub cli_defaults: Option<CliDefaults>,
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
 }
@@ -337,6 +387,11 @@ impl Default for SupervisorConfig {
             groups: HashMap::new(),
             programs: HashMap::new(),
             event_listeners: HashMap::new(),
+            environment: HashMap::new(),
+            pidfile: None,
+            minfds: None,
+            minprocs: None,
+            cli_defaults: None,
             config_dir: None,
         };
         config.apply_default_paths();
@@ -702,6 +757,11 @@ impl SupervisorConfig {
                 )
                 .with_program_context(base_name, &group, process_num, numprocs);
 
+                // OI-6: seed daemon-level environment into expansion context without
+                // mutating the process env (environment values may reference these).
+                for (k, v) in &self.environment {
+                    expr.add(format!("ENV_{}", k), v);
+                }
                 for (k, v) in &raw.environment {
                     expr.add(format!("ENV_{}", k), v);
                 }
@@ -933,6 +993,21 @@ impl SupervisorConfig {
                     inherit!(raw, self.program_defaults, restart_debounce_secs)
                         .unwrap_or(DEFAULT_RESTART_DEBOUNCE);
 
+                let env_files =
+                    inherit_clone!(raw, self.program_defaults, env_files).unwrap_or_default();
+                let kill_wait_secs = inherit!(raw, self.program_defaults, kill_wait_secs)
+                    .unwrap_or(DEFAULT_KILL_WAIT);
+                let stop_as_group =
+                    inherit!(raw, self.program_defaults, stop_as_group).unwrap_or(false);
+                let kill_as_group =
+                    inherit!(raw, self.program_defaults, kill_as_group).unwrap_or(stop_as_group);
+                if stop_as_group && !kill_as_group {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Program '{}' cannot set stop_as_group=true and kill_as_group=false",
+                        base_name
+                    )));
+                }
+
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
                     command,
@@ -968,6 +1043,10 @@ impl SupervisorConfig {
                     restart_signal_when_file_changed,
                     restart_cmd_when_file_changed,
                     restart_debounce_secs,
+                    env_files,
+                    kill_wait_secs,
+                    stop_as_group,
+                    kill_as_group,
                     event_listener: None,
                 };
 
@@ -1038,6 +1117,10 @@ impl SupervisorConfig {
                 )
                 .with_program_context(listener_name, &group, process_num, numprocs);
 
+                // OI-6: seed daemon-level environment into expansion context (see programs).
+                for (k, v) in &self.environment {
+                    expr.add(format!("ENV_{}", k), v);
+                }
                 for (k, v) in &raw.environment {
                     expr.add(format!("ENV_{}", k), v);
                 }
@@ -1147,6 +1230,12 @@ impl SupervisorConfig {
                     restart_signal_when_file_changed: None,
                     restart_cmd_when_file_changed: None,
                     restart_debounce_secs: DEFAULT_RESTART_DEBOUNCE,
+                    env_files: raw.env_files.clone().unwrap_or_default(),
+                    kill_wait_secs: DEFAULT_KILL_WAIT,
+                    stop_as_group: raw.stop_as_group.unwrap_or(false),
+                    kill_as_group: raw
+                        .kill_as_group
+                        .unwrap_or(raw.stop_as_group.unwrap_or(false)),
                     event_listener,
                 };
 

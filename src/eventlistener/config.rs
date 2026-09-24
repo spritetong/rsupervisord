@@ -86,7 +86,7 @@ pub fn validate_event_list(events: &[String]) -> Result<(), ProgramError> {
 }
 
 /// Raw representation of `[eventlistener:x]` from INI or YAML configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventListenerConfigRaw {
     pub command: String,
     #[serde(default)]
@@ -131,6 +131,12 @@ pub struct EventListenerConfigRaw {
     pub stderr_logfile: Option<PathBuf>,
     #[serde(default)]
     pub redirect_stderr: Option<bool>,
+    #[serde(default)]
+    pub env_files: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    pub stop_as_group: Option<bool>,
+    #[serde(default)]
+    pub kill_as_group: Option<bool>,
 }
 
 /// Resolved event listener configuration attached to a program or pool.

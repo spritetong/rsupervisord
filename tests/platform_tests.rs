@@ -263,7 +263,7 @@ async fn test_platform_backend_configure_attach_and_signal() {
 
     // Test attaching platform guard
     let guard: Box<dyn PlatformProcessGuard> = platform
-        .attach_child(&child, pid)
+        .attach_child(&child, pid, false, false)
         .expect("attach_child failed");
 
     assert_eq!(guard.pid(), pid);
@@ -298,7 +298,7 @@ async fn test_platform_guard_force_kill() {
     let pid = child.id().expect("PID missing");
 
     let guard = platform
-        .attach_child(&child, pid)
+        .attach_child(&child, pid, false, false)
         .expect("attach_child failed");
 
     // Force kill immediately
@@ -329,7 +329,7 @@ async fn test_platform_guard_wait_exit() {
     let pid = child.id().expect("PID missing");
 
     let mut guard = platform
-        .attach_child(&child, pid)
+        .attach_child(&child, pid, false, false)
         .expect("attach_child failed");
 
     let exit_status = tokio::time::timeout(Duration::from_secs(5), guard.wait_exit(&mut child))
@@ -420,7 +420,7 @@ async fn test_windows_gui_notepad_graceful_stop() {
     let pid = child.id().expect("PID missing");
 
     let mut guard = platform
-        .attach_child(&child, pid)
+        .attach_child(&child, pid, false, false)
         .expect("attach_child failed");
 
     // Wait a brief moment for Notepad to initialize its GUI window

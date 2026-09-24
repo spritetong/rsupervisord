@@ -126,6 +126,12 @@ pub_const!(DEFAULT_HEALTH_FAILURE_THRESHOLD: u32 = 3);
 pub_const!(DEFAULT_HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(0));
 // Expected HTTP status for HTTP health checks.
 pub_const!(DEFAULT_HTTP_EXPECTED_STATUS: u16 = 200);
+// go-parity liveness_check defaults (INI extension keys).
+pub_const!(DEFAULT_LIVENESS_INTERVAL: Duration = Duration::from_secs(60));
+pub_const!(DEFAULT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30));
+pub_const!(DEFAULT_LIVENESS_INITIAL_DELAY: Duration = Duration::from_secs(60));
+// Post-SIGKILL reap wait (`killwaitsecs` / go default 2s).
+pub_const!(DEFAULT_KILL_WAIT: Duration = Duration::from_secs(2));
 // Metrics idle timeout (0 = never).
 pub_const!(DEFAULT_METRICS_IDLE_TIMEOUT: Duration = Duration::from_secs(30));
 // Metrics sampling interval.

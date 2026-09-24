@@ -237,6 +237,19 @@ pub struct ProgramConfig {
     #[serde(default = "default_restart_debounce", with = "duration_secs")]
     #[default(DEFAULT_RESTART_DEBOUNCE)]
     pub restart_debounce_secs: Duration,
+    /// `.env` files loaded before `environment` (environment wins).
+    #[serde(default)]
+    pub env_files: Vec<PathBuf>,
+    /// Post-SIGKILL reap wait (`killwaitsecs`).
+    #[serde(default = "default_kill_wait", with = "duration_secs")]
+    #[default(DEFAULT_KILL_WAIT)]
+    pub kill_wait_secs: Duration,
+    /// Send stop signal to the process group (Unix).
+    #[serde(default)]
+    pub stop_as_group: bool,
+    /// Send kill to the process group (Unix).
+    #[serde(default)]
+    pub kill_as_group: bool,
     #[serde(default)]
     pub event_listener: Option<crate::eventlistener::EventListenerConfig>,
 }

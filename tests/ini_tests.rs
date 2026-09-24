@@ -476,3 +476,245 @@ stdout_logfile = relative/path/web.out.log
         "allow_unelevated=true without explicit chmod must resolve to 0o777"
     );
 }
+
+/// OI-1 / OI-2 / OI-3 / OI-4 / OI-5 / OI-6 / OI-8 / OI-9 / OI-11 coverage.
+#[test]
+fn test_ini_open_issue_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        r#"
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[supervisord]
+nodaemon = yes
+silent = true
+pidfile = /tmp/supervisord-test.pid
+minfds = 1024
+minprocs = 200
+environment = OI6_TAG="alpha",OI6_MODE="test"
+unknown_supervisord_key = ignored
+
+[supervisorctl]
+serverurl = unix:///tmp/supervisor.sock
+username = ctluser
+password = ctlpass
+
+[program:web]
+command = /usr/bin/web
+envFiles = /tmp/web.env,rel.env
+killwaitsecs = 5
+stopasgroup = true
+killasgroup = true
+liveness_check_script = /usr/bin/true
+liveness_check_period = 30
+liveness_check_timeout = 10
+liveness_check_initial_delay = 15
+liveness_check_failure_threshold = 4
+liveness_check_failure_action = restart
+unknown_program_key = ignored
+
+[program:badstop]
+command = /usr/bin/bad
+stopasgroup = true
+killasgroup = false
+"#,
+    )
+    .unwrap();
+
+    let config = SupervisorConfig::from_file(&conf_path).expect("INI load must succeed");
+
+    // OI-1
+    let cli = config
+        .cli_defaults
+        .as_ref()
+        .expect("cli_defaults must exist");
+    assert_eq!(
+        cli.serverurl.as_deref(),
+        Some("unix:///tmp/supervisor.sock")
+    );
+    assert_eq!(cli.username.as_deref(), Some("ctluser"));
+    assert_eq!(cli.password.as_deref(), Some("ctlpass"));
+
+    // OI-4 / OI-6 / OI-8
+    assert!(config.nodaemon, "nodaemon=yes must map to true");
+    assert!(
+        config.logging.silent,
+        "silent=true must map to LoggingConfig.silent"
+    );
+    assert_eq!(
+        config.pidfile.as_deref(),
+        Some(std::path::Path::new("/tmp/supervisord-test.pid"))
+    );
+    assert_eq!(config.minfds, Some(1024));
+    assert_eq!(config.minprocs, Some(200));
+    assert_eq!(
+        config.environment.get("OI6_TAG").map(String::as_str),
+        Some("alpha")
+    );
+    assert_eq!(
+        config.environment.get("OI6_MODE").map(String::as_str),
+        Some("test")
+    );
+
+    // OI-2 / OI-3 / OI-5 / OI-9 on the raw program section
+    let web = config.programs.get("web").expect("program web");
+    let env_files = web.env_files.as_ref().expect("env_files must be set");
+    assert_eq!(env_files.len(), 2);
+    assert!(
+        env_files[0].ends_with("web.env"),
+        "absolute env file must be preserved, got {:?}",
+        env_files[0]
+    );
+    assert!(
+        env_files[1].ends_with("rel.env"),
+        "relative env file must be absolutized against config_dir, got {:?}",
+        env_files[1]
+    );
+    assert!(
+        env_files[1].is_absolute(),
+        "resolved relative env file must be absolute, got {:?}",
+        env_files[1]
+    );
+    assert_eq!(
+        web.kill_wait_secs,
+        Some(Duration::from_secs(5)),
+        "killwaitsecs must map to kill_wait_secs"
+    );
+    assert_eq!(web.stop_as_group, Some(true));
+    assert_eq!(web.kill_as_group, Some(true));
+    let hc = web
+        .health_check
+        .as_ref()
+        .expect("liveness_check must map to health_check");
+    assert_eq!(hc.interval_secs, Duration::from_secs(30));
+    assert_eq!(hc.timeout_secs, Duration::from_secs(10));
+    assert_eq!(hc.initial_delay_secs, Duration::from_secs(15));
+    assert_eq!(hc.failure_threshold, 4);
+
+    // OI-9 validation: stop_as_group without kill_as_group is rejected at resolve
+    let err = config
+        .resolve_programs()
+        .expect_err("stop_as_group=true + kill_as_group=false must fail");
+    assert!(
+        err.to_string().contains("stop_as_group"),
+        "error must mention stop_as_group, got: {}",
+        err
+    );
+
+    // OI-6: environment must not be applied into the process env at parse time
+    assert!(
+        std::env::var_os("OI6_TAG").is_none(),
+        "adapter must not set_var at parse time"
+    );
+}
+
+/// OI-1: `resolve_endpoint_candidates` seeds from `[supervisorctl]` defaults.
+#[test]
+fn test_cli_resolve_from_supervisorctl_section() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_endpoint_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        r#"
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[supervisorctl]
+serverurl = http://127.0.0.1:9999
+username = ctluser
+password = ctlpass
+"#,
+    )
+    .unwrap();
+
+    let args = CliArgs::parse_from(["supervisorctl", "-c", conf_path.to_str().unwrap(), "status"]);
+    let (candidates, basic, _token) =
+        resolve_endpoint_candidates(&args).expect("resolve must succeed");
+
+    assert_eq!(
+        candidates.len(),
+        1,
+        "serverurl seeds a single candidate, got {:?}",
+        candidates
+    );
+    let ep = format!("{}", candidates[0].endpoint);
+    assert!(
+        ep.contains("9999") || ep.contains("127.0.0.1"),
+        "endpoint must come from serverurl, got {}",
+        ep
+    );
+    assert_eq!(
+        basic,
+        Some(("ctluser".to_string(), "ctlpass".to_string())),
+        "username/password must seed basic auth"
+    );
+
+    // CLI -u/-p override [supervisorctl]
+    let args = CliArgs::parse_from([
+        "supervisorctl",
+        "-c",
+        conf_path.to_str().unwrap(),
+        "-u",
+        "cliuser",
+        "-p",
+        "clipass",
+        "status",
+    ]);
+    let (_, basic, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
+    assert_eq!(
+        basic,
+        Some(("cliuser".to_string(), "clipass".to_string())),
+        "CLI credentials must override [supervisorctl]"
+    );
+
+    // Explicit -s overrides serverurl endpoint
+    let args = CliArgs::parse_from([
+        "supervisorctl",
+        "-c",
+        conf_path.to_str().unwrap(),
+        "-s",
+        "http://127.0.0.1:1234",
+        "status",
+    ]);
+    let (candidates, basic, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
+    assert_eq!(candidates.len(), 1);
+    let ep = format!("{}", candidates[0].endpoint);
+    assert!(
+        ep.contains("1234"),
+        "explicit -s must win over serverurl, got {}",
+        ep
+    );
+    assert_eq!(
+        basic,
+        Some(("ctluser".to_string(), "ctlpass".to_string())),
+        "credentials still apply with explicit -s"
+    );
+}
+
+/// OI-2: missing env files are skipped with warn (go parity), spawn still works.
+#[test]
+fn test_ini_env_files_missing_is_skipped() {
+    use rsupervisord::program::envfile::load_env_files;
+
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such.env");
+    let map = load_env_files(std::slice::from_ref(&missing));
+    assert!(
+        map.is_empty(),
+        "missing env file must yield empty map, got {:?}",
+        map
+    );
+
+    let present = dir.path().join("ok.env");
+    std::fs::write(&present, "FOO=bar\nexport BAZ=qux\n# comment\nEMPTY=\n").unwrap();
+    let map = load_env_files(&[present, missing]);
+    assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
+    assert_eq!(map.get("EMPTY").map(String::as_str), Some(""));
+}

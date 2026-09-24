@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 pub mod config;
+pub mod envfile;
 pub mod process;
 pub mod state;
 pub mod traits;

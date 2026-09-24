@@ -9,10 +9,12 @@ use crate::compat::ini::values::{
     parse_autorestart, parse_environment, parse_log_path, parse_stop_signal,
 };
 use crate::config::schema::{
-    GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw, SupervisorConfig,
+    CliDefaults, GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw,
+    SupervisorConfig,
 };
 use crate::consts::*;
 use crate::error::ProgramError;
+use crate::program::config::{HealthCheckConfig, HealthCheckType};
 use crate::serde_util::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,140 @@ fn parse_opt_bytesize(
         .find_map(|k| map.get(*k))
         .map(|s| string_to_bytes(s))
         .transpose()
+}
+
+/// Parses a comma-separated list of env file paths (`envFiles`).
+/// INI keys are lowercased by the parser, so lookup uses `envfiles`.
+fn parse_env_files(sec: &HashMap<String, String>) -> Option<Vec<PathBuf>> {
+    sec.get("envfiles")
+        .or_else(|| sec.get("env_files"))
+        .map(|s| {
+            string_to_str_list(s)
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        })
+}
+
+/// Absolutizes env file paths against `config_dir` when relative (OI-2).
+fn resolve_env_files(files: Vec<PathBuf>, config_dir: Option<&Path>) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .map(|p| {
+            if p.is_absolute() {
+                p
+            } else if let Some(dir) = config_dir {
+                crate::platform::abs_path(&dir.join(p))
+            } else {
+                crate::platform::abs_path(&p)
+            }
+        })
+        .collect()
+}
+
+/// Maps go `liveness_check_*` keys onto [`HealthCheckConfig`] (OI-5).
+fn parse_liveness_check(
+    sec: &HashMap<String, String>,
+    context: &str,
+) -> Result<Option<HealthCheckConfig>, ProgramError> {
+    let script = sec.get("liveness_check_script").map(|s| s.trim());
+    let has_any = sec.keys().any(|k| k.starts_with("liveness_check"));
+    if !has_any {
+        return Ok(None);
+    }
+    let Some(script) = script.filter(|s| !s.is_empty()) else {
+        return Err(ProgramError::ConfigError(format!(
+            "{}: liveness_check_* keys require non-empty 'liveness_check_script'",
+            context
+        )));
+    };
+
+    let interval = match sec.get("liveness_check_period") {
+        Some(s) => string_to_duration(s).map_err(|e| {
+            ProgramError::ConfigError(format!("{}: invalid liveness_check_period: {}", context, e))
+        })?,
+        None => DEFAULT_LIVENESS_INTERVAL,
+    };
+    let timeout = match sec.get("liveness_check_timeout") {
+        Some(s) => string_to_duration(s).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "{}: invalid liveness_check_timeout: {}",
+                context, e
+            ))
+        })?,
+        None => DEFAULT_LIVENESS_TIMEOUT,
+    };
+    let initial_delay = match sec.get("liveness_check_initial_delay") {
+        Some(s) => string_to_duration(s).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "{}: invalid liveness_check_initial_delay: {}",
+                context, e
+            ))
+        })?,
+        None => DEFAULT_LIVENESS_INITIAL_DELAY,
+    };
+    let failure_threshold = match sec.get("liveness_check_failure_threshold") {
+        Some(s) => s.parse::<u32>().map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "{}: invalid liveness_check_failure_threshold: {}",
+                context, e
+            ))
+        })?,
+        None => DEFAULT_HEALTH_FAILURE_THRESHOLD,
+    };
+
+    // Only `restart` failure action is supported; empty success action is fine.
+    if let Some(action) = sec.get("liveness_check_failure_action")
+        && !action.trim().is_empty()
+        && !action.trim().eq_ignore_ascii_case("restart")
+    {
+        tracing::warn!(
+            section = context,
+            action = %action,
+            "unsupported liveness_check_failure_action; only 'restart' is mapped"
+        );
+    }
+    if let Some(action) = sec.get("liveness_check_success_action")
+        && !action.trim().is_empty()
+    {
+        tracing::warn!(
+            section = context,
+            action = %action,
+            "liveness_check_success_action is not supported and is ignored"
+        );
+    }
+    if let Some(th) = sec.get("liveness_check_success_threshold")
+        && th.trim() != "1"
+    {
+        tracing::warn!(
+            section = context,
+            threshold = %th,
+            "liveness_check_success_threshold other than 1 is ignored"
+        );
+    }
+
+    Ok(Some(HealthCheckConfig {
+        check_type: HealthCheckType::Exec {
+            command: script.to_string(),
+        },
+        interval_secs: interval,
+        timeout_secs: timeout,
+        failure_threshold,
+        initial_delay_secs: initial_delay,
+    }))
+}
+
+/// Warns about keys under a known section that were not consumed (OI-11).
+fn warn_unknown_keys(section: &str, sec: &HashMap<String, String>, known: &[&str]) {
+    for key in sec.keys() {
+        if !known.contains(&key.as_str()) {
+            tracing::warn!(
+                section = section,
+                key = %key,
+                "unknown INI key ignored"
+            );
+        }
+    }
 }
 
 /// Adapts a `ParsedIni` into a standard `SupervisorConfig`.
@@ -89,10 +225,14 @@ pub fn adapt_ini_to_config(
         if let Some(maxbytes) = sec.get("logfile_maxbytes") {
             config.logging.max_bytes = Some(string_to_bytes(maxbytes)?);
         }
-        if let Some(backups_str) = sec.get("logfile_backups")
-            && let Ok(backups) = backups_str.parse::<usize>()
-        {
-            config.logging.backups = backups;
+        if let Some(backups_str) = sec.get("logfile_backups") {
+            // OI-4: hard error on parse failure (was silently dropped).
+            config.logging.backups = backups_str.parse::<usize>().map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "[supervisord] invalid logfile_backups '{}': {}",
+                    backups_str, e
+                ))
+            })?;
         }
         if let Some(level) = sec.get("loglevel") {
             config.logging.level = level.to_ascii_lowercase();
@@ -100,33 +240,115 @@ pub fn adapt_ini_to_config(
         if let Some(ident) = sec.get("identifier") {
             config.server.identifier = Some(ident.clone());
         }
-        if let Some(nodaemon) = sec.get("nodaemon")
-            && let Ok(flag) = nodaemon.parse::<bool>()
-        {
-            config.nodaemon = flag;
+        // OI-4: accept Python-style booleans (yes/no/1/0/on/off).
+        if let Some(nodaemon) = sec.get("nodaemon") {
+            config.nodaemon = string_to_bool(nodaemon)?;
         }
-        if let Some(env_str) = sec.get("environment")
-            && let Ok(env_map) = parse_environment(env_str)
-        {
-            for (k, v) in env_map {
-                // Export daemon-level environment variables
-                unsafe {
-                    std::env::set_var(k, v);
-                }
-            }
+        // OI-4: `silent` suppresses console logging (file layer still applies).
+        if let Some(silent) = sec.get("silent") {
+            config.logging.silent = string_to_bool(silent)?;
         }
+        // OI-6: store daemon environment; applied at daemon startup, never at parse time.
+        if let Some(env_str) = sec.get("environment") {
+            config.environment = parse_environment(env_str)?;
+        }
+        // OI-8: runtime surface fields.
+        if let Some(pidfile) = sec.get("pidfile") {
+            config.pidfile = Some(PathBuf::from(pidfile));
+        }
+        if let Some(minfds) = sec.get("minfds") {
+            config.minfds = Some(minfds.parse::<u32>().map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "[supervisord] invalid minfds '{}': {}",
+                    minfds, e
+                ))
+            })?);
+        }
+        if let Some(minprocs) = sec.get("minprocs") {
+            config.minprocs = Some(minprocs.parse::<u32>().map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "[supervisord] invalid minprocs '{}': {}",
+                    minprocs, e
+                ))
+            })?);
+        }
+
+        warn_unknown_keys(
+            "supervisord",
+            sec,
+            &[
+                "logfile",
+                "logfile_maxbytes",
+                "logfile_backups",
+                "loglevel",
+                "identifier",
+                "nodaemon",
+                "silent",
+                "environment",
+                "pidfile",
+                "minfds",
+                "minprocs",
+                // Python keys accepted but not yet mapped (documented).
+                "umask",
+                "directory",
+                "childlogdir",
+            ],
+        );
     }
+
+    // 3b. Process [supervisorctl] → client defaults (OI-1).
+    if let Some(sec) = ini.sections.get("supervisorctl") {
+        config.cli_defaults = Some(CliDefaults {
+            serverurl: sec.get("serverurl").cloned(),
+            username: sec.get("username").cloned(),
+            password: sec.get("password").cloned(),
+        });
+        warn_unknown_keys(
+            "supervisorctl",
+            sec,
+            &[
+                "serverurl",
+                "username",
+                "password",
+                // Known Python keys we do not map yet.
+                "prompt",
+                "history_file",
+            ],
+        );
+    }
+
+    warn_unknown_keys(
+        "unix_http_server",
+        ini.sections
+            .get("unix_http_server")
+            .unwrap_or(&HashMap::new()),
+        &["file", "chmod", "username", "password"],
+    );
+    warn_unknown_keys(
+        "inet_http_server",
+        ini.sections
+            .get("inet_http_server")
+            .unwrap_or(&HashMap::new()),
+        &["port", "username", "password"],
+    );
 
     // 4. Process [program-default]
     if let Some(sec) = ini.sections.get("program-default") {
-        config.program_defaults = parse_program_defaults(sec)?;
+        let mut defaults = parse_program_defaults(sec)?;
+        if let Some(files) = parse_env_files(sec) {
+            defaults.env_files = Some(resolve_env_files(files, config_dir));
+        }
+        config.program_defaults = defaults;
     }
 
     // 5. Process sections
     for section_name in &ini.section_order {
         if let Some(prog_name) = section_name.strip_prefix("program:") {
             if let Some(sec) = ini.sections.get(section_name) {
-                let prog = parse_program_config(prog_name, sec)?;
+                let mut prog = parse_program_config(prog_name, sec)?;
+                if let Some(files) = prog.env_files.take() {
+                    prog.env_files = Some(resolve_env_files(files, config_dir));
+                }
                 config.programs.insert(prog_name.to_string(), prog);
             }
         } else if let Some(group_name) = section_name.strip_prefix("group:") {
@@ -135,17 +357,20 @@ pub fn adapt_ini_to_config(
                 config.groups.insert(group_name.to_string(), group);
             }
         } else if section_name.starts_with("rpcinterface:")
-            || section_name == "supervisorctl"
             || section_name == "include"
             || section_name == "unix_http_server"
             || section_name == "inet_http_server"
             || section_name == "supervisord"
+            || section_name == "supervisorctl"
             || section_name == "program-default"
         {
             // Already handled or standard ignored section
         } else if let Some(pool_name) = section_name.strip_prefix("eventlistener:") {
             if let Some(sec) = ini.sections.get(section_name) {
-                let el_cfg = parse_event_listener_config(pool_name, sec)?;
+                let mut el_cfg = parse_event_listener_config(pool_name, sec)?;
+                if let Some(files) = el_cfg.env_files.take() {
+                    el_cfg.env_files = Some(resolve_env_files(files, config_dir));
+                }
                 config.event_listeners.insert(pool_name.to_string(), el_cfg);
             }
         } else if section_name.starts_with("fcgi-program:") {
@@ -376,6 +601,115 @@ fn parse_program_config(
             ))
         })?;
 
+    // OI-2 / OI-3 / OI-9: go-parity extension keys.
+    let env_files = parse_env_files(sec);
+    let kill_wait_secs =
+        parse_opt_duration(sec, &["killwaitsecs", "kill_wait_secs"]).map_err(|e| {
+            ProgramError::ConfigError(format!(
+                "Program '{}' invalid killwaitsecs: {}",
+                prog_name, e
+            ))
+        })?;
+    let stop_as_group = sec
+        .get("stopasgroup")
+        .or_else(|| sec.get("stop_as_group"))
+        .map(|s| string_to_bool(s))
+        .transpose()?;
+    let kill_as_group = sec
+        .get("killasgroup")
+        .or_else(|| sec.get("kill_as_group"))
+        .map(|s| string_to_bool(s))
+        .transpose()?;
+    // OI-5: map liveness_check_* onto health_check.
+    let health_check = parse_liveness_check(sec, &format!("[program:{}]", prog_name))?;
+
+    // OI-11: warn about unconsumed keys under this program section.
+    let known: &[&str] = &[
+        "command",
+        "process_name",
+        "numprocs",
+        "numprocs_start",
+        "priority",
+        "autostart",
+        "autorestart",
+        "startsecs",
+        "start_secs",
+        "startretries",
+        "start_retries",
+        "exitcodes",
+        "exit_codes",
+        "stopsignal",
+        "stop_signal",
+        "stopwaitsecs",
+        "stop_wait_secs",
+        "directory",
+        "user",
+        "umask",
+        "environment",
+        "redirect_stderr",
+        "stdout_logfile",
+        "stderr_logfile",
+        "stdout_logfile_maxbytes",
+        "stderr_logfile_maxbytes",
+        "stdout_logfile_backups",
+        "stderr_logfile_backups",
+        "stdout_events_enabled",
+        "stderr_events_enabled",
+        "depends_on",
+        "cron",
+        "cron_stop",
+        "stop_cron",
+        "pre_start",
+        "pre_start_hook",
+        "pre_stop",
+        "pre_stop_hook",
+        "pre_start_ignore_failure",
+        "hook_timeout_secs",
+        "restart_when_binary_changed",
+        "restart_signal_when_binary_changed",
+        "restart_cmd_when_binary_changed",
+        "restart_directory_monitor",
+        "restart_file_pattern",
+        "restart_signal_when_file_changed",
+        "restart_cmd_when_file_changed",
+        "restart_debounce_secs",
+        // INI keys are lowercased by the parser.
+        "envfiles",
+        "env_files",
+        "killwaitsecs",
+        "kill_wait_secs",
+        "stopasgroup",
+        "stop_as_group",
+        "killasgroup",
+        "kill_as_group",
+        // liveness_check_* (validated by parse_liveness_check)
+        "liveness_check_script",
+        "liveness_check_period",
+        "liveness_check_timeout",
+        "liveness_check_initial_delay",
+        "liveness_check_success_threshold",
+        "liveness_check_success_action",
+        "liveness_check_failure_threshold",
+        "liveness_check_failure_action",
+        // Python keys accepted without mapping today.
+        "stdout_logfile_bytes",
+        "stderr_logfile_bytes",
+        "stdout_syslog",
+        "stderr_syslog",
+        "serverurl",
+        "environment_set",
+    ];
+    // Prefix-check liveness keys already listed; still allow any liveness_check_*.
+    for key in sec.keys() {
+        if !known.contains(&key.as_str()) && !key.starts_with("liveness_check") {
+            tracing::warn!(
+                section = %format!("[program:{}]", prog_name),
+                key = %key,
+                "unknown INI key ignored"
+            );
+        }
+    }
+
     Ok(ProgramConfigRaw {
         command,
         args: Vec::new(),
@@ -393,7 +727,7 @@ fn parse_program_config(
         exit_codes,
         umask,
         logs,
-        health_check: None,
+        health_check,
         group: None,
         cron,
         cron_stop,
@@ -414,6 +748,10 @@ fn parse_program_config(
         restart_debounce_secs,
         stdout_events_enabled,
         stderr_events_enabled,
+        env_files,
+        kill_wait_secs,
+        stop_as_group,
+        kill_as_group,
     })
 }
 
@@ -559,6 +897,17 @@ fn parse_event_listener_config(
     };
     let stdout_logfile = sec.get("stdout_logfile").and_then(|s| parse_log_path(s));
     let stderr_logfile = sec.get("stderr_logfile").and_then(|s| parse_log_path(s));
+    let env_files = parse_env_files(sec);
+    let stop_as_group = sec
+        .get("stopasgroup")
+        .or_else(|| sec.get("stop_as_group"))
+        .map(|s| string_to_bool(s))
+        .transpose()?;
+    let kill_as_group = sec
+        .get("killasgroup")
+        .or_else(|| sec.get("kill_as_group"))
+        .map(|s| string_to_bool(s))
+        .transpose()?;
 
     Ok(crate::eventlistener::EventListenerConfigRaw {
         command,
@@ -583,6 +932,9 @@ fn parse_event_listener_config(
         stdout_logfile,
         stderr_logfile,
         redirect_stderr,
+        env_files,
+        stop_as_group,
+        kill_as_group,
     })
 }
 
@@ -696,7 +1048,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         stop_wait_secs,
         priority,
         logs,
-        health_check: None,
+        health_check: parse_liveness_check(sec, "[program-default]")?,
         pre_start: sec
             .get("pre_start")
             .or_else(|| sec.get("pre_start_hook"))
@@ -734,5 +1086,19 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         restart_debounce_secs: parse_opt_duration(sec, &["restart_debounce_secs"]).map_err(
             |e| ProgramError::ConfigError(format!("Invalid default restart_debounce_secs: {}", e)),
         )?,
+        env_files: parse_env_files(sec),
+        kill_wait_secs: parse_opt_duration(sec, &["killwaitsecs", "kill_wait_secs"]).map_err(
+            |e| ProgramError::ConfigError(format!("Invalid default killwaitsecs: {}", e)),
+        )?,
+        stop_as_group: sec
+            .get("stopasgroup")
+            .or_else(|| sec.get("stop_as_group"))
+            .map(|s| string_to_bool(s))
+            .transpose()?,
+        kill_as_group: sec
+            .get("killasgroup")
+            .or_else(|| sec.get("kill_as_group"))
+            .map(|s| string_to_bool(s))
+            .transpose()?,
     })
 }
