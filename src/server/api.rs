@@ -4,7 +4,6 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::config::SupervisorConfig;
 use crate::consts::*;
 use crate::control::protocol::{
     ActionResponse, ApiResponse, LogLinesResponse, ProgramDetailsDto, ProgramStatusDto,
@@ -310,18 +309,9 @@ async fn get_program_details(
         None => (None, None),
     };
 
-    let (pre_start, pre_stop) = if let Some(ref path) = state.config_path {
-        if let Ok(cfg) = SupervisorConfig::from_file(path) {
-            let prog_cfg = cfg.programs.get(&status.name);
-            (
-                prog_cfg.and_then(|p| p.pre_start.clone()),
-                prog_cfg.and_then(|p| p.pre_stop.clone()),
-            )
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
+    let (pre_start, pre_stop) = match state.manager.get_config(&status.name).await {
+        Ok(cfg) => (cfg.pre_start, cfg.pre_stop),
+        Err(_) => (None, None),
     };
 
     let dto = ProgramDetailsDto {

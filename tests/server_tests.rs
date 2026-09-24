@@ -1379,3 +1379,87 @@ programs: {{}}
     let _ = server_task.await;
     manager.shutdown().await.expect("shutdown manager");
 }
+
+#[tokio::test]
+async fn test_get_program_details_returns_hooks_from_manager() {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let config_path = temp_dir.path().join("rsupervisord.yaml");
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("hooks_dto");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_path}"
+  http_bind: "127.0.0.1:{port}"
+
+program_defaults:
+  autostart: false
+  start_secs: 0
+  stop_wait_secs: 1
+
+programs:
+  single_hooked:
+    command: |-
+      {cmd_single}
+    pre_start: "echo single-pre-start"
+    pre_stop: "echo single-pre-stop"
+  multi_hooked:
+    command: |-
+      {cmd_multi}
+    numprocs: 2
+    pre_start: "echo multi-pre-start"
+    pre_stop: "echo multi-pre-stop"
+"#,
+        ipc_path = ipc_path.to_string_lossy().replace('\\', "\\\\"),
+        port = port,
+        cmd_single = get_worker_command("single", 5),
+        cmd_multi = get_worker_command("multi", 5),
+    );
+
+    std::fs::write(&config_path, &yaml).expect("write config");
+    let config = SupervisorConfig::from_file(&config_path).expect("parse config");
+
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(
+        manager_handle,
+        Some(config_path.clone()),
+        config.server.clone(),
+    );
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
+
+    let single = client
+        .get_program("single_hooked")
+        .await
+        .expect("get single_hooked");
+    assert_eq!(single.pre_start.as_deref(), Some("echo single-pre-start"));
+    assert_eq!(single.pre_stop.as_deref(), Some("echo single-pre-stop"));
+
+    // numprocs > 1: instance key is multi_hooked:0 (raw disk map lookup missed it)
+    let multi0 = client
+        .get_program("multi_hooked:0")
+        .await
+        .expect("get multi_hooked:0");
+    assert_eq!(multi0.pre_start.as_deref(), Some("echo multi-pre-start"));
+    assert_eq!(multi0.pre_stop.as_deref(), Some("echo multi-pre-stop"));
+
+    let multi1 = client
+        .get_program("multi_hooked:1")
+        .await
+        .expect("get multi_hooked:1");
+    assert_eq!(multi1.pre_start.as_deref(), Some("echo multi-pre-start"));
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
