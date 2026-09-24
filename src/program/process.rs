@@ -941,17 +941,29 @@ impl ProgramActor {
         let stdout_disabled = self.config.logs.is_stdout_disabled();
         let stderr_disabled = self.config.logs.is_stderr_disabled();
 
-        // Configure async pipes or null stdio for stdout and stderr capture
-        if stdout_disabled {
-            cmd.stdout(std::process::Stdio::null());
+        let transport_config = crate::platform::ProcessTransportConfig {
+            program_name: self.config.name.clone(),
+            capture_stdout: !stdout_disabled,
+            capture_stderr: !stderr_disabled,
+            redirect_stderr: self.config.logs.redirect_stderr,
+        };
+
+        let mut transport = platform
+            .create_process_log_transport(&transport_config)
+            .await?;
+        let mut stdio_handles = transport.take_child_stdio()?;
+
+        // Configure async transport handles or null stdio for stdout and stderr capture
+        if let Some(stdout) = stdio_handles.stdout.take() {
+            cmd.stdout(stdout);
         } else {
-            cmd.stdout(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::null());
         }
 
-        if stderr_disabled {
-            cmd.stderr(std::process::Stdio::null());
+        if let Some(stderr) = stdio_handles.stderr.take() {
+            cmd.stderr(stderr);
         } else {
-            cmd.stderr(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::null());
         }
 
         // Platform-agnostic pre-spawn configuration via PlatformBackend
@@ -972,8 +984,7 @@ impl ProgramActor {
         })?;
 
         let stdin = child_guard.stdin.take();
-        let stdout = child_guard.stdout.take();
-        let stderr = child_guard.stderr.take();
+        let streams = transport.into_streams()?;
 
         // Attach platform-specific process guard (OI-9: group vs single-pid)
         let platform_guard = platform.attach_child(
@@ -984,7 +995,7 @@ impl ProgramActor {
         )?;
 
         let stdout_pump = if !stdout_disabled {
-            stdout.map(|pipe| {
+            streams.stdout.map(|pipe| {
                 crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stdout")
                     .with_rotator(self.stdout_rotator.clone())
                     .with_event_hub(Some(self.event_hub.clone()))
@@ -1005,7 +1016,7 @@ impl ProgramActor {
         };
 
         let stderr_pump = if !stderr_disabled {
-            stderr.map(|pipe| {
+            streams.stderr.map(|pipe| {
                 crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stderr")
                     .with_rotator(self.stderr_rotator.clone())
                     .with_ring_prefix(stderr_prefix)

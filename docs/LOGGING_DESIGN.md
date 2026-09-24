@@ -131,10 +131,12 @@ To eliminate the 2 blocked threads per child process on Windows:
 4. The child process writes to its standard descriptor synchronously; the parent wakes up on native IOCP packet arrival.
 5. **Thread count cost: 0 extra OS threads**.
 
-### 4.2 Unix Non-blocking Pipes
-1. Created via `nix::unistd::pipe2(O_NONBLOCK | O_CLOEXEC)`.
-2. Read end is integrated with Tokio's async reactor (`tokio::io::unix::AsyncFd`).
-3. Write end is converted into `std::process::Stdio` for process inheritance.
+### 4.2 Unix Asynchronous Captured Pipes
+1. **Atomic CLOEXEC creation**: Pipes are created with `O_CLOEXEC` on both ends via `create_cloexec_pipe()`, leveraging atomic `pipe2(O_CLOEXEC)` on modern kernels (Linux/BSD) with fallback to `pipe()` + `F_SETFD(FD_CLOEXEC)` on legacy platforms.
+2. **Read/Write semantic decoupling (Critical)**:
+   - **Read end (supervisor side)**: Marked with `O_NONBLOCK` via `fcntl(&read_fd, F_SETFL(OFlag::O_NONBLOCK))` and integrated directly with Tokio's Epoll/Kqueue reactor using `tokio::io::unix::AsyncFd`.
+   - **Write end (child process side)**: **Must remain standard blocking**. Standard runtimes and programs (Python, Node.js, Java, C/C++) expect stdout/stderr to be standard blocking streams. If `O_NONBLOCK` were set on the write end, any burst output exceeding the 64KB kernel buffer would immediately return `EAGAIN` / `EWOULDBLOCK`, crashing Python with `BlockingIOError: [Errno 11] Resource temporarily unavailable` or terminating C/C++ runtimes. A blocking write end guarantees binary compatibility and provides natural OS-level backpressure.
+3. **Atomic redirection**: When `redirect_stderr=true`, the write file descriptor is duplicated using `fcntl(&write_file, F_DUPFD_CLOEXEC(0))`, atomically duplicating and setting `FD_CLOEXEC` to prevent handle leaks across concurrent `spawn()` windows.
 4. **Thread count cost: 0 extra OS threads**.
 
 ### 4.3 Platform Backend Factory

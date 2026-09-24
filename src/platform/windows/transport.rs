@@ -96,6 +96,20 @@ impl WindowsProcessLogTransport {
                         e
                     ))
                 })?;
+                let ok = unsafe {
+                    SetHandleInformation(
+                        stderr_client.as_raw_handle() as _,
+                        HANDLE_FLAG_INHERIT,
+                        HANDLE_FLAG_INHERIT,
+                    )
+                };
+                if ok == 0 {
+                    let err = std::io::Error::last_os_error();
+                    return Err(ProgramError::PlatformError(format!(
+                        "Failed to set handle inheritance for redirected stderr pipe: {}",
+                        err
+                    )));
+                }
                 stdio_stderr = Some(Stdio::from(stderr_client));
             }
 
