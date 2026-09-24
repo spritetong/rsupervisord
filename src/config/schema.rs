@@ -123,6 +123,9 @@ pub struct LoggingConfig {
     #[serde(default = "default_log_backups")]
     #[default(DEFAULT_LOG_BACKUPS)]
     pub backups: usize,
+    #[serde(default = "bool_value::<true>")]
+    #[default(true)]
+    pub timestamp_suffix: bool,
     /// When true, suppress console (stdout/stderr) log output (INI `silent`).
     #[serde(default)]
     pub silent: bool,
@@ -220,6 +223,30 @@ pub struct ProgramLogsConfigRaw {
     pub max_bytes: Option<usize>,
     #[serde(default)]
     pub backups: Option<usize>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub stdout_max_bytes: Option<usize>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub stderr_max_bytes: Option<usize>,
+    #[serde(default)]
+    pub stdout_backups: Option<usize>,
+    #[serde(default)]
+    pub stderr_backups: Option<usize>,
+    #[serde(default)]
+    pub stdout_timestamp_suffix: Option<bool>,
+    #[serde(default)]
+    pub stderr_timestamp_suffix: Option<bool>,
+    #[serde(default)]
+    pub stdout_syslog: Option<bool>,
+    #[serde(default)]
+    pub stderr_syslog: Option<bool>,
+    #[serde(default)]
+    pub syslog_facility: Option<String>,
+    #[serde(default)]
+    pub syslog_tag: Option<String>,
+    #[serde(default)]
+    pub syslog_stdout_priority: Option<String>,
+    #[serde(default)]
+    pub syslog_stderr_priority: Option<String>,
     #[serde(default)]
     pub redirect_stderr: Option<bool>,
     #[serde(default)]
@@ -958,6 +985,58 @@ impl SupervisorConfig {
                         .and_then(|l| l.backups)
                         .or_else(|| def_logs.and_then(|l| l.backups));
 
+                    let stdout_max_bytes = raw_logs
+                        .and_then(|l| l.stdout_max_bytes)
+                        .or_else(|| def_logs.and_then(|l| l.stdout_max_bytes));
+
+                    let stderr_max_bytes = raw_logs
+                        .and_then(|l| l.stderr_max_bytes)
+                        .or_else(|| def_logs.and_then(|l| l.stderr_max_bytes));
+
+                    let stdout_backups = raw_logs
+                        .and_then(|l| l.stdout_backups)
+                        .or_else(|| def_logs.and_then(|l| l.stdout_backups));
+
+                    let stderr_backups = raw_logs
+                        .and_then(|l| l.stderr_backups)
+                        .or_else(|| def_logs.and_then(|l| l.stderr_backups));
+
+                    let stdout_timestamp_suffix = raw_logs
+                        .and_then(|l| l.stdout_timestamp_suffix)
+                        .or_else(|| def_logs.and_then(|l| l.stdout_timestamp_suffix))
+                        .unwrap_or(true);
+
+                    let stderr_timestamp_suffix = raw_logs
+                        .and_then(|l| l.stderr_timestamp_suffix)
+                        .or_else(|| def_logs.and_then(|l| l.stderr_timestamp_suffix))
+                        .unwrap_or(true);
+
+                    let stdout_syslog = raw_logs
+                        .and_then(|l| l.stdout_syslog)
+                        .or_else(|| def_logs.and_then(|l| l.stdout_syslog))
+                        .unwrap_or(false);
+
+                    let stderr_syslog = raw_logs
+                        .and_then(|l| l.stderr_syslog)
+                        .or_else(|| def_logs.and_then(|l| l.stderr_syslog))
+                        .unwrap_or(false);
+
+                    let syslog_facility = raw_logs
+                        .and_then(|l| l.syslog_facility.clone())
+                        .or_else(|| def_logs.and_then(|l| l.syslog_facility.clone()));
+
+                    let syslog_tag = raw_logs
+                        .and_then(|l| l.syslog_tag.clone())
+                        .or_else(|| def_logs.and_then(|l| l.syslog_tag.clone()));
+
+                    let syslog_stdout_priority = raw_logs
+                        .and_then(|l| l.syslog_stdout_priority.clone())
+                        .or_else(|| def_logs.and_then(|l| l.syslog_stdout_priority.clone()));
+
+                    let syslog_stderr_priority = raw_logs
+                        .and_then(|l| l.syslog_stderr_priority.clone())
+                        .or_else(|| def_logs.and_then(|l| l.syslog_stderr_priority.clone()));
+
                     let redirect_stderr = raw_logs
                         .and_then(|l| l.redirect_stderr)
                         .or_else(|| def_logs.and_then(|l| l.redirect_stderr))
@@ -979,6 +1058,18 @@ impl SupervisorConfig {
                         stderr,
                         max_bytes,
                         backups,
+                        stdout_max_bytes,
+                        stderr_max_bytes,
+                        stdout_backups,
+                        stderr_backups,
+                        stdout_timestamp_suffix,
+                        stderr_timestamp_suffix,
+                        stdout_syslog,
+                        stderr_syslog,
+                        syslog_facility,
+                        syslog_tag,
+                        syslog_stdout_priority,
+                        syslog_stderr_priority,
                         redirect_stderr,
                         stdout_events_enabled,
                         stderr_events_enabled,
@@ -1280,11 +1371,7 @@ impl SupervisorConfig {
                     enabled: true,
                     stdout: None, // stdout is reserved for the wire protocol
                     stderr,
-                    max_bytes: None,
-                    backups: None,
-                    redirect_stderr: false,
-                    stdout_events_enabled: false,
-                    stderr_events_enabled: false,
+                    ..Default::default()
                 };
 
                 let event_listener = Some(crate::eventlistener::EventListenerConfig::new(
@@ -1354,6 +1441,48 @@ impl SupervisorConfig {
                 }
 
                 resolved.insert(instance_name.clone(), prog);
+            }
+        }
+
+        // Phase 4: Warn if multiple log streams target the same rotating file with max_bytes > 0
+        let mut rotating_files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for (prog_name, prog) in &resolved {
+            if !prog.logs.enabled {
+                continue;
+            }
+
+            if prog.logs.effective_stdout_max_bytes() > 0
+                && let Some(dest) = prog.logs.stdout.as_ref().and_then(|p| crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok())
+            {
+                for file_path in dest.file_paths() {
+                    rotating_files
+                        .entry(file_path.to_path_buf())
+                        .or_default()
+                        .push(format!("{}:stdout", prog_name));
+                }
+            }
+
+            if !prog.logs.redirect_stderr
+                && prog.logs.effective_stderr_max_bytes() > 0
+                && let Some(dest) = prog.logs.stderr.as_ref().and_then(|p| crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok())
+            {
+                for file_path in dest.file_paths() {
+                    rotating_files
+                        .entry(file_path.to_path_buf())
+                        .or_default()
+                        .push(format!("{}:stderr", prog_name));
+                }
+            }
+        }
+
+        for (path, streams) in rotating_files {
+            if streams.len() > 1 {
+                tracing::warn!(
+                    path = %path.display(),
+                    streams = ?streams,
+                    "Multiple log streams target rotating file '{}'. Concurrent rotation may lead to lost logs or premature rotation.",
+                    path.display()
+                );
             }
         }
 

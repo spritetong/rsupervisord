@@ -298,9 +298,11 @@ async fn test_process_stdout_file_logging_and_rotation() {
         stderr: None,
         max_bytes: Some(25), // Low threshold to force rotation
         backups: Some(3),
+        stdout_timestamp_suffix: false,
         redirect_stderr: true,
         stdout_events_enabled: false,
         stderr_events_enabled: false,
+        ..Default::default()
     };
 
     let program = ProcessProgram::new(config).unwrap();
@@ -472,4 +474,228 @@ async fn test_platform_process_log_transport() {
     let streams = transport.into_streams().unwrap();
     assert!(streams.stdout.is_some());
     assert!(streams.stderr.is_some());
+}
+
+#[tokio::test]
+async fn test_process_composite_logging() {
+    let dir = tempdir().unwrap();
+    let file1 = dir.path().join("out1.log");
+    let file2 = dir.path().join("out2.log");
+
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'composite-fanout-line'".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo composite-fanout-line".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("composite_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+
+    // Composite destination: file1, file2
+    let dest_str = format!("{}, {}", file1.display(), file2.display());
+    config.logs = ProgramLogsConfig {
+        enabled: true,
+        stdout: Some(std::path::PathBuf::from(dest_str)),
+        ..Default::default()
+    };
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    // Wait for output in both files
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if file1.exists() && file2.exists() {
+            let c1 = std::fs::read_to_string(&file1).unwrap_or_default();
+            let c2 = std::fs::read_to_string(&file2).unwrap_or_default();
+            if c1.contains("composite-fanout-line") && c2.contains("composite-fanout-line") {
+                break;
+            }
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    let c1 = std::fs::read_to_string(&file1).expect("file1 should exist");
+    let c2 = std::fs::read_to_string(&file2).expect("file2 should exist");
+    assert!(c1.contains("composite-fanout-line"), "file1 should receive output");
+    assert!(c2.contains("composite-fanout-line"), "file2 should receive output");
+}
+
+#[tokio::test]
+async fn test_process_timestamp_suffix_rotation() {
+    let dir = tempdir().unwrap();
+    let stdout_log = dir.path().join("timestamp_rotate.log");
+
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'First payload line exceeding limit'; Start-Sleep -Milliseconds 100; Write-Output 'Second payload line trigger rotation'".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo 'First payload line exceeding limit'; sleep 0.1; echo 'Second payload line trigger rotation'".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("ts_rotate_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs = ProgramLogsConfig {
+        enabled: true,
+        stdout: Some(stdout_log.clone()),
+        stdout_max_bytes: Some(20),
+        stdout_backups: Some(3),
+        stdout_timestamp_suffix: true,
+        ..Default::default()
+    };
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    let mut rotated_found = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(entries) = std::fs::read_dir(dir.path()) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("timestamp_rotate") && name != "timestamp_rotate.log" {
+                    rotated_found = true;
+                    break;
+                }
+            }
+        }
+        if rotated_found {
+            break;
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    assert!(stdout_log.exists(), "Primary stdout log should exist");
+    assert!(rotated_found, "Rotated file with timestamp suffix should exist");
+}
+
+#[tokio::test]
+async fn test_process_max_bytes_zero_no_rotate() {
+    let dir = tempdir().unwrap();
+    let stdout_log = dir.path().join("no_rotate.log");
+
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'Message 1: 1234567890'; Write-Output 'Message 2: 1234567890'; Write-Output 'Message 3: 1234567890'".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo 'Message 1: 1234567890'; echo 'Message 2: 1234567890'; echo 'Message 3: 1234567890'".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("no_rotate_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs = ProgramLogsConfig {
+        enabled: true,
+        stdout: Some(stdout_log.clone()),
+        stdout_max_bytes: Some(0), // max_bytes = 0 means never rotate
+        stdout_backups: Some(5),
+        ..Default::default()
+    };
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if stdout_log.exists() {
+            let content = std::fs::read_to_string(&stdout_log).unwrap_or_default();
+            if content.contains("Message 3") {
+                break;
+            }
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    assert!(stdout_log.exists(), "Log file should exist");
+    // Verify no backup/rotated files were created
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(entries, vec!["no_rotate.log"], "Only the primary un-rotated file should exist");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_windows_syslog_config_fails() {
+    use rsupervisord::logging::{SyslogFacility, SyslogLogBackend, SyslogSeverity, SyslogTarget};
+
+    let result = SyslogLogBackend::new(
+        SyslogTarget::Local,
+        SyslogFacility::Daemon,
+        SyslogSeverity::Notice,
+        "test_tag",
+    );
+    assert!(result.is_err(), "Syslog backend must fail on Windows");
+    let err_str = result.err().unwrap().to_string();
+    assert!(
+        err_str.contains("not supported on Windows"),
+        "Error message should mention Windows: {}",
+        err_str
+    );
+}
+
+#[test]
+fn test_startup_collision_warning_resolution() {
+    use rsupervisord::config::schema::SupervisorConfig;
+
+    let yaml = r#"
+programs:
+  prog1:
+    command: "echo 1"
+    logs:
+      stdout: "shared.log"
+      stdout_max_bytes: 1024
+  prog2:
+    command: "echo 2"
+    logs:
+      stdout: "shared.log"
+      stdout_max_bytes: 1024
+"#;
+
+    let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+    let resolved = config.resolve_programs();
+    assert!(resolved.is_ok(), "resolve_programs should succeed while logging warning");
+    let resolved_map = resolved.unwrap();
+    assert_eq!(resolved_map.len(), 2);
 }

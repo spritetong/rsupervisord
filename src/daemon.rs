@@ -317,27 +317,68 @@ fn init_tracing(config: &SupervisorConfig) {
     macro_rules! try_with_file {
         ($reg:expr) => {
             if let Some(ref path) = log_file {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                let path_str = path.to_string_lossy();
+                let dest = crate::logging::LogDestination::parse(&path_str)
+                    .unwrap_or(crate::logging::LogDestination::File(path.clone()));
+
+                let writer_box: Option<Box<dyn std::io::Write + Send>> = match dest {
+                    crate::logging::LogDestination::Null => None,
+                    crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
+                    crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),
+                    crate::logging::LogDestination::File(ref file_path) => {
+                        if let Some(parent) = file_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let max_bytes = config
+                            .logging
+                            .max_bytes
+                            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
+                        if max_bytes == 0 {
+                            std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(file_path)
+                                .ok()
+                                .map(|f| Box::new(f) as Box<dyn std::io::Write + Send>)
+                        } else if config.logging.timestamp_suffix {
+                            let scheme = file_rotate::suffix::AppendTimestamp::with_format(
+                                "%Y-%m-%dT%H-%M-%S",
+                                file_rotate::suffix::FileLimit::MaxFiles(config.logging.backups),
+                                file_rotate::suffix::DateFrom::Now,
+                            );
+                            let rotator = file_rotate::FileRotate::new(
+                                file_path.clone(),
+                                scheme,
+                                file_rotate::ContentLimit::Bytes(max_bytes),
+                                file_rotate::compression::Compression::None,
+                                None,
+                            );
+                            Some(Box::new(rotator))
+                        } else {
+                            let rotator = file_rotate::FileRotate::new(
+                                file_path.clone(),
+                                file_rotate::suffix::AppendCount::new(config.logging.backups),
+                                file_rotate::ContentLimit::Bytes(max_bytes),
+                                file_rotate::compression::Compression::None,
+                                None,
+                            );
+                            Some(Box::new(rotator))
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(w) = writer_box {
+                    let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(w));
+                    let make_writer = move || MutexWriter(file_writer_arc.clone());
+                    let file_layer = tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_target(false)
+                        .with_writer(make_writer);
+                    let _ = $reg.with(file_layer).try_init();
+                } else {
+                    let _ = $reg.try_init();
                 }
-                let max_bytes = config
-                    .logging
-                    .max_bytes
-                    .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-                let file_rotator = file_rotate::FileRotate::new(
-                    path,
-                    file_rotate::suffix::AppendCount::new(config.logging.backups),
-                    file_rotate::ContentLimit::Bytes(max_bytes),
-                    file_rotate::compression::Compression::None,
-                    None,
-                );
-                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
-                let make_writer = move || MutexWriter(file_writer_arc.clone());
-                let file_layer = tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_target(false)
-                    .with_writer(make_writer);
-                let _ = $reg.with(file_layer).try_init();
             } else {
                 let _ = $reg.try_init();
             }
@@ -405,9 +446,7 @@ pub async fn run_daemon(
         .await
 }
 
-struct MutexWriter(
-    std::sync::Arc<std::sync::Mutex<file_rotate::FileRotate<file_rotate::suffix::AppendCount>>>,
-);
+struct MutexWriter(std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>);
 
 impl Write for MutexWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

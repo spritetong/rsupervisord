@@ -2,7 +2,7 @@
 
 | Document Version | Status | Target System | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.0.0** | Approved / Implementation Phase | Rust (Edition 2024) / Windows & Unix | Zero-Thread OS Process Transport, Extensible Log Backend Abstractions, and In-Memory Rotator |
+| **v1.1.0** | Approved / Implementation Phase | Rust (Edition 2024) / Windows & Unix | Zero-Thread Process Transport, In-Memory Rotator, Rotating File Backend, RFC 3164 Syslog, and Composite Destinations |
 
 ---
 
@@ -166,3 +166,138 @@ fn create_process_log_transport(
    - Implements `InstantLogReader`: Directly consumed by `supervisorctl`, XML-RPC server, and Web UI.
 4. **Zero Disk Dependency**:
    - Retains 100% of supervisor logging capabilities entirely in RAM without requiring disk access.
+
+---
+
+## 6. Step 4: Destination Grammar & Composite Sinks
+
+### 6.1 Unified Grammar
+Both daemon main log (`[supervisord] logfile`) and program stream logs (`[program:x] stdout_logfile`, `stderr_logfile`) share a unified destination grammar:
+
+| Value Syntax | Resolved Backend | Semantics & Compatibility |
+| :--- | :--- | :--- |
+| `/path/to/app.log`, `relative/app.log` | `FileLogBackend` | Standard rotating file on disk with macro expansion and `~` support |
+| `AUTO` / `auto` (program only) | `InMemoryLogRotator` | In-memory generational ring buffer (Go parity: 1000 lines default; 0 disk I/O) |
+| `NONE` / `none` / `off` / `/dev/null` / `null` / `""` | `NullLogBackend` | Discard child output completely (maps child stdio to `Stdio::null()`) |
+| `/dev/stdout` | `StdIoLogBackend::Stdout` | Writes output directly to daemon process `stdout` (Go parity) |
+| `/dev/stderr` | `StdIoLogBackend::Stderr` | Writes output directly to daemon process `stderr` (Go parity) |
+| `syslog` | `SyslogLogBackend::Local` | Unix local syslog socket (`/dev/log`, `/var/run/syslog`, `/var/run/log`) |
+| `syslog@[proto:]host[:port]` | `SyslogLogBackend::Remote` | Remote syslog via UDP (default port 514) or TCP (default port 6514) |
+| `dest1, dest2, ...` | `CompositeLogBackend` | Multi-destination fan-out (e.g. `stdout_logfile = test.log, /dev/stdout`) |
+
+### 6.2 Comma-Separated Multi-Destination Compatibility
+Go supervisord supports comma-separated destinations (e.g. `stdout_logfile = test.log, /dev/stdout`). `rsupervisord` provides **100% full compatibility** via `CompositeLogBackend`:
+1. **Token Parsing & Trimming**: Destination strings are split by comma `,` and each token is trimmed. For example, `test.log, /dev/stdout` resolves to `CompositeLogBackend([FileLogBackend("test.log"), StdIoLogBackend::Stdout])`.
+2. **Fan-Out on Write**: Incoming `LogChunk`s pumped from the child process are dispatched to all child backends in the composite tree.
+3. **Primary-Reader Semantics**:
+   - For read/inspect operations (e.g., XML-RPC `readProcessStdoutLog`, `tailProcessStdoutLog`, or `clearProcessLogs`), **only the primary (first) destination in the list is queried or cleared**, exactly matching Go supervisord's `CompositeLogger` behavior.
+   - Secondary destinations are write-only sinks.
+4. **Python `stdout_syslog` Interop**:
+   - In Python `supervisord`, setting `stdout_syslog = true` alongside `stdout_logfile = /path/app.log` causes logs to be written to both file and syslog.
+   - In `rsupervisord`, this is implemented cleanly as an implicit `CompositeLogBackend([FileLogBackend, SyslogLogBackend])`.
+
+---
+
+## 7. Step 5: Rotating File Backend (`FileLogBackend`)
+
+`FileLogBackend` wraps file rotation with full Python and Go behavioral fidelity:
+
+### 7.1 Rotation Naming Modes (`timestamp_suffix`)
+- **Timestamp Mode (`timestamp_suffix = true`, Default)**:
+  - Matches Go supervisord default.
+  - Rotated files are named `app.log.YYYY-MM-DDTHH-MM-SS` (using `file_rotate::suffix::AppendTimestamp`).
+  - Automatically prunes oldest backup files exceeding the `backups` count.
+- **Numeric Mode (`timestamp_suffix = false`)**:
+  - Matches Python Supervisor classic behavior.
+  - Rotated files are named `app.log.1`, `app.log.2`, ..., `app.log.N` (using `file_rotate::suffix::AppendCount`).
+
+### 7.2 Append-Only Mode (`max_bytes = 0`)
+- When `max_bytes == 0` (or `logfile_maxbytes = 0`), rotation is completely disabled.
+- The file is opened in standard append mode (`std::fs::OpenOptions::new().append(true)`).
+- Required for shared log files between multiple programs or when logging to special character devices.
+
+### 7.3 Multi-Writer Collision Detection
+- At startup, configuration validation checks whether multiple programs (or stdout + stderr streams) point to the same physical file path while `max_bytes > 0`.
+- If detected, emits a `tracing::warn!` alerting the operator that concurrent rotation on a shared file may cause log truncation or corruption, recommending `max_bytes = 0` for shared destinations.
+
+---
+
+## 8. Step 6: RFC 3164 Syslog Backend (`SyslogLogBackend`)
+
+### 8.1 Wire Format (RFC 3164 BSD Syslog)
+Log chunks are formatted according to RFC 3164:
+```text
+<PRI>TIMESTAMP HOST TAG: MESSAGE
+```
+- `PRI = (facility * 8) + severity`.
+- `TIMESTAMP`: `Mon dd hh:mm:ss` in local time (e.g. `Sep 24 23:30:00`).
+- `HOST`: Local machine hostname.
+- `TAG`: Configured `syslog_tag` (defaults to program name, or `supervisord` for daemon main log).
+- Total message length is safely truncated to 1024 bytes per RFC 3164 recommendation.
+
+### 8.2 Supported Targets & Network Transports
+1. **Local Domain Socket (`syslog`)**:
+   - Probed sequentially: `/dev/log`, `/var/run/syslog`, `/var/run/log`.
+   - Available on Unix (`#[cfg(unix)]`).
+2. **Remote UDP (`syslog@udp:host[:port]`)**:
+   - Standard UDP datagram transmission via `tokio::net::UdpSocket`. Default port: `514`.
+3. **Remote TCP (`syslog@tcp:host[:port]`)**:
+   - Async TCP transmission via `tokio::net::TcpStream`. Default port: `6514`.
+   - To prevent network latency or remote server disconnection from blocking subprocess log pumps, TCP writes use an internal bounded mpsc channel and a dedicated background writer task with automatic reconnection.
+
+### 8.3 Platform Matrix & Fail-Loud Policy
+- **Unix (Linux/macOS)**: Fully supported for both local socket and remote UDP/TCP.
+- **Windows**: Syslog is not natively available. In alignment with `LOG_COMPAT.md` §7.4, attempting to configure a syslog destination on Windows triggers a **hard configuration error** (`ProgramError::ConfigError`) during validation, following the "fail loud" CLI policy rather than silently discarding output.
+
+### 8.4 Facility & Severity Parsing
+- **Facilities**: `KERN(0)`, `USER(1)`, `MAIL(2)`, `DAEMON(3)`, `AUTH(4)`, `SYSLOG(5)`, `LPR(6)`, `NEWS(7)`, `UUCP(8)`, `CRON(9)`, `AUTHPRIV(10)`, `FTP(11)`, `LOCAL0(16)`..`LOCAL7(23)`. Default: `LOCAL0`.
+- **Severities**: `EMERG(0)`, `ALERT(1)`, `CRIT(2)`, `ERR(3)`, `WARNING(4)`, `NOTICE(5)`, `INFO(6)`, `DEBUG(7)`. Default: `NOTICE`.
+- Parsing is case-insensitive and tolerates optional `LOG_` prefix (e.g. `LOG_LOCAL0`, `local0`).
+
+---
+
+## 9. Step 7: Configuration Schema & INI Compatibility (OI-10)
+
+### 9.1 Independent Rotation Thresholds (OI-10)
+Previously, `stdout_logfile_maxbytes` and `stderr_logfile_maxbytes` were bound together via a first-wins rule in the INI adapter. Under this design:
+- `stdout_max_bytes` and `stderr_max_bytes` are decoupled into independent configuration fields in `ProgramLogsConfig`.
+- `stdout_backups` and `stderr_backups` are likewise independent.
+- Fallback chain per stream:
+  `stream_max_bytes` -> shared `logs.max_bytes` -> `DEFAULT_LOG_MAX_BYTES` (50MB).
+  `stream_backups` -> shared `logs.backups` -> `DEFAULT_LOG_BACKUPS` (10).
+
+### 9.2 INI Keys Mapped
+- `stdout_logfile`, `stderr_logfile`
+- `stdout_logfile_maxbytes`, `stderr_logfile_maxbytes`
+- `stdout_logfile_backups`, `stderr_logfile_backups`
+- `stdout_logfile_timestamp_suffix`, `stderr_logfile_timestamp_suffix`
+- `stdout_syslog`, `stderr_syslog`
+- `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`
+- `[supervisord] logfile_timestamp_suffix`
+
+---
+
+## 10. Step 8: Runtime & Subprocess Wiring
+
+1. **`LogPump` Generic Backend Binding**:
+   - `LogPumpBuilder` is upgraded from `with_rotator(Option<LogRotator>)` to `with_backend(Option<Arc<dyn LogBackend>>)`.
+   - During each line iteration, chunks are dispatched to the configured backend.
+   - On EOF, cancel, or drop, `backend.flush()` is invoked asynchronously.
+2. **`AUTO` Mode Integration**:
+   - When `stdout_logfile = AUTO`, `ProcessProgram` assigns an `InMemoryLogRotator` as the stream backend.
+   - XML-RPC methods (`readProcessStdoutLog`, `tailProcessStdoutLog`) directly read from `InstantLogReader`, guaranteeing full API availability without creating temporary files on disk.
+3. **Redirection (`redirect_stderr = true`)**:
+   - Stderr completely bypasses separate backend initialization and shares the stdout backend tree and pipe.
+
+---
+
+## 11. Implementation Roadmap & Verification Plan
+
+| Phase | Scope | Acceptance Criteria |
+| :--- | :--- | :--- |
+| **Phase 1** | Grammar & Destination Parsing | `LogDestination` parses all targets, comma-separated tokens, and `syslog@` addresses |
+| **Phase 2** | `FileLogBackend` & Rotation | Tests verify timestamp suffix, numeric suffix, `max_bytes = 0`, and collision warnings |
+| **Phase 3** | `SyslogLogBackend` (RFC 3164) | Tests verify RFC 3164 format, UDP sender against mock socket, and Windows fail-loud error |
+| **Phase 4** | Composite Sinks & Stdio | Tests verify `test.log, /dev/stdout` dual writes and primary-reader semantics |
+| **Phase 5** | OI-10 Config & INI Adapter | Tests verify independent stream maxbytes/backups and Python `stdout_syslog` fan-out |
+| **Phase 6** | E2E Integration & Clippy | All 100+ tests pass; `cargo clippy` produces 0 warnings |

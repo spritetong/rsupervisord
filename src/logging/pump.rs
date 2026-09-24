@@ -4,8 +4,10 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::logging::backend::LogBackend;
 use crate::logging::ring_buffer::RingBuffer;
 use crate::logging::rotator::LogRotator;
+use crate::logging::types::{LogChannel, LogChunk};
 use crate::manager::{EventHub, LogEntry};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -17,6 +19,7 @@ pub struct LogPumpBuilder<R> {
     ring_buffer: Arc<RingBuffer>,
     stream_name: &'static str,
     rotator: Option<LogRotator>,
+    backend: Option<Arc<dyn LogBackend>>,
     ring_prefix: Option<String>,
     event_hub: Option<EventHub>,
     program_name: Option<String>,
@@ -36,6 +39,7 @@ where
             ring_buffer,
             stream_name,
             rotator: None,
+            backend: None,
             ring_prefix: None,
             event_hub: None,
             program_name: None,
@@ -48,6 +52,12 @@ where
     /// Configures the optional rotating file writer.
     pub fn with_rotator(mut self, rotator: Option<LogRotator>) -> Self {
         self.rotator = rotator;
+        self
+    }
+
+    /// Configures the extensible log backend (File, Syslog, Stdio, Composite).
+    pub fn with_backend(mut self, backend: Option<Arc<dyn LogBackend>>) -> Self {
+        self.backend = backend;
         self
     }
 
@@ -94,6 +104,7 @@ where
             ring_buffer,
             stream_name,
             rotator,
+            backend,
             ring_prefix,
             event_hub,
             program_name,
@@ -102,9 +113,16 @@ where
             events_enabled,
         } = self;
 
+        let channel = if stream_name.eq_ignore_ascii_case("stderr") {
+            LogChannel::Stderr
+        } else {
+            LogChannel::Stdout
+        };
+
         tokio::spawn(async move {
             // Guarantee file flush on EOF, task cancellation, or unexpected loop termination
             let flush_rotator = rotator.clone();
+            let flush_backend = backend.clone();
             let prog_name_diag = program_name.clone();
             scopeguard::defer! {
                 if let Some(ref rot) = flush_rotator
@@ -116,6 +134,20 @@ where
                         error = %e,
                         "Failed to flush log rotator on shutdown"
                     );
+                }
+                if let Some(ref b) = flush_backend {
+                    let b_clone = b.clone();
+                    let diag = prog_name_diag.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = b_clone.flush().await {
+                            tracing::warn!(
+                                program = ?diag,
+                                stream = stream_name,
+                                error = %e,
+                                "Failed to flush log backend on shutdown"
+                            );
+                        }
+                    });
                 }
             }
 
@@ -154,6 +186,28 @@ where
                         "Failed to write log line to rotator"
                     );
                 }
+
+                // Write chunk to generic log backend if configured
+                if let Some(ref b) = backend {
+                    let chunk = LogChunk::new(
+                        channel,
+                        program_name.clone().unwrap_or_default(),
+                        pid,
+                        format!("{}\n", line),
+                    );
+                    if let Err(e) = b.write_chunk(&chunk).await {
+                        tracing::warn!(
+                            program = ?program_name,
+                            stream = stream_name,
+                            error = %e,
+                            "Failed to write log chunk to backend"
+                        );
+                    }
+                }
+            }
+
+            if let Some(ref b) = backend {
+                let _ = b.flush().await;
             }
         })
     }

@@ -123,6 +123,32 @@ pub struct ProgramLogsConfig {
     pub max_bytes: Option<usize>,
     #[serde(default)]
     pub backups: Option<usize>,
+    #[serde(default, with = "option_byte_size")]
+    pub stdout_max_bytes: Option<usize>,
+    #[serde(default, with = "option_byte_size")]
+    pub stderr_max_bytes: Option<usize>,
+    #[serde(default)]
+    pub stdout_backups: Option<usize>,
+    #[serde(default)]
+    pub stderr_backups: Option<usize>,
+    #[serde(default = "bool_value::<true>")]
+    #[default(true)]
+    pub stdout_timestamp_suffix: bool,
+    #[serde(default = "bool_value::<true>")]
+    #[default(true)]
+    pub stderr_timestamp_suffix: bool,
+    #[serde(default)]
+    pub stdout_syslog: bool,
+    #[serde(default)]
+    pub stderr_syslog: bool,
+    #[serde(default)]
+    pub syslog_facility: Option<String>,
+    #[serde(default)]
+    pub syslog_tag: Option<String>,
+    #[serde(default)]
+    pub syslog_stdout_priority: Option<String>,
+    #[serde(default)]
+    pub syslog_stderr_priority: Option<String>,
     #[serde(default)]
     pub redirect_stderr: bool,
     #[serde(default)]
@@ -137,11 +163,41 @@ impl ProgramLogsConfig {
     }
 
     pub fn is_stdout_disabled(&self) -> bool {
+        if self.stdout_syslog {
+            return false;
+        }
         self.is_file_disabled(self.stdout.as_deref())
     }
 
     pub fn is_stderr_disabled(&self) -> bool {
+        if self.stderr_syslog {
+            return false;
+        }
         self.is_file_disabled(self.stderr.as_deref())
+    }
+
+    pub fn effective_stdout_max_bytes(&self) -> usize {
+        self.stdout_max_bytes
+            .or(self.max_bytes)
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+    }
+
+    pub fn effective_stderr_max_bytes(&self) -> usize {
+        self.stderr_max_bytes
+            .or(self.max_bytes)
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+    }
+
+    pub fn effective_stdout_backups(&self) -> usize {
+        self.stdout_backups
+            .or(self.backups)
+            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS)
+    }
+
+    pub fn effective_stderr_backups(&self) -> usize {
+        self.stderr_backups
+            .or(self.backups)
+            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS)
     }
 
     fn is_file_disabled(&self, file_path: Option<&std::path::Path>) -> bool {
@@ -151,9 +207,11 @@ impl ProgramLogsConfig {
         if let Some(p) = file_path
             && let Some(s) = p.to_str()
         {
-            ["/dev/null", "null", "none", "off"]
-                .iter()
-                .any(|&x| x.eq_ignore_ascii_case(s))
+            let trimmed = s.trim();
+            trimmed.is_empty()
+                || ["/dev/null", "null", "none", "off"]
+                    .iter()
+                    .any(|&x| x.eq_ignore_ascii_case(trimmed))
         } else {
             false
         }

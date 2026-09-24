@@ -1010,3 +1010,48 @@ fn test_ini_env_files_missing_is_skipped() {
     assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
     assert_eq!(map.get("EMPTY").map(String::as_str), Some(""));
 }
+
+#[test]
+fn test_ini_independent_stream_rotation_and_syslog_keys() {
+    let ini_str = r#"
+    [supervisord]
+    logfile = /var/log/supervisord.log
+    logfile_timestamp_suffix = false
+
+    [program:dual_streams]
+    command = /bin/app
+    stdout_logfile = /var/log/app.out.log
+    stderr_logfile = /var/log/app.err.log
+    stdout_logfile_maxbytes = 1MB
+    stderr_logfile_maxbytes = 2MB
+    stdout_logfile_backups = 3
+    stderr_logfile_backups = 7
+    stdout_logfile_timestamp_suffix = false
+    stderr_logfile_timestamp_suffix = true
+    stdout_syslog = true
+    stderr_syslog = false
+    syslog_facility = local3
+    syslog_tag = my_custom_app
+    syslog_stdout_priority = info
+    syslog_stderr_priority = err
+    "#;
+
+    let config = SupervisorConfig::from_ini_str(ini_str).unwrap();
+    assert!(!config.logging.timestamp_suffix);
+
+    let resolved = config.resolve_programs().unwrap();
+    let prog = resolved.get("dual_streams").unwrap();
+
+    assert_eq!(prog.logs.effective_stdout_max_bytes(), 1024 * 1024);
+    assert_eq!(prog.logs.effective_stderr_max_bytes(), 2 * 1024 * 1024);
+    assert_eq!(prog.logs.effective_stdout_backups(), 3);
+    assert_eq!(prog.logs.effective_stderr_backups(), 7);
+    assert!(!prog.logs.stdout_timestamp_suffix);
+    assert!(prog.logs.stderr_timestamp_suffix);
+    assert!(prog.logs.stdout_syslog);
+    assert!(!prog.logs.stderr_syslog);
+    assert_eq!(prog.logs.syslog_facility.as_deref(), Some("local3"));
+    assert_eq!(prog.logs.syslog_tag.as_deref(), Some("my_custom_app"));
+    assert_eq!(prog.logs.syslog_stdout_priority.as_deref(), Some("info"));
+    assert_eq!(prog.logs.syslog_stderr_priority.as_deref(), Some("err"));
+}

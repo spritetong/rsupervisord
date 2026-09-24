@@ -519,8 +519,8 @@ struct ProgramActor {
     manual_stop: bool,
     is_shutting_down: bool,
     backoff_deadline: Option<tokio::time::Instant>,
-    stdout_rotator: Option<crate::logging::LogRotator>,
-    stderr_rotator: Option<crate::logging::LogRotator>,
+    stdout_backend: Option<Arc<dyn crate::logging::LogBackend>>,
+    stderr_backend: Option<Arc<dyn crate::logging::LogBackend>>,
 }
 
 impl ProgramActor {
@@ -538,56 +538,131 @@ impl ProgramActor {
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
 
-        let max_bytes = config
-            .logs
-            .max_bytes
-            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-        let backups = config
-            .logs
-            .backups
-            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS);
+        let stdout_max_bytes = config.logs.effective_stdout_max_bytes();
+        let stdout_backups = config.logs.effective_stdout_backups();
+        let stderr_max_bytes = config.logs.effective_stderr_max_bytes();
+        let stderr_backups = config.logs.effective_stderr_backups();
         let stdout_disabled = config.logs.is_stdout_disabled();
         let stderr_disabled = config.logs.is_stderr_disabled();
 
-        let stdout_rotator = if !stdout_disabled {
-            if let Some(ref path) = config.logs.stdout {
-                match crate::logging::LogRotator::new(path, max_bytes, backups) {
-                    Ok(rot) => Some(rot),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to initialize stdout LogRotator for '{}' at {:?}: {}",
-                            config.name,
-                            path,
-                            e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            }
+        let stdout_dest = config
+            .logs
+            .stdout
+            .as_ref()
+            .and_then(|p| crate::logging::LogDestination::parse(&p.to_string_lossy()).ok())
+            .unwrap_or(crate::logging::LogDestination::Auto);
+
+        let stdout_opts = crate::logging::BackendBuildOptions {
+            program_name: &config.name,
+            channel: crate::logging::LogChannel::Stdout,
+            max_bytes: stdout_max_bytes,
+            backups: stdout_backups,
+            timestamp_suffix: config.logs.stdout_timestamp_suffix,
+            syslog_facility: config.logs.syslog_facility.as_deref(),
+            syslog_tag: config.logs.syslog_tag.as_deref(),
+            syslog_priority: config.logs.syslog_stdout_priority.as_deref(),
+        };
+
+        let mut stdout_backend = if !stdout_disabled {
+            stdout_dest.build_backend(&stdout_opts).unwrap_or(None)
         } else {
             None
         };
 
-        let stderr_rotator = if !stderr_disabled {
+        if config.logs.stdout_syslog && !stdout_disabled {
+            let facility = config
+                .logs
+                .syslog_facility
+                .as_deref()
+                .and_then(|f| f.parse::<crate::logging::SyslogFacility>().ok())
+                .unwrap_or_default();
+            let severity = config
+                .logs
+                .syslog_stdout_priority
+                .as_deref()
+                .and_then(|p| p.parse::<crate::logging::SyslogSeverity>().ok())
+                .unwrap_or_default();
+            let tag = config
+                .logs
+                .syslog_tag
+                .clone()
+                .unwrap_or_else(|| config.name.clone());
+            if let Ok(syslog_b) = crate::logging::SyslogLogBackend::new(
+                crate::logging::SyslogTarget::Local,
+                facility,
+                severity,
+                tag,
+            ) {
+                let syslog_arc: Arc<dyn crate::logging::LogBackend> = Arc::new(syslog_b);
+                stdout_backend = match stdout_backend {
+                    Some(base) => Some(Arc::new(crate::logging::CompositeLogBackend::new(vec![
+                        base, syslog_arc,
+                    ]))),
+                    None => Some(syslog_arc),
+                };
+            }
+        }
+
+        let stderr_backend = if !stderr_disabled {
             if config.logs.redirect_stderr {
-                stdout_rotator.clone()
-            } else if let Some(ref path) = config.logs.stderr {
-                match crate::logging::LogRotator::new(path, max_bytes, backups) {
-                    Ok(rot) => Some(rot),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to initialize stderr LogRotator for '{}' at {:?}: {}",
-                            config.name,
-                            path,
-                            e
-                        );
-                        None
+                stdout_backend.clone()
+            } else {
+                let stderr_dest = config
+                    .logs
+                    .stderr
+                    .as_ref()
+                    .and_then(|p| crate::logging::LogDestination::parse(&p.to_string_lossy()).ok())
+                    .unwrap_or(crate::logging::LogDestination::Auto);
+
+                let stderr_opts = crate::logging::BackendBuildOptions {
+                    program_name: &config.name,
+                    channel: crate::logging::LogChannel::Stderr,
+                    max_bytes: stderr_max_bytes,
+                    backups: stderr_backups,
+                    timestamp_suffix: config.logs.stderr_timestamp_suffix,
+                    syslog_facility: config.logs.syslog_facility.as_deref(),
+                    syslog_tag: config.logs.syslog_tag.as_deref(),
+                    syslog_priority: config.logs.syslog_stderr_priority.as_deref(),
+                };
+
+                let mut b = stderr_dest.build_backend(&stderr_opts).unwrap_or(None);
+
+                if config.logs.stderr_syslog {
+                    let facility = config
+                        .logs
+                        .syslog_facility
+                        .as_deref()
+                        .and_then(|f| f.parse::<crate::logging::SyslogFacility>().ok())
+                        .unwrap_or_default();
+                    let severity = config
+                        .logs
+                        .syslog_stderr_priority
+                        .as_deref()
+                        .and_then(|p| p.parse::<crate::logging::SyslogSeverity>().ok())
+                        .unwrap_or_default();
+                    let tag = config
+                        .logs
+                        .syslog_tag
+                        .clone()
+                        .unwrap_or_else(|| config.name.clone());
+                    if let Ok(syslog_b) = crate::logging::SyslogLogBackend::new(
+                        crate::logging::SyslogTarget::Local,
+                        facility,
+                        severity,
+                        tag,
+                    ) {
+                        let syslog_arc: Arc<dyn crate::logging::LogBackend> = Arc::new(syslog_b);
+                        b = match b {
+                            Some(base) => {
+                                Some(Arc::new(crate::logging::CompositeLogBackend::new(vec![
+                                    base, syslog_arc,
+                                ])))
+                            }
+                            None => Some(syslog_arc),
+                        };
                     }
                 }
-            } else {
-                None
+                b
             }
         } else {
             None
@@ -610,8 +685,8 @@ impl ProgramActor {
             manual_stop: false,
             is_shutting_down: false,
             backoff_deadline: None,
-            stdout_rotator,
-            stderr_rotator,
+            stdout_backend,
+            stderr_backend,
         }
     }
 
@@ -997,7 +1072,7 @@ impl ProgramActor {
         let stdout_pump = if !stdout_disabled {
             streams.stdout.map(|pipe| {
                 crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stdout")
-                    .with_rotator(self.stdout_rotator.clone())
+                    .with_backend(self.stdout_backend.clone())
                     .with_event_hub(Some(self.event_hub.clone()))
                     .with_program_name(Some(self.config.name.clone()))
                     .with_group_name(Some(self.config.group.clone()))
@@ -1018,7 +1093,7 @@ impl ProgramActor {
         let stderr_pump = if !stderr_disabled {
             streams.stderr.map(|pipe| {
                 crate::logging::LogPumpBuilder::new(pipe, self.ring_buffer.clone(), "stderr")
-                    .with_rotator(self.stderr_rotator.clone())
+                    .with_backend(self.stderr_backend.clone())
                     .with_ring_prefix(stderr_prefix)
                     .with_event_hub(Some(self.event_hub.clone()))
                     .with_program_name(Some(self.config.name.clone()))
