@@ -7,15 +7,14 @@
 use crate::error::ProgramError;
 use crate::logging::transport::{LogTransport, ProcessStdioHandles, TransportStreams};
 use crate::platform::traits::ProcessTransportConfig;
-use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
-use nix::unistd::pipe;
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, ReadBuf};
 use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, ReadBuf};
 
 /// Asynchronous pipe reader wrapping an `AsyncFd<OwnedFd>` for zero-thread reading via epoll/kqueue.
 pub struct UnixPipeReader {
@@ -67,6 +66,75 @@ impl AsyncRead for UnixPipeReader {
     }
 }
 
+/// Creates a pipe with `O_CLOEXEC` on both ends (atomic `pipe2` where available).
+fn create_cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd), ProgramError> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "emscripten",
+        target_os = "hurd",
+        target_os = "redox",
+        target_os = "cygwin",
+    ))]
+    {
+        nix::unistd::pipe2(OFlag::O_CLOEXEC).map_err(|e| {
+            ProgramError::PlatformError(format!("Failed to create {} pipe: {}", what, e))
+        })
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "emscripten",
+        target_os = "hurd",
+        target_os = "redox",
+        target_os = "cygwin",
+    )))]
+    {
+        use nix::fcntl::FdFlag;
+
+        let (read_fd, write_fd) = nix::unistd::pipe().map_err(|e| {
+            ProgramError::PlatformError(format!("Failed to create {} pipe: {}", what, e))
+        })?;
+        for (fd, end) in [(&read_fd, "read"), (&write_fd, "write")] {
+            fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(|e| {
+                ProgramError::PlatformError(format!(
+                    "Failed to set FD_CLOEXEC on {} {} fd: {}",
+                    what, end, e
+                ))
+            })?;
+        }
+        Ok((read_fd, write_fd))
+    }
+}
+
+/// Prepares a captured pipe: `O_NONBLOCK` only on the read end (the child
+/// inherits the write end and must keep blocking-write semantics).
+fn create_capture_pipe(what: &str) -> Result<(OwnedFd, std::fs::File), ProgramError> {
+    let (read_fd, write_fd) = create_cloexec_pipe(what)?;
+
+    fcntl(&read_fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| {
+        ProgramError::PlatformError(format!(
+            "Failed to set O_NONBLOCK on {} read fd: {}",
+            what, e
+        ))
+    })?;
+
+    let write_file = unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) };
+    Ok((read_fd, write_file))
+}
+
 pub struct UnixProcessLogTransport {
     stdio_handles: Option<ProcessStdioHandles>,
     stdout_reader: Option<UnixPipeReader>,
@@ -81,13 +149,7 @@ impl UnixProcessLogTransport {
         let mut stderr_reader = None;
 
         if config.capture_stdout {
-            let (read_fd, write_fd) = pipe().map_err(|e| {
-                ProgramError::PlatformError(format!("Failed to create stdout pipe: {}", e))
-            })?;
-
-            // Set read end to non-blocking and close-on-exec
-            let _ = fcntl(read_fd.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
-            let _ = fcntl(read_fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+            let (read_fd, write_file) = create_capture_pipe("stdout")?;
 
             let reader = UnixPipeReader::new(read_fd).map_err(|e| {
                 ProgramError::PlatformError(format!(
@@ -97,28 +159,24 @@ impl UnixProcessLogTransport {
             })?;
 
             if config.redirect_stderr {
-                let write_fd_dup = nix::unistd::dup(write_fd.as_raw_fd()).map_err(|e| {
+                // F_DUPFD_CLOEXEC duplicates and sets close-on-exec atomically so
+                // the sibling stderr write end cannot leak across exec.
+                let dup_raw = fcntl(&write_file, FcntlArg::F_DUPFD_CLOEXEC(0)).map_err(|e| {
                     ProgramError::PlatformError(format!(
                         "Failed to dup stdout write fd for stderr redirection: {}",
                         e
                     ))
                 })?;
-                let stderr_file = unsafe { std::fs::File::from_raw_fd(write_fd_dup) };
+                let stderr_file = unsafe { std::fs::File::from_raw_fd(dup_raw) };
                 stdio_stderr = Some(Stdio::from(stderr_file));
             }
 
-            let stdout_file = unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) };
-            stdio_stdout = Some(Stdio::from(stdout_file));
+            stdio_stdout = Some(Stdio::from(write_file));
             stdout_reader = Some(reader);
         }
 
         if config.capture_stderr && !config.redirect_stderr {
-            let (read_fd, write_fd) = pipe().map_err(|e| {
-                ProgramError::PlatformError(format!("Failed to create stderr pipe: {}", e))
-            })?;
-
-            let _ = fcntl(read_fd.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
-            let _ = fcntl(read_fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+            let (read_fd, write_file) = create_capture_pipe("stderr")?;
 
             let reader = UnixPipeReader::new(read_fd).map_err(|e| {
                 ProgramError::PlatformError(format!(
@@ -127,8 +185,7 @@ impl UnixProcessLogTransport {
                 ))
             })?;
 
-            let stderr_file = unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) };
-            stdio_stderr = Some(Stdio::from(stderr_file));
+            stdio_stderr = Some(Stdio::from(write_file));
             stderr_reader = Some(reader);
         }
 

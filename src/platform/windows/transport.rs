@@ -85,10 +85,7 @@ impl WindowsProcessLogTransport {
 
             // Await pipe connection from client (which succeeds immediately as client is already open)
             server.connect().await.map_err(|e| {
-                ProgramError::PlatformError(format!(
-                    "Failed to connect stdout named pipe: {}",
-                    e
-                ))
+                ProgramError::PlatformError(format!("Failed to connect stdout named pipe: {}", e))
             })?;
 
             if config.redirect_stderr {
@@ -151,10 +148,7 @@ impl WindowsProcessLogTransport {
             }
 
             server.connect().await.map_err(|e| {
-                ProgramError::PlatformError(format!(
-                    "Failed to connect stderr named pipe: {}",
-                    e
-                ))
+                ProgramError::PlatformError(format!("Failed to connect stderr named pipe: {}", e))
             })?;
 
             stdio_stderr = Some(Stdio::from(client_file));

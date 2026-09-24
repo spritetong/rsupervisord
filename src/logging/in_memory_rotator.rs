@@ -4,12 +4,14 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::consts::MAX_LIVE_LOG_LINE_BYTES;
 use crate::error::ProgramError;
 use crate::logging::backend::LogBackend;
 use crate::logging::reader::InstantLogReader;
 use crate::logging::types::{LogChannel, LogChunk};
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use bytes::BytesMut;
+use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -53,12 +55,18 @@ impl MemorySegment {
 }
 
 /// Rotator for a single log channel (e.g. stdout or stderr) stored entirely in memory.
+///
+/// Lock order: acquire `active` before `backups_queue` in every method; never
+/// reverse. `pending_line` is independent and must never be held while taking
+/// either segment lock.
 pub struct InMemoryChannelRotator {
     max_bytes: usize,
     backups: usize,
     active: RwLock<MemorySegment>,
     backups_queue: RwLock<VecDeque<MemorySegment>>,
     broadcast_tx: broadcast::Sender<String>,
+    /// Incomplete line tail awaiting a newline for live broadcast.
+    pending_line: Mutex<BytesMut>,
 }
 
 impl InMemoryChannelRotator {
@@ -71,7 +79,63 @@ impl InMemoryChannelRotator {
             active: RwLock::new(MemorySegment::with_capacity(max_bytes.min(64 * 1024))),
             backups_queue: RwLock::new(VecDeque::with_capacity(backups)),
             broadcast_tx,
+            pending_line: Mutex::new(BytesMut::new()),
         }
+    }
+
+    /// Assembles `data` into complete newline-delimited lines and broadcasts them.
+    ///
+    /// Bytes are buffered across chunk boundaries so multi-byte UTF-8 sequences
+    /// and lines split across reads are never dropped or broken.
+    fn broadcast_chunk(&self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        let has_receivers = self.broadcast_tx.receiver_count() > 0;
+        let mut pending = self.pending_line.lock();
+        pending.extend_from_slice(data);
+
+        let mut start = 0usize;
+        while start < pending.len() {
+            let Some(rel) = pending[start..].iter().position(|&b| b == b'\n') else {
+                break;
+            };
+            let mut line = &pending[start..start + rel];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            if has_receivers {
+                let text = String::from_utf8_lossy(line);
+                let _ = self.broadcast_tx.send(text.into_owned());
+            }
+            start += rel + 1;
+        }
+        if start > 0 {
+            let _ = pending.split_to(start);
+        }
+
+        // Force-flush overlong unterminated input to bound memory.
+        if pending.len() > MAX_LIVE_LOG_LINE_BYTES {
+            if has_receivers {
+                let text = String::from_utf8_lossy(&pending);
+                let _ = self.broadcast_tx.send(text.into_owned());
+            }
+            pending.clear();
+        }
+    }
+
+    /// Broadcasts any incomplete pending line (e.g. on stream EOF) and clears it.
+    pub fn flush_broadcast(&self) {
+        let mut pending = self.pending_line.lock();
+        if pending.is_empty() {
+            return;
+        }
+        if self.broadcast_tx.receiver_count() > 0 {
+            let text = String::from_utf8_lossy(&pending);
+            let _ = self.broadcast_tx.send(text.into_owned());
+        }
+        pending.clear();
     }
 
     /// Appends a raw chunk of bytes, rotating the segment if `max_bytes` is reached.
@@ -80,16 +144,9 @@ impl InMemoryChannelRotator {
             return;
         }
 
-        // Detect lines for live broadcast
-        let should_broadcast = self.broadcast_tx.receiver_count() > 0;
-        if should_broadcast {
-            if let Ok(text) = std::str::from_utf8(data) {
-                for line in text.lines() {
-                    let _ = self.broadcast_tx.send(line.to_string());
-                }
-            }
-        }
+        self.broadcast_chunk(data);
 
+        // Lock order: active before backups_queue.
         let mut active = self.active.write();
 
         // Check if current active segment needs rotation
@@ -122,22 +179,23 @@ impl InMemoryChannelRotator {
     }
 
     /// Appends a text line with an added newline delimiter.
+    ///
+    /// Broadcasts exactly once via [`Self::append_bytes`].
     pub fn append_line(&self, line: &str) {
-        if self.broadcast_tx.receiver_count() > 0 {
-            let _ = self.broadcast_tx.send(line.to_string());
-        }
-
-        let mut bytes = line.as_bytes().to_vec();
+        let mut bytes = Vec::with_capacity(line.len() + 1);
+        bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
         self.append_bytes(&bytes);
     }
 
     /// Returns a flat snapshot of all active and backup segment bytes.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        let backups = self.backups_queue.read();
+        // Lock order: active before backups_queue (data order is still
+        // backups first, then active, for chronological layout).
         let active = self.active.read();
+        let backups = self.backups_queue.read();
 
-        let total_size: usize = backups.iter().map(|s| s.len()).sum::<usize>() + active.len();
+        let total_size: usize = active.len() + backups.iter().map(|s| s.len()).sum::<usize>();
         let mut out = Vec::with_capacity(total_size);
 
         for seg in backups.iter() {
@@ -157,7 +215,7 @@ impl InMemoryChannelRotator {
         let mut len = length;
 
         if off < 0 {
-            off = sz + off;
+            off += sz;
             if off < 0 {
                 overflow = true;
                 off = 0;
@@ -171,11 +229,7 @@ impl InMemoryChannelRotator {
         let start = off.min(sz) as usize;
         let end = (off + len).min(sz) as usize;
 
-        let slice = if start < end {
-            &full[start..end]
-        } else {
-            &[]
-        };
+        let slice = if start < end { &full[start..end] } else { &[] };
 
         (String::from_utf8_lossy(slice).to_string(), sz, overflow)
     }
@@ -230,13 +284,17 @@ impl InMemoryChannelRotator {
         }
     }
 
-    /// Clears both active and backup segments.
+    /// Clears both active and backup segments and any pending broadcast line.
     pub fn clear(&self) {
-        let mut active = self.active.write();
-        let mut backups = self.backups_queue.write();
-        active.data.clear();
-        active.line_offsets.clear();
-        backups.clear();
+        {
+            // Lock order: active before backups_queue.
+            let mut active = self.active.write();
+            let mut backups = self.backups_queue.write();
+            active.data.clear();
+            active.line_offsets.clear();
+            backups.clear();
+        }
+        self.pending_line.lock().clear();
     }
 
     /// Subscribes to real-time incoming lines.
@@ -246,16 +304,18 @@ impl InMemoryChannelRotator {
 
     /// Returns the total bytes across active and backup segments.
     pub fn byte_size(&self) -> usize {
-        let backups = self.backups_queue.read();
+        // Lock order: active before backups_queue.
         let active = self.active.read();
-        backups.iter().map(|s| s.len()).sum::<usize>() + active.len()
+        let backups = self.backups_queue.read();
+        active.len() + backups.iter().map(|s| s.len()).sum::<usize>()
     }
 
     /// Returns the total line count across active and backup segments.
     pub fn line_count(&self) -> usize {
-        let backups = self.backups_queue.read();
+        // Lock order: active before backups_queue.
         let active = self.active.read();
-        backups.iter().map(|s| s.line_count()).sum::<usize>() + active.line_count()
+        let backups = self.backups_queue.read();
+        active.line_count() + backups.iter().map(|s| s.line_count()).sum::<usize>()
     }
 }
 
@@ -306,6 +366,8 @@ impl LogBackend for InMemoryLogRotator {
     }
 
     async fn flush(&self) -> Result<(), ProgramError> {
+        self.stdout.flush_broadcast();
+        self.stderr.flush_broadcast();
         Ok(())
     }
 }
@@ -403,5 +465,112 @@ mod tests {
         assert_eq!(data, "orld\n");
         assert_eq!(new_off, 12);
         assert!(overflow);
+    }
+
+    #[test]
+    fn test_append_line_broadcasts_exactly_once() {
+        let rotator = InMemoryChannelRotator::new(1024, 2);
+        let mut rx = rotator.subscribe();
+
+        rotator.append_line("only-once");
+
+        assert_eq!(
+            rx.try_recv().expect("first broadcast"),
+            "only-once",
+            "append_line must broadcast the line once"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "append_line must not double-broadcast through append_bytes"
+        );
+        assert_eq!(rotator.read_lines(None), vec!["only-once"]);
+    }
+
+    #[test]
+    fn test_broadcast_assembles_lines_across_chunks() {
+        let rotator = InMemoryChannelRotator::new(1024, 2);
+        let mut rx = rotator.subscribe();
+
+        rotator.append_bytes(b"hel");
+        assert!(
+            rx.try_recv().is_err(),
+            "partial line must not be broadcast before newline"
+        );
+
+        rotator.append_bytes(b"lo\nwor");
+        assert_eq!(rx.try_recv().expect("complete line"), "hello");
+        assert!(
+            rx.try_recv().is_err(),
+            "trailing partial line must wait for newline"
+        );
+
+        rotator.append_bytes(b"ld\n");
+        assert_eq!(rx.try_recv().expect("second line"), "world");
+        assert_eq!(rotator.read_lines(None), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_broadcast_preserves_utf8_across_chunk_boundary() {
+        let rotator = InMemoryChannelRotator::new(1024, 2);
+        let mut rx = rotator.subscribe();
+
+        // "héllo\n" is 8 bytes; é is 2 bytes (0xC3 0xA9) — split inside it.
+        let full = "héllo\n".as_bytes();
+        let split = full.iter().position(|&b| b == 0xC3).unwrap() + 1;
+        rotator.append_bytes(&full[..split]);
+        rotator.append_bytes(&full[split..]);
+
+        assert_eq!(
+            rx.try_recv().expect("utf-8 line"),
+            "héllo",
+            "multi-byte char split across chunks must reassemble"
+        );
+        assert_eq!(rotator.read_lines(None), vec!["héllo"]);
+    }
+
+    #[test]
+    fn test_concurrent_append_and_snapshot_no_deadlock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Small max_bytes forces frequent rotation (active→backups write path)
+        // while readers hold backups→active in the old code — AB-BA deadlock.
+        let rotator = Arc::new(InMemoryChannelRotator::new(32, 2));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let rotator = Arc::clone(&rotator);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    rotator.append_line("0123456789");
+                }
+            })
+        };
+
+        let reader = {
+            let rotator = Arc::clone(&rotator);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = rotator.snapshot_bytes();
+                    let _ = rotator.byte_size();
+                    let _ = rotator.line_count();
+                }
+            })
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        stop.store(true, Ordering::Relaxed);
+
+        // Join with timeout so a deadlock fails fast instead of hanging CI.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = writer.join();
+            let _ = reader.join();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("deadlock detected: concurrent append/snapshot did not complete");
     }
 }

@@ -224,7 +224,7 @@ async fn test_process_live_log_subscription() {
 async fn test_in_memory_rotator_and_reader() {
     use bytes::Bytes;
     use rsupervisord::logging::{
-        InstantLogReader, InMemoryLogRotator, LogBackend, LogChannel, LogChunk,
+        InMemoryLogRotator, InstantLogReader, LogBackend, LogChannel, LogChunk,
     };
 
     // Max 30 bytes per segment, 2 backups
@@ -308,7 +308,10 @@ async fn test_platform_process_log_transport() {
     };
 
     let platform = native_platform();
-    let mut transport = platform.create_process_log_transport(&config).await.unwrap();
+    let mut transport = platform
+        .create_process_log_transport(&config)
+        .await
+        .unwrap();
 
     // Take stdio handles for child process
     let stdio_handles = transport.take_child_stdio().unwrap();

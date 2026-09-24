@@ -159,6 +159,8 @@ pub const DEFAULT_LOG_MAX_BYTES: usize = 50 * 1024 * 1024;
 pub const DEFAULT_LOG_MAX_BYTES_HUMAN: &str = "50MB";
 // Default number of rotated log backups (Python parity).
 pub_const!(DEFAULT_LOG_BACKUPS: usize = 10);
+// Maximum bytes buffered for an incomplete live-broadcast line before force-flush.
+pub_const!(MAX_LIVE_LOG_LINE_BYTES: usize = 64 * 1024);
 
 // ---------------------------------------------------------------------------
 // Permissions / umask
