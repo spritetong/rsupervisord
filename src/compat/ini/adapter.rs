@@ -11,7 +11,7 @@ use crate::compat::ini::values::{
 use crate::config::schema::SupervisorConfig;
 use crate::consts::*;
 use crate::error::ProgramError;
-use crate::program::config::{HealthCheckConfig, HealthCheckType};
+use crate::program::config::{AutoRestartPolicy, HealthCheckConfig, HealthCheckType};
 use crate::serde_util::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,44 +19,34 @@ use std::path::{Path, PathBuf};
 /// Transformation strategy for converting INI string values into JSON AST types.
 #[derive(Clone, Copy)]
 pub enum Transform {
-    /// String preserved as JSON string.
     Identity,
-    /// String trimmed and lowercased into JSON string.
     Lowercase,
-    /// Boolean values (Python/go parity: true/false/yes/no/1/0/on/off) into JSON bool.
     Bool,
-    /// Unsigned integer into JSON number.
     Usize,
-    /// 32-bit unsigned integer into JSON number.
     U32,
-    /// 32-bit signed integer into JSON number.
     I32,
-    /// Duration in seconds into JSON number.
     DurationSecs,
-    /// Human-readable byte size into JSON number of bytes.
     ByteSize,
-    /// Octal permissions mode (e.g. 0755, 755) into JSON number.
     Chmod,
-    /// Octal umask (e.g. 022, 22) into JSON number.
     Umask,
-    /// Comma- or whitespace-separated list of strings into JSON array.
     StringList,
-    /// Comma- or whitespace-separated list of event names into validated uppercase JSON array.
     EventList,
-    /// Comma-separated list of 32-bit signed integers into JSON array.
     I32List,
-    /// Python INI environment variable string into JSON object map.
     Environment,
-    /// Supervisor log path normalization: AUTO/empty -> None, NONE/OFF/NULL//dev/null -> "/dev/null".
     LogPath,
-    /// Process stop signal name into serialized JSON string.
     StopSignal,
-    /// Process auto-restart policy into serialized JSON string.
     AutoRestart,
-    /// Comma-separated list of environment file paths, absolutized against config_dir if relative.
     EnvFiles,
-    /// HTTP bind address normalization (e.g. :9001, 9001 -> 0.0.0.0:9001).
     HttpBind,
+}
+
+macro_rules! transform_value {
+    ($context:ident, $key:ident, $value:expr) => {{
+        let jsn = $value.map_err(|e| {
+            ProgramError::ConfigError(format!("{}: invalid {}: {}", $context, $key, e))
+        })?;
+        Ok(Some(serde_json::json!(jsn)))
+    }};
 }
 
 impl Transform {
@@ -72,58 +62,17 @@ impl Transform {
             Self::Lowercase => Ok(Some(serde_json::Value::String(
                 raw.trim().to_ascii_lowercase(),
             ))),
-            Self::Bool => {
-                let b = string_to_bool(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::Value::Bool(b)))
-            }
-            Self::Usize => {
-                let n = raw.trim().parse::<usize>().map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(n)))
-            }
-            Self::U32 => {
-                let n = raw.trim().parse::<u32>().map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(n)))
-            }
-            Self::I32 => {
-                let n = raw.trim().parse::<i32>().map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(n)))
-            }
+            Self::Bool => transform_value!(context, key, string_to_bool(raw)),
+            Self::Usize => transform_value!(context, key, raw.trim().parse::<usize>()),
+            Self::U32 => transform_value!(context, key, raw.trim().parse::<u32>()),
+            Self::I32 => transform_value!(context, key, raw.trim().parse::<i32>()),
             Self::DurationSecs => {
-                let d = string_to_duration(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(d.as_secs())))
+                transform_value!(context, key, string_to_duration(raw).map(|d| d.as_secs()))
             }
-            Self::ByteSize => {
-                let bytes = string_to_bytes(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(bytes)))
-            }
-            Self::Chmod => {
-                let mode = string_to_chmod(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(mode)))
-            }
-            Self::Umask => {
-                let mask = string_to_umask(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(mask)))
-            }
-            Self::StringList => {
-                let list = string_to_str_list(raw);
-                Ok(Some(serde_json::json!(list)))
-            }
+            Self::ByteSize => transform_value!(context, key, string_to_bytes(raw)),
+            Self::Chmod => transform_value!(context, key, string_to_chmod(raw)),
+            Self::Umask => transform_value!(context, key, string_to_umask(raw)),
+            Self::StringList => Ok(Some(serde_json::json!(string_to_str_list(raw)))),
             Self::EventList => {
                 let events: Vec<String> = raw
                     .split(&[',', ' ', '\t'][..])
@@ -133,34 +82,24 @@ impl Transform {
                 crate::eventlistener::validate_event_list(&events)?;
                 Ok(Some(serde_json::json!(events)))
             }
-            Self::I32List => {
-                let list = string_to_i32_list(raw).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(serde_json::json!(list)))
-            }
-            Self::Environment => {
-                let map = parse_environment(raw)?;
-                Ok(Some(serde_json::json!(map)))
-            }
+            Self::I32List => transform_value!(context, key, string_to_i32_list(raw)),
+            Self::Environment => Ok(Some(serde_json::json!(parse_environment(raw)?))),
             Self::LogPath => {
                 let opt = parse_log_path(raw);
                 Ok(opt.map(|p| serde_json::Value::String(p.to_string_lossy().into_owned())))
             }
             Self::StopSignal => {
-                let sig = parse_stop_signal(raw)?;
-                let val = serde_json::to_value(sig).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(val))
+                transform_value!(context, key, parse_stop_signal(raw).map(|s| s.to_string()))
             }
-            Self::AutoRestart => {
-                let policy = parse_autorestart(raw)?;
-                let val = serde_json::to_value(policy).map_err(|e| {
-                    ProgramError::ConfigError(format!("{}: invalid {}: {}", context, key, e))
-                })?;
-                Ok(Some(val))
-            }
+            Self::AutoRestart => transform_value!(
+                context,
+                key,
+                parse_autorestart(raw).map(|p| match p {
+                    AutoRestartPolicy::Always => "always",
+                    AutoRestartPolicy::Unexpected => "unexpected",
+                    AutoRestartPolicy::Never => "never",
+                })
+            ),
             Self::EnvFiles => {
                 let files: Vec<PathBuf> = string_to_str_list(raw)
                     .into_iter()
@@ -173,10 +112,7 @@ impl Transform {
                     .collect();
                 Ok(Some(serde_json::json!(paths)))
             }
-            Self::HttpBind => {
-                let norm = normalize_http_bind(raw);
-                Ok(Some(serde_json::Value::String(norm)))
-            }
+            Self::HttpBind => Ok(Some(serde_json::Value::String(normalize_http_bind(raw)))),
         }
     }
 }
@@ -187,6 +123,23 @@ pub struct FieldMapping {
     pub src_keys: &'static [&'static str],
     pub dst_path: &'static str,
     pub transform: Transform,
+}
+
+macro_rules! map_field {
+    ($key:literal, $transform:ident) => {
+        FieldMapping {
+            src_keys: &[$key],
+            dst_path: $key,
+            transform: Transform::$transform,
+        }
+    };
+    ($src_keys:expr, $dst_path:literal, $transform:ident) => {
+        FieldMapping {
+            src_keys: $src_keys,
+            dst_path: $dst_path,
+            transform: Transform::$transform,
+        }
+    };
 }
 
 /// Sets a value in a JSON AST object at a dot-separated path (e.g. "logs.stdout").
@@ -227,6 +180,20 @@ fn apply_mappings(
     Ok(())
 }
 
+/// Maps one or more field mapping groups into a newly created JSON object.
+fn map_section(
+    sec: &HashMap<String, String>,
+    mapping_groups: &[&[FieldMapping]],
+    context: &str,
+    config_dir: Option<&Path>,
+) -> Result<serde_json::Value, ProgramError> {
+    let mut target = serde_json::json!({});
+    for mappings in mapping_groups {
+        apply_mappings(sec, mappings, &mut target, context, config_dir)?;
+    }
+    Ok(target)
+}
+
 /// Warns about keys in `sec` that are not consumed by any mapping or extra known list (OI-11).
 fn warn_unconsumed_keys_multi(
     section: &str,
@@ -245,6 +212,23 @@ fn warn_unconsumed_keys_multi(
                 "unknown INI key ignored"
             );
         }
+    }
+}
+
+/// Enforces that a required key exists in the section.
+fn require_key(
+    sec: &HashMap<String, String>,
+    key: &str,
+    entity: &str,
+    name: &str,
+) -> Result<(), ProgramError> {
+    if !sec.contains_key(key) {
+        Err(ProgramError::ConfigError(format!(
+            "{} '{}' missing required '{}' field",
+            entity, name, key
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -356,485 +340,170 @@ fn parse_liveness_check(
     }))
 }
 
+/// Evaluates and attaches liveness health check configuration if present in the section.
+fn attach_liveness_check(
+    sec: &HashMap<String, String>,
+    target: &mut serde_json::Value,
+    context: &str,
+) -> Result<(), ProgramError> {
+    if let Some(hc) = parse_liveness_check(sec, context)? {
+        target["health_check"] =
+            serde_json::to_value(&hc).map_err(|e| ProgramError::ConfigError(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Declarative Mapping Tables
 // ---------------------------------------------------------------------------
 
 const SERVER_UNIX_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["file"],
-        dst_path: "server.uds_path",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["chmod"],
-        dst_path: "server.uds_chmod",
-        transform: Transform::Chmod,
-    },
-    FieldMapping {
-        src_keys: &["username"],
-        dst_path: "server.uds_username",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["password"],
-        dst_path: "server.uds_password",
-        transform: Transform::Identity,
-    },
+    map_field!(&["file"], "server.uds_path", Identity),
+    map_field!(&["chmod"], "server.uds_chmod", Chmod),
+    map_field!(&["username"], "server.uds_username", Identity),
+    map_field!(&["password"], "server.uds_password", Identity),
 ];
 
 const SERVER_INET_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["port"],
-        dst_path: "server.http_bind",
-        transform: Transform::HttpBind,
-    },
-    FieldMapping {
-        src_keys: &["username"],
-        dst_path: "server.username",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["password"],
-        dst_path: "server.password",
-        transform: Transform::Identity,
-    },
+    map_field!(&["port"], "server.http_bind", HttpBind),
+    map_field!(&["username"], "server.username", Identity),
+    map_field!(&["password"], "server.password", Identity),
 ];
 
 const SUPERVISORD_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["logfile_maxbytes"],
-        dst_path: "logging.max_bytes",
-        transform: Transform::ByteSize,
-    },
-    FieldMapping {
-        src_keys: &["logfile_backups"],
-        dst_path: "logging.backups",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["loglevel"],
-        dst_path: "logging.level",
-        transform: Transform::Lowercase,
-    },
-    FieldMapping {
-        src_keys: &["silent"],
-        dst_path: "logging.silent",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["identifier"],
-        dst_path: "server.identifier",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["nodaemon"],
-        dst_path: "nodaemon",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["environment"],
-        dst_path: "environment",
-        transform: Transform::Environment,
-    },
-    FieldMapping {
-        src_keys: &["pidfile"],
-        dst_path: "pidfile",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["minfds"],
-        dst_path: "minfds",
-        transform: Transform::U32,
-    },
-    FieldMapping {
-        src_keys: &["minprocs"],
-        dst_path: "minprocs",
-        transform: Transform::U32,
-    },
+    map_field!(&["logfile_maxbytes"], "logging.max_bytes", ByteSize),
+    map_field!(&["logfile_backups"], "logging.backups", Usize),
+    map_field!(&["loglevel"], "logging.level", Lowercase),
+    map_field!(&["silent"], "logging.silent", Bool),
+    map_field!(&["identifier"], "server.identifier", Identity),
+    map_field!("nodaemon", Bool),
+    map_field!("environment", Environment),
+    map_field!("pidfile", Identity),
+    map_field!("minfds", U32),
+    map_field!("minprocs", U32),
 ];
 
 const CTL_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["serverurl"],
-        dst_path: "serverurl",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["username"],
-        dst_path: "username",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["password"],
-        dst_path: "password",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["auth_token"],
-        dst_path: "auth_token",
-        transform: Transform::Identity,
-    },
+    map_field!("serverurl", Identity),
+    map_field!("username", Identity),
+    map_field!("password", Identity),
+    map_field!("auth_token", Identity),
 ];
 
 const GROUP_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["programs"],
-        dst_path: "programs",
-        transform: Transform::StringList,
-    },
-    FieldMapping {
-        src_keys: &["priority"],
-        dst_path: "priority",
-        transform: Transform::U32,
-    },
+    map_field!("programs", StringList),
+    map_field!("priority", U32),
 ];
 
 /// Shared program mappings used by both `[program:x]` and `[program-default]`.
 const PROGRAM_SHARED_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["autostart"],
-        dst_path: "autostart",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["autorestart"],
-        dst_path: "autorestart",
-        transform: Transform::AutoRestart,
-    },
-    FieldMapping {
-        src_keys: &["startsecs", "start_secs"],
-        dst_path: "start_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["startretries", "start_retries"],
-        dst_path: "start_retries",
-        transform: Transform::U32,
-    },
-    FieldMapping {
-        src_keys: &["restartpause", "restart_pause", "restart_pause_secs"],
-        dst_path: "restart_pause_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["stopsignal", "stop_signal"],
-        dst_path: "stop_signal",
-        transform: Transform::StopSignal,
-    },
-    FieldMapping {
-        src_keys: &["stopwaitsecs", "stop_wait_secs"],
-        dst_path: "stop_wait_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["priority"],
-        dst_path: "priority",
-        transform: Transform::U32,
-    },
-    FieldMapping {
-        src_keys: &["numprocs"],
-        dst_path: "numprocs",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["numprocs_start"],
-        dst_path: "numprocs_start",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["process_name"],
-        dst_path: "process_name",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["stdout_logfile"],
-        dst_path: "logs.stdout",
-        transform: Transform::LogPath,
-    },
-    FieldMapping {
-        src_keys: &["stderr_logfile"],
-        dst_path: "logs.stderr",
-        transform: Transform::LogPath,
-    },
-    FieldMapping {
-        src_keys: &["stdout_logfile_maxbytes", "stderr_logfile_maxbytes"],
-        dst_path: "logs.max_bytes",
-        transform: Transform::ByteSize,
-    },
-    FieldMapping {
-        src_keys: &["stdout_logfile_backups", "stderr_logfile_backups"],
-        dst_path: "logs.backups",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["redirect_stderr"],
-        dst_path: "logs.redirect_stderr",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["stdout_events_enabled"],
-        dst_path: "logs.stdout_events_enabled",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["stderr_events_enabled"],
-        dst_path: "logs.stderr_events_enabled",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["pre_start", "pre_start_hook"],
-        dst_path: "pre_start",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["pre_stop", "pre_stop_hook"],
-        dst_path: "pre_stop",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["pre_start_ignore_failure"],
-        dst_path: "pre_start_ignore_failure",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["hook_timeout_secs"],
-        dst_path: "hook_timeout_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["restart_when_binary_changed"],
-        dst_path: "restart_when_binary_changed",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["restart_signal_when_binary_changed"],
-        dst_path: "restart_signal_when_binary_changed",
-        transform: Transform::StopSignal,
-    },
-    FieldMapping {
-        src_keys: &["restart_cmd_when_binary_changed"],
-        dst_path: "restart_cmd_when_binary_changed",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["restart_directory_monitor"],
-        dst_path: "restart_directory_monitor",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["restart_file_pattern"],
-        dst_path: "restart_file_pattern",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["restart_signal_when_file_changed"],
-        dst_path: "restart_signal_when_file_changed",
-        transform: Transform::StopSignal,
-    },
-    FieldMapping {
-        src_keys: &["restart_cmd_when_file_changed"],
-        dst_path: "restart_cmd_when_file_changed",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["restart_debounce_secs"],
-        dst_path: "restart_debounce_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["envfiles", "env_files"],
-        dst_path: "env_files",
-        transform: Transform::EnvFiles,
-    },
-    FieldMapping {
-        src_keys: &["killwaitsecs", "kill_wait_secs"],
-        dst_path: "kill_wait_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["stopasgroup", "stop_as_group"],
-        dst_path: "stop_as_group",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["killasgroup", "kill_as_group"],
-        dst_path: "kill_as_group",
-        transform: Transform::Bool,
-    },
+    map_field!("autostart", Bool),
+    map_field!("autorestart", AutoRestart),
+    map_field!(&["startsecs", "start_secs"], "start_secs", DurationSecs),
+    map_field!(&["startretries", "start_retries"], "start_retries", U32),
+    map_field!(
+        &["restartpause", "restart_pause", "restart_pause_secs"],
+        "restart_pause_secs",
+        DurationSecs
+    ),
+    map_field!(&["stopsignal", "stop_signal"], "stop_signal", StopSignal),
+    map_field!(
+        &["stopwaitsecs", "stop_wait_secs"],
+        "stop_wait_secs",
+        DurationSecs
+    ),
+    map_field!("priority", U32),
+    map_field!("numprocs", Usize),
+    map_field!("numprocs_start", Usize),
+    map_field!("process_name", Identity),
+    map_field!(&["stdout_logfile"], "logs.stdout", LogPath),
+    map_field!(&["stderr_logfile"], "logs.stderr", LogPath),
+    map_field!(
+        &["stdout_logfile_maxbytes", "stderr_logfile_maxbytes"],
+        "logs.max_bytes",
+        ByteSize
+    ),
+    map_field!(
+        &["stdout_logfile_backups", "stderr_logfile_backups"],
+        "logs.backups",
+        Usize
+    ),
+    map_field!(&["redirect_stderr"], "logs.redirect_stderr", Bool),
+    map_field!(
+        &["stdout_events_enabled"],
+        "logs.stdout_events_enabled",
+        Bool
+    ),
+    map_field!(
+        &["stderr_events_enabled"],
+        "logs.stderr_events_enabled",
+        Bool
+    ),
+    map_field!(&["pre_start", "pre_start_hook"], "pre_start", Identity),
+    map_field!(&["pre_stop", "pre_stop_hook"], "pre_stop", Identity),
+    map_field!("pre_start_ignore_failure", Bool),
+    map_field!(&["hook_timeout_secs"], "hook_timeout_secs", DurationSecs),
+    map_field!("restart_when_binary_changed", Bool),
+    map_field!("restart_signal_when_binary_changed", StopSignal),
+    map_field!("restart_cmd_when_binary_changed", Identity),
+    map_field!("restart_directory_monitor", Identity),
+    map_field!("restart_file_pattern", Identity),
+    map_field!("restart_signal_when_file_changed", StopSignal),
+    map_field!("restart_cmd_when_file_changed", Identity),
+    map_field!("restart_debounce_secs", DurationSecs),
+    map_field!(&["envfiles", "env_files"], "env_files", EnvFiles),
+    map_field!(
+        &["killwaitsecs", "kill_wait_secs"],
+        "kill_wait_secs",
+        DurationSecs
+    ),
+    map_field!(&["stopasgroup", "stop_as_group"], "stop_as_group", Bool),
+    map_field!(&["killasgroup", "kill_as_group"], "kill_as_group", Bool),
 ];
 
 /// Program-only mappings that are not supported on `[program-default]`.
 const PROGRAM_ONLY_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["command"],
-        dst_path: "command",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["exitcodes", "exit_codes"],
-        dst_path: "exit_codes",
-        transform: Transform::I32List,
-    },
-    FieldMapping {
-        src_keys: &["directory"],
-        dst_path: "directory",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["user"],
-        dst_path: "user",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["umask"],
-        dst_path: "umask",
-        transform: Transform::Umask,
-    },
-    FieldMapping {
-        src_keys: &["environment"],
-        dst_path: "environment",
-        transform: Transform::Environment,
-    },
-    FieldMapping {
-        src_keys: &["depends_on"],
-        dst_path: "depends_on",
-        transform: Transform::StringList,
-    },
-    FieldMapping {
-        src_keys: &["cron"],
-        dst_path: "cron",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["cron_stop", "stop_cron"],
-        dst_path: "cron_stop",
-        transform: Transform::Identity,
-    },
+    map_field!("command", Identity),
+    map_field!(&["exitcodes", "exit_codes"], "exit_codes", I32List),
+    map_field!("directory", Identity),
+    map_field!("user", Identity),
+    map_field!("umask", Umask),
+    map_field!("environment", Environment),
+    map_field!("depends_on", StringList),
+    map_field!("cron", Identity),
+    map_field!(&["cron_stop", "stop_cron"], "cron_stop", Identity),
 ];
 
 /// Mappings for `[eventlistener:x]` sections.
 const EVENT_LISTENER_MAPPINGS: &[FieldMapping] = &[
-    FieldMapping {
-        src_keys: &["command"],
-        dst_path: "command",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["events"],
-        dst_path: "events",
-        transform: Transform::EventList,
-    },
-    FieldMapping {
-        src_keys: &["buffer_size", "buffersize"],
-        dst_path: "buffer_size",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["result_handler"],
-        dst_path: "result_handler",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["priority"],
-        dst_path: "priority",
-        transform: Transform::I32,
-    },
-    FieldMapping {
-        src_keys: &["autostart"],
-        dst_path: "autostart",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["autorestart"],
-        dst_path: "autorestart",
-        transform: Transform::AutoRestart,
-    },
-    FieldMapping {
-        src_keys: &["startsecs", "start_secs"],
-        dst_path: "start_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["startretries", "start_retries"],
-        dst_path: "start_retries",
-        transform: Transform::U32,
-    },
-    FieldMapping {
-        src_keys: &["stopsignal", "stop_signal"],
-        dst_path: "stop_signal",
-        transform: Transform::StopSignal,
-    },
-    FieldMapping {
-        src_keys: &["stopwaitsecs", "stop_wait_secs"],
-        dst_path: "stop_wait_secs",
-        transform: Transform::DurationSecs,
-    },
-    FieldMapping {
-        src_keys: &["directory"],
-        dst_path: "directory",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["user"],
-        dst_path: "user",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["umask"],
-        dst_path: "umask",
-        transform: Transform::Umask,
-    },
-    FieldMapping {
-        src_keys: &["environment"],
-        dst_path: "environment",
-        transform: Transform::Environment,
-    },
-    FieldMapping {
-        src_keys: &["stdout_logfile"],
-        dst_path: "stdout_logfile",
-        transform: Transform::LogPath,
-    },
-    FieldMapping {
-        src_keys: &["stderr_logfile"],
-        dst_path: "stderr_logfile",
-        transform: Transform::LogPath,
-    },
-    FieldMapping {
-        src_keys: &["redirect_stderr"],
-        dst_path: "redirect_stderr",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["numprocs"],
-        dst_path: "numprocs",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["numprocs_start"],
-        dst_path: "numprocs_start",
-        transform: Transform::Usize,
-    },
-    FieldMapping {
-        src_keys: &["process_name"],
-        dst_path: "process_name",
-        transform: Transform::Identity,
-    },
-    FieldMapping {
-        src_keys: &["envfiles", "env_files"],
-        dst_path: "env_files",
-        transform: Transform::EnvFiles,
-    },
-    FieldMapping {
-        src_keys: &["stopasgroup", "stop_as_group"],
-        dst_path: "stop_as_group",
-        transform: Transform::Bool,
-    },
-    FieldMapping {
-        src_keys: &["killasgroup", "kill_as_group"],
-        dst_path: "kill_as_group",
-        transform: Transform::Bool,
-    },
+    map_field!("command", Identity),
+    map_field!("events", EventList),
+    map_field!(&["buffer_size", "buffersize"], "buffer_size", Usize),
+    map_field!("result_handler", Identity),
+    map_field!("priority", I32),
+    map_field!("autostart", Bool),
+    map_field!("autorestart", AutoRestart),
+    map_field!(&["startsecs", "start_secs"], "start_secs", DurationSecs),
+    map_field!(&["startretries", "start_retries"], "start_retries", U32),
+    map_field!(&["stopsignal", "stop_signal"], "stop_signal", StopSignal),
+    map_field!(
+        &["stopwaitsecs", "stop_wait_secs"],
+        "stop_wait_secs",
+        DurationSecs
+    ),
+    map_field!("directory", Identity),
+    map_field!("user", Identity),
+    map_field!("umask", Umask),
+    map_field!("environment", Environment),
+    map_field!("stdout_logfile", LogPath),
+    map_field!("stderr_logfile", LogPath),
+    map_field!("redirect_stderr", Bool),
+    map_field!("numprocs", Usize),
+    map_field!("numprocs_start", Usize),
+    map_field!("process_name", Identity),
+    map_field!(&["envfiles", "env_files"], "env_files", EnvFiles),
+    map_field!(&["stopasgroup", "stop_as_group"], "stop_as_group", Bool),
+    map_field!(&["killasgroup", "kill_as_group"], "kill_as_group", Bool),
 ];
 
 const LIVENESS_CHECK_KEYS: &[&str] = &[
@@ -924,9 +593,7 @@ pub fn adapt_ini_to_config(
     // Section presence maps to Some(ctl); missing section stays None so
     // supervisorctl can hard-error (Python requires the section).
     if let Some(sec) = ini.sections.get("supervisorctl") {
-        let mut ctl = serde_json::json!({});
-        apply_mappings(sec, CTL_MAPPINGS, &mut ctl, "[supervisorctl]", config_dir)?;
-        root["ctl"] = ctl;
+        root["ctl"] = map_section(sec, &[CTL_MAPPINGS], "[supervisorctl]", config_dir)?;
         warn_unconsumed_keys_multi(
             "supervisorctl",
             sec,
@@ -937,18 +604,13 @@ pub fn adapt_ini_to_config(
 
     // 4. Process [program-default]
     if let Some(sec) = ini.sections.get("program-default") {
-        let mut defs = serde_json::json!({});
-        apply_mappings(
+        let mut defs = map_section(
             sec,
-            PROGRAM_SHARED_MAPPINGS,
-            &mut defs,
+            &[PROGRAM_SHARED_MAPPINGS],
             "[program-default]",
             config_dir,
         )?;
-        if let Some(hc) = parse_liveness_check(sec, "[program-default]")? {
-            defs["health_check"] =
-                serde_json::to_value(&hc).map_err(|e| ProgramError::ConfigError(e.to_string()))?;
-        }
+        attach_liveness_check(sec, &mut defs, "[program-default]")?;
         root["program_defaults"] = defs;
         warn_unconsumed_keys_multi(
             "program-default",
@@ -962,26 +624,15 @@ pub fn adapt_ini_to_config(
     for section_name in &ini.section_order {
         if let Some(prog_name) = section_name.strip_prefix("program:") {
             if let Some(sec) = ini.sections.get(section_name) {
-                if !sec.contains_key("command") {
-                    return Err(ProgramError::ConfigError(format!(
-                        "Program '{}' missing required 'command' field",
-                        prog_name
-                    )));
-                }
+                require_key(sec, "command", "Program", prog_name)?;
                 let context = format!("Program '{}'", prog_name);
-                let mut prog = serde_json::json!({});
-                apply_mappings(
+                let mut prog = map_section(
                     sec,
-                    PROGRAM_SHARED_MAPPINGS,
-                    &mut prog,
+                    &[PROGRAM_SHARED_MAPPINGS, PROGRAM_ONLY_MAPPINGS],
                     &context,
                     config_dir,
                 )?;
-                apply_mappings(sec, PROGRAM_ONLY_MAPPINGS, &mut prog, &context, config_dir)?;
-                if let Some(hc) = parse_liveness_check(sec, &format!("[program:{}]", prog_name))? {
-                    prog["health_check"] = serde_json::to_value(&hc)
-                        .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
-                }
+                attach_liveness_check(sec, &mut prog, &format!("[program:{}]", prog_name))?;
                 root["programs"][prog_name] = prog;
                 warn_unconsumed_keys_multi(
                     &format!("program:{}", prog_name),
@@ -993,28 +644,16 @@ pub fn adapt_ini_to_config(
         } else if let Some(group_name) = section_name.strip_prefix("group:") {
             if let Some(sec) = ini.sections.get(section_name) {
                 let context = format!("group:{}", group_name);
-                let mut grp = serde_json::json!({});
-                apply_mappings(sec, GROUP_MAPPINGS, &mut grp, &context, config_dir)?;
-                root["groups"][group_name] = grp;
+                root["groups"][group_name] =
+                    map_section(sec, &[GROUP_MAPPINGS], &context, config_dir)?;
                 warn_unconsumed_keys_multi(&context, sec, &[GROUP_MAPPINGS], &[]);
             }
         } else if let Some(pool_name) = section_name.strip_prefix("eventlistener:") {
             if let Some(sec) = ini.sections.get(section_name) {
-                if !sec.contains_key("command") {
-                    return Err(ProgramError::ConfigError(format!(
-                        "EventListener '{}' missing required 'command' field",
-                        pool_name
-                    )));
-                }
-                if !sec.contains_key("events") {
-                    return Err(ProgramError::ConfigError(format!(
-                        "EventListener '{}' missing required 'events' field",
-                        pool_name
-                    )));
-                }
+                require_key(sec, "command", "EventListener", pool_name)?;
+                require_key(sec, "events", "EventListener", pool_name)?;
                 let context = format!("EventListener '{}'", pool_name);
-                let mut el = serde_json::json!({});
-                apply_mappings(sec, EVENT_LISTENER_MAPPINGS, &mut el, &context, config_dir)?;
+                let el = map_section(sec, &[EVENT_LISTENER_MAPPINGS], &context, config_dir)?;
 
                 if let Some(redirect_stderr) = el.get("redirect_stderr").and_then(|v| v.as_bool())
                     && redirect_stderr
