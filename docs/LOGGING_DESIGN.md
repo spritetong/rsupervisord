@@ -125,11 +125,12 @@ pub trait InstantLogReader: Send + Sync + 'static {
 
 ### 4.1 Windows Overlapped Named Pipes
 To eliminate the 2 blocked threads per child process on Windows:
-1. Generate an isolated named pipe per stream: `\\.\pipe\rsupervisord-{pid}-{stream}-{uuid}`.
+1. Generate an isolated named pipe per stream: `\\.\pipe\rsupervisord-{pid}-{program_name}-{stdout|stderr}-{seq}` (monotonic per-process counter, not a UUID).
 2. Server end is created using `tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&pipe_name)`. This handle is opened with `FILE_FLAG_OVERLAPPED` and registered directly with Tokio's IOCP reactor.
-3. Client end is opened synchronously with `GENERIC_WRITE` and `bInheritHandle = TRUE`, then passed to `std::process::Command` via `Stdio::from(client_handle)`.
-4. The child process writes to its standard descriptor synchronously; the parent wakes up on native IOCP packet arrival.
-5. **Thread count cost: 0 extra OS threads**.
+3. Client end is opened synchronously via `OpenOptions` with `FILE_FLAG_WRITE_THROUGH` and passed to `std::process::Command` via `Stdio::from(client_file)`. **Do not** set `HANDLE_FLAG_INHERIT` on the long-lived client handle: Rust std already duplicates `Stdio::Handle` with `bInheritHandle = TRUE` under `CREATE_PROCESS_LOCK` during spawn; leaving the original inheritable would leak the write end into every concurrent `CreateProcess` and can prevent pipe EOF after the child exits.
+4. When `redirect_stderr=true`, the client file is `try_clone()`d so both child stdout and stderr write to the same pipe; no separate inherit flag is needed on the clone either.
+5. The child process writes to its standard descriptor synchronously; the parent wakes up on native IOCP packet arrival.
+6. **Thread count cost: 0 extra OS threads**.
 
 ### 4.2 Unix Asynchronous Captured Pipes
 1. **Atomic CLOEXEC creation**: Pipes are created with `O_CLOEXEC` on both ends via `create_cloexec_pipe()`, leveraging atomic `pipe2(O_CLOEXEC)` on modern kernels (Linux/BSD) with fallback to `pipe()` + `F_SETFD(FD_CLOEXEC)` on legacy platforms.

@@ -119,6 +119,153 @@ async fn test_process_stdout_capture_into_ring_buffer() {
 }
 
 #[tokio::test]
+async fn test_process_redirect_stderr_into_stdout_logs() {
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'out-marker'; [Console]::Error.WriteLine('err-marker')".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo out-marker; echo err-marker >&2".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("redirect_stderr_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs.redirect_stderr = true;
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let logs = program.read_logs(None);
+        if logs.iter().any(|l| l.contains("out-marker"))
+            && logs.iter().any(|l| l.contains("err-marker"))
+        {
+            break;
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    let logs = program.read_logs(None);
+    assert!(
+        logs.iter().any(|l| l.contains("out-marker")),
+        "Expected 'out-marker' in logs: {:?}",
+        logs
+    );
+    assert!(
+        logs.iter().any(|l| l.contains("err-marker")),
+        "Expected redirected 'err-marker' in logs: {:?}",
+        logs
+    );
+}
+
+#[tokio::test]
+async fn test_process_stderr_only_capture() {
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "[Console]::Error.WriteLine('err-only-marker'); Write-Output 'stdout-should-not-appear'"
+                .to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo err-only-marker >&2; echo stdout-should-not-appear".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("stderr_only_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs.stdout = Some(std::path::PathBuf::from("null"));
+    config.logs.redirect_stderr = false;
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if program
+            .read_logs(None)
+            .iter()
+            .any(|l| l.contains("err-only-marker"))
+        {
+            break;
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    let logs = program.read_logs(None);
+    assert!(
+        logs.iter().any(|l| l.contains("err-only-marker")),
+        "Expected 'err-only-marker' in logs: {:?}",
+        logs
+    );
+    assert!(
+        !logs.iter().any(|l| l.contains("stdout-should-not-appear")),
+        "Stdout must be discarded when logs.stdout=null: {:?}",
+        logs
+    );
+}
+
+#[tokio::test]
+async fn test_process_logs_disabled_uses_null_stdio() {
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'disabled-marker'".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec!["-c".to_string(), "echo disabled-marker".to_string()],
+    );
+
+    let mut config = ProgramConfig::new("logs_disabled_test", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs.enabled = false;
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    // Give the child time to write output that must be discarded via Stdio::null().
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    let logs = program.read_logs(None);
+    assert!(
+        logs.is_empty(),
+        "Expected no logs when logs.enabled=false: {:?}",
+        logs
+    );
+}
+
+#[tokio::test]
 async fn test_process_stdout_file_logging_and_rotation() {
     let dir = tempdir().unwrap();
     let stdout_log = dir.path().join("app_stdout.log");

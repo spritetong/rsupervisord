@@ -9,11 +9,9 @@ use crate::logging::transport::{LogTransport, ProcessStdioHandles, TransportStre
 use crate::platform::traits::ProcessTransportConfig;
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsRawHandle;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_WRITE_THROUGH;
 
 static PIPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -68,48 +66,23 @@ impl WindowsProcessLogTransport {
                     ))
                 })?;
 
-            let ok = unsafe {
-                SetHandleInformation(
-                    client_file.as_raw_handle() as _,
-                    HANDLE_FLAG_INHERIT,
-                    HANDLE_FLAG_INHERIT,
-                )
-            };
-            if ok == 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(ProgramError::PlatformError(format!(
-                    "Failed to set handle inheritance for stdout pipe: {}",
-                    err
-                )));
-            }
-
             // Await pipe connection from client (which succeeds immediately as client is already open)
             server.connect().await.map_err(|e| {
                 ProgramError::PlatformError(format!("Failed to connect stdout named pipe: {}", e))
             })?;
 
             if config.redirect_stderr {
-                // If stderr is redirected, clone client_file so both stdout and stderr write to the same pipe
+                // If stderr is redirected, clone client_file so both stdout and stderr write to the same pipe.
+                // Do NOT set HANDLE_FLAG_INHERIT here: Rust std already duplicates Stdio::Handle
+                // with bInheritHandle=TRUE under CREATE_PROCESS_LOCK during spawn. Marking the
+                // long-lived client handle inheritable would leak it into every concurrent
+                // CreateProcess in this process and can prevent pipe EOF after the child exits.
                 let stderr_client = client_file.try_clone().map_err(|e| {
                     ProgramError::PlatformError(format!(
                         "Failed to clone stdout client handle for stderr redirection: {}",
                         e
                     ))
                 })?;
-                let ok = unsafe {
-                    SetHandleInformation(
-                        stderr_client.as_raw_handle() as _,
-                        HANDLE_FLAG_INHERIT,
-                        HANDLE_FLAG_INHERIT,
-                    )
-                };
-                if ok == 0 {
-                    let err = std::io::Error::last_os_error();
-                    return Err(ProgramError::PlatformError(format!(
-                        "Failed to set handle inheritance for redirected stderr pipe: {}",
-                        err
-                    )));
-                }
                 stdio_stderr = Some(Stdio::from(stderr_client));
             }
 
@@ -145,21 +118,6 @@ impl WindowsProcessLogTransport {
                         pipe_name, e
                     ))
                 })?;
-
-            let ok = unsafe {
-                SetHandleInformation(
-                    client_file.as_raw_handle() as _,
-                    HANDLE_FLAG_INHERIT,
-                    HANDLE_FLAG_INHERIT,
-                )
-            };
-            if ok == 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(ProgramError::PlatformError(format!(
-                    "Failed to set handle inheritance for stderr pipe: {}",
-                    err
-                )));
-            }
 
             server.connect().await.map_err(|e| {
                 ProgramError::PlatformError(format!("Failed to connect stderr named pipe: {}", e))
