@@ -689,10 +689,14 @@ flowchart TD
    - Binds with a temporarily restricted umask (`0077`) so the socket is never group/world-accessible before `set_permissions` applies `server.uds_chmod` (closes the bind→chmod race; mirrors Windows pipe first-instance SA).
    - After bind, applies mode via `set_permissions` before any accept; failure is a hard bind error.
    - On accept, verifies peer credentials (`SO_PEERCRED` on Linux/Android, `getpeereid` on BSD/macOS) unless `allow_unelevated` is set.
-4. **Automatic Client Transport Selection (Endpoint Candidate Chain)**:
-   - When `-s` is not given, `supervisorctl` builds an ordered candidate chain: default Named Pipe → config `uds_path` (if different from the pipe) → `http_bind` TCP.
-   - Each candidate carries its own HTTP Basic credentials (`uds_username`/`uds_password` for IPC candidates, `username`/`password` for TCP); the bearer token is shared.
-   - Candidates are tried in order with a connect timeout; **authorization errors fail closed** (never advance to the next candidate), while NotFound/refused record the error and fall through. On Unix the legacy single-endpoint behavior is preserved.
+4. **Endpoint Resolution (`Vec<CtlConfig>` candidate chain)**:
+   - The effective client form is an ordered **`Vec<CtlConfig>`** (`resolve_ctl_chain`), converted to `EndpointCandidate`s with per-candidate basic credentials. Rules:
+     1. **No config file** → dual chain: default local UDS/pipe first, then `http://localhost:9001`. Explicit `-c` load failure → hard error.
+     2. **Section present** (`SupervisorConfig::ctl`; YAML key `ctl` / alias `supervisorctl`; INI `[supervisorctl]`) → **single** entry (strict Python; no server fallbacks). Missing `serverurl` with a present section → `http://localhost:9001`. Partial fields filled from `server` at load when `server.ctl_defaults`.
+     3. **No section + `ctl_defaults`** (YAML default true) → full server backfill `CtlConfig::vec_from_server`: IPC first (`uds_path` + `uds_*` credentials + token), then TCP when `http_bind` is set (`http://{bind}` + `username`/`password` + token).
+     4. **No section + `!ctl_defaults`** (INI forces false) → hard error (Python requires `[supervisorctl]`).
+   - CLI flags apply after the chain is built via `CliArgs::apply`: `-s` **replaces the whole chain** (credential seed picked by matching endpoint type — TCP vs IPC); `-k` overwrites `auth_token` on every entry; `-u`/`-p` override as a pair on every entry (missing side becomes `""`) and are also returned as a client-level `basic_override`.
+   - `Endpoint::parse` accepts `http://`, `tcp://`, `unix://`, bare `\\.\pipe\…`, `host:port`, and bare IPC paths. Candidate walk: first reachable wins; authorization errors fail closed.
 
 ---
 
@@ -1084,7 +1088,7 @@ In traditional supervisors (such as Python Supervisor), relative configuration p
 **The Solution: Parse-Boundary Projection**:
 Rather than delegating path resolution to scattered downstream consumers or mutating OS state, `supervisord` establishes a **single, self-contained transformation boundary** (`src/config/transform.rs`). At the configuration boundary (immediately after deserializing YAML/INI and before validation), the typed configuration tree is projected into a JSON `Value` tree, walked by a pure transformation function, and deserialized back.
 - When `server.path_translation: true` (default), relative paths are deterministically anchored to `config_dir`, simulating the effect of `chdir(config_dir)` with zero global side effects.
-- **INI Frontend Baseline Alignment**: `adapt_ini_to_config` (`src/compat/ini/adapter.rs`) forces `server.path_translation = false` and `server.allow_unelevated = true` before invoking `translate_paths` + `validate`, aligning bare relative path resolution (daemon CWD) and IPC access (no elevation gate) with the Python supervisor / go-supervisord baselines. YAML native configs keep the rsupervisord defaults (`true` / `false`).
+   - **INI Frontend Baseline Alignment**: `adapt_ini_to_config` (`src/compat/ini/adapter.rs`) forces `server.path_translation = false`, `server.allow_unelevated = true`, and `server.ctl_defaults = false` before invoking `translate_paths` + `validate`, aligning bare relative path resolution (daemon CWD), IPC access (no elevation gate), and no server→ctl backfill (Python requires `[supervisorctl]`) with the Python supervisor / go-supervisord baselines. YAML native configs keep the rsupervisord defaults (`true` / `false` / `true`).
 - **Zero Diffusion Principle**: Downstream modules (`schema.rs`, `process.rs`, `watch.rs`, `health.rs`) contain **zero `path_translation` conditional checks** and zero manual path concatenations. Downstream code consumes pure configuration instances directly.
 
 ```mermaid

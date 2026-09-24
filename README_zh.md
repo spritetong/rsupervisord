@@ -395,6 +395,23 @@ server:
   # 支持 "0700" / "0o700" / "700" 格式，显式配置优先。
   # uds_chmod: "0700"
 
+  # 为 true（默认）时，加载配置时用本 server 节回填空的 `ctl` 字段。
+  # 对 INI (Python 兼容) 配置会强制为 false（不做 server→ctl 回填）。
+  ctl_defaults: true
+
+# ------------------------------------------------------------------------------
+# 1b. supervisorctl 客户端连接默认值（守护进程不消费本节）
+# ------------------------------------------------------------------------------
+# YAML 键 `ctl`（别名 `supervisorctl`）；INI 映射 `[supervisorctl]`。
+# 字段相互独立：-s 只覆盖 serverurl，-k 只覆盖 auth_token；
+# -u/-p 成对覆盖。本节存在但省略 serverurl 时默认
+# http://localhost:9001（对齐 Python）。
+ctl:
+  # serverurl: "http://127.0.0.1:9001"   # 或 unix:///path/to.sock
+  # username: "admin"
+  # password: "{SHA}..."
+  # auth_token: "${SUPERVISORD_TOKEN:-}"
+
 # ------------------------------------------------------------------------------
 # 2. 守护进程自身日志配置
 # ------------------------------------------------------------------------------
@@ -582,6 +599,21 @@ event_listeners:
 - **`server.path_translation`** (*布尔值*, 默认: `true`): 是否在解析配置时统一将所有相对路径转为绝对路径（以配置文件所在目录为基准）。对 INI（Python 兼容）配置会强制为 `false`，以对齐 Python/go-supervisord 基准行为（裸相对路径按守护进程 CWD 解析）。
 - **`server.allow_unelevated`** (*布尔值*, 默认: `false`): 当守护进程以 root 或 Administrator 特权身份运行时，是否允许非特权客户端连接本地 IPC（Unix UDS / Windows 命名管道与 AF_UNIX）。默认关闭以保障安全基线。对 INI（Python 兼容）配置会强制为 `true`，以对齐 Python/go-supervisord 基准行为（无应用层提权门控，访问仅受 socket 文件权限约束）。
 - **`server.uds_chmod`** (*字符串* / 别名 `chmod`, 可选): 本地 IPC 端点权限模式。有效值推荐为 `"0700"`、`"0770"` 或 `"0777"`（支持 `"0700"` / `"0o700"` / `"700"` 格式）。未配置时的默认值：`allow_unelevated: true` 时默认为 `"0777"`；否则 Unix 默认为 `"0700"`，Windows 默认为 `"0770"`。显式配置优先。
+- **`server.ctl_defaults`** (*布尔值*, 默认: `true`): 为 `true` 时，加载配置时用 server 节回填**已存在** `ctl` 节中的空字段；若未写本节，CLI 用 server 构建多候选链（`CtlConfig::vec_from_server`：IPC 优先，`http_bind` 存在时再加 TCP）。对 INI（Python 兼容）配置会强制为 `false`（不做 server→ctl 回填；缺少 `[supervisorctl]` 节会硬错误，对齐 Python `options.py`）。
+
+#### 1b. `ctl` 节（supervisorctl 客户端连接默认值）
+仅客户端使用的连接配置（别名 `supervisorctl`；INI 映射 `[supervisorctl]`）。**守护进程不消费本节** —— 永不写入 `server.uds_*` / `server.username`。CLI 解析为有序的 **`Vec<CtlConfig>`** 候选链：
+
+- **无配置文件** → `[本地 UDS/管道, http://localhost:9001]`（IPC 优先）。
+- **存在本节** → **仅单端点**（严格对齐 Python；不追加 server 回退）。省略 `serverurl` → `http://localhost:9001`。
+- **无本节 + `ctl_defaults: true`** → server 全量回填：IPC 优先（`uds_path` + uds 凭据 + token），`http_bind` 存在时再加 TCP（匹配凭据 + token）。
+- **无本节 + `ctl_defaults: false`**（INI）→ 硬错误（Python 要求 `[supervisorctl]`）。
+
+- **`ctl.serverurl`** (*字符串*, 可选): 未给 `-s` 时使用的端点。支持 `http://…`、`tcp://…`、`unix://…`、命名管道与裸 IPC 路径。
+- **`ctl.username` / `ctl.password`** (*字符串*, 可选): 该候选的 HTTP Basic Auth。CLI `-u`/`-p` 对**每个**候选成对覆盖（缺侧变为 `""`）。
+- **`ctl.auth_token`** (*字符串*, 可选): Bearer 令牌；CLI `-k` 按字段独立覆盖每个候选。
+
+**`-s` 替换整条链**为单端点（凭据种子按端点类型匹配选择：TCP/IPC）。显式 `-c` 加载失败始终硬错误。详见 `CLI_COMPAT.md` §5.1.4。
 
 #### 2. `logging` 节 (守护进程自身日志)
 

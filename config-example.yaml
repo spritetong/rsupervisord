@@ -25,7 +25,8 @@ server:
 
   # Optional TCP HTTP listener for the Embedded Web UI and REST API.
   # If omitted, server will only listen on the local IPC socket.
-  http_bind: "127.0.0.1:8500"
+  # Python/go-supervisord use 127.0.0.1:9001 for [inet_http_server].
+  http_bind: "127.0.0.1:9001"
 
   # Optional Bearer Token authentication for the REST API, XML-RPC, SSE, and Web UI.
   # Applied on BOTH TCP and IPC listeners. If username/password are also set,
@@ -57,6 +58,30 @@ server:
   # Valid values: "0700", "0770", "0777" (accepts "0700" / "0o700" / "700").
   # Defaults: "0777" if allow_unelevated=true; otherwise "0700" on Unix or "0770" on Windows.
   # uds_chmod: "0700"
+
+  # When true (default), empty fields on an existing `ctl` section are filled from
+  # this server section at load. When no `ctl` section is written, supervisorctl
+  # builds a multi-candidate chain from the server (IPC first, then TCP if
+  # http_bind is set) with full connection fields per entry.
+  # For INI (Python-compat) configs this is forced to false (no server→ctl fill;
+  # a missing [supervisorctl] section hard-errors, matching Python options.py).
+  ctl_defaults: true
+
+# ------------------------------------------------------------------------------
+# 1b. supervisorctl Client Connection Defaults (not consumed by the daemon)
+# ------------------------------------------------------------------------------
+# YAML key `ctl` (alias `supervisorctl`). Effective form is an ordered Vec<CtlConfig>:
+# - No config file: [local UDS/pipe, http://localhost:9001]
+# - Section present: single endpoint (strict Python; no server fallbacks)
+# - No section + ctl_defaults: full server backfill (IPC then TCP)
+# - No section + !ctl_defaults (INI): hard error
+# Fields are independent: -s replaces the whole chain; -k/-u/-p apply to every entry.
+# Missing serverurl with a present section defaults to http://localhost:9001.
+ctl:
+  # serverurl: "http://127.0.0.1:9001"   # or unix:///path/to.sock
+  # username: "${SUPERVISOR_HTTP_USER:-}"
+  # password: "${SUPERVISOR_HTTP_PASSWORD:-}"
+  # auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
 
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings

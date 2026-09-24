@@ -240,10 +240,21 @@ rsupervisorctl --username admin --password secret status
 
 **Requirement**: add the long name `--configuration` (keep `-c`/`--config`). Once #2 (INI) lands, `serverurl`/`username`/`password` should be readable from the `[supervisorctl]` section as defaults.
 
+**Implemented** (Python parity + multi-candidate connectivity): config is always loaded when available; the effective form is an ordered **`Vec<CtlConfig>`** chain. Resolution rules in `resolve_ctl_chain` / `resolve_endpoint_candidates`:
+
+1. **No config file found** (no `-c` and default path missing) → dual chain: `[default local UDS/pipe, http://localhost:9001]` (IPC first). Explicit `-c` pointing at an unloadable file → hard error (no silent fallback).
+2. **Config loaded, section present** (`ctl` / `[supervisorctl]`) → **single** candidate (strict Python: no server fallbacks). Partial fields filled from `server` at load when `server.ctl_defaults`. Missing `serverurl` with a present section → `http://localhost:9001`.
+3. **Config loaded, no section, `ctl_defaults=true`** (YAML) → full server backfill via `CtlConfig::vec_from_server`: IPC entry first (uds_path + uds credentials + token), then TCP entry when `http_bind` is set (http URL + username/password + token).
+4. **Config loaded, no section, `ctl_defaults=false`** (INI) → **hard error** even with `-s` (Python `options.py` requires the section).
+
+CLI flags (after chain build): `-s` **replaces the whole chain** with one endpoint (credential seed chosen by endpoint type: TCP vs IPC); `-u`/`-p` and `-k` apply field-independently to **every** remaining `CtlConfig` via `CliArgs::apply`.
+
 ```bash
 rsupervisorctl -c /etc/supervisord.conf status
 rsupervisorctl --configuration /etc/supervisord.conf status
 ```
+
+**Note**: `-s` does **not** bypass a missing `[supervisorctl]` / `ctl` section when a config file was loaded (Python parity).
 
 ### 5.2 Extensions kept
 

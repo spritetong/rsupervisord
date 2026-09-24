@@ -74,6 +74,12 @@ pub struct ServerConfig {
     /// to connect via local IPC when the daemon is running elevated. Default is false.
     #[serde(default)]
     pub allow_unelevated: bool,
+    /// When true (default), empty [`SupervisorConfig::ctl`] fields are filled from this
+    /// server section at load time so supervisorctl can connect without a ctl block.
+    /// INI frontend forces false (Python/go parity: no server→ctl backfill).
+    #[serde(default = "bool_value::<true>")]
+    #[default(true)]
+    pub ctl_defaults: bool,
 }
 
 fn default_uds_path() -> PathBuf {
@@ -316,19 +322,88 @@ pub struct GroupConfigRaw {
     pub priority: Option<u32>,
 }
 
-/// Client-side connection defaults from `[supervisorctl]`.
+/// Client connection config from `[supervisorctl]` / YAML `ctl` | `supervisorctl`.
 ///
-/// Never applied to the daemon listener credentials (`server.uds_*` /
-/// `server.username`); only consumed by `supervisorctl` endpoint/auth seeding.
+/// Consumed only by `supervisorctl`; never applied to the daemon listener
+/// credentials (`server.uds_*` / `server.username`). `None` on
+/// [`SupervisorConfig`] means the source file had no ctl section and
+/// `server.ctl_defaults` fill did not create one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CliDefaults {
+pub struct CtlConfig {
     #[serde(default)]
     pub serverurl: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// Bearer token for protected endpoints (aligns with supervisorctl `-k`).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl CtlConfig {
+    /// Fills `None` fields from the server listener section (one-way; never
+    /// mutates `server`). Idempotent; safe on every load when
+    /// `server.ctl_defaults` is true.
+    pub fn fill_from_server(&mut self, server: &ServerConfig) {
+        if self.serverurl.is_none() {
+            if let Some(bind) = server.http_bind.as_ref().filter(|b| !b.is_empty()) {
+                self.serverurl = Some(format!("http://{}", bind));
+            } else {
+                self.serverurl = Some(server.uds_path.to_string_lossy().into_owned());
+            }
+        }
+
+        let is_tcp = self
+            .serverurl
+            .as_deref()
+            .map(|u| u.starts_with("http://") || u.starts_with("tcp://"))
+            .unwrap_or(false);
+
+        if is_tcp {
+            if self.username.is_none() {
+                self.username = server.username.clone();
+            }
+            if self.password.is_none() {
+                self.password = server.password.clone();
+            }
+        } else {
+            if self.username.is_none() {
+                self.username = server.uds_username.clone();
+            }
+            if self.password.is_none() {
+                self.password = server.uds_password.clone();
+            }
+        }
+
+        if self.auth_token.is_none() {
+            self.auth_token = server.auth_token.clone();
+        }
+    }
+
+    /// Builds the full server-derived candidate chain when no `ctl` section was
+    /// written but `server.ctl_defaults` is true (YAML). Order: local IPC first,
+    /// then TCP when `http_bind` is set. Each entry carries every connection
+    /// field for that listener (endpoint URL, matching credentials, auth token).
+    pub fn vec_from_server(server: &ServerConfig) -> Vec<Self> {
+        let mut out = Vec::with_capacity(2);
+        out.push(Self {
+            serverurl: Some(server.uds_path.to_string_lossy().into_owned()),
+            username: server.uds_username.clone(),
+            password: server.uds_password.clone(),
+            auth_token: server.auth_token.clone(),
+        });
+        if let Some(bind) = server.http_bind.as_ref().filter(|b| !b.is_empty()) {
+            out.push(Self {
+                serverurl: Some(format!("http://{}", bind)),
+                username: server.username.clone(),
+                password: server.password.clone(),
+                auth_token: server.auth_token.clone(),
+            });
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,9 +443,10 @@ pub struct SupervisorConfig {
     /// Minimum process soft limit (`minprocs`); applied best-effort on Unix.
     #[serde(default)]
     pub minprocs: Option<u32>,
-    /// `[supervisorctl]` client defaults (not consumed by the daemon).
-    #[serde(default)]
-    pub cli_defaults: Option<CliDefaults>,
+    /// Client connection config from `[supervisorctl]` / YAML `ctl`|`supervisorctl`
+    /// (not consumed by the daemon). `None` = section absent after optional fill.
+    #[serde(default, alias = "supervisorctl")]
+    pub ctl: Option<CtlConfig>,
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
 }
@@ -391,7 +467,7 @@ impl Default for SupervisorConfig {
             pidfile: None,
             minfds: None,
             minprocs: None,
-            cli_defaults: None,
+            ctl: None,
             config_dir: None,
         };
         config.apply_default_paths();
@@ -466,7 +542,22 @@ impl SupervisorConfig {
         config.apply_default_paths();
         config = config.translate_paths()?;
         config.validate()?;
+        config.fill_ctl_defaults();
         Ok(config)
+    }
+
+    /// When `server.ctl_defaults` is true, fills empty fields on an existing
+    /// `ctl` section from the server section. Does **not** synthesize a section
+    /// when absent: the CLI resolves a missing section to
+    /// [`CtlConfig::vec_from_server`] (multi-candidate) or a hard error when
+    /// `ctl_defaults` is false (INI / Python parity).
+    fn fill_ctl_defaults(&mut self) {
+        if !self.server.ctl_defaults {
+            return;
+        }
+        if let Some(ctl) = self.ctl.as_mut() {
+            ctl.fill_from_server(&self.server);
+        }
     }
 
     /// Applies the path-translation boundary transform shared by both the YAML and the
@@ -1690,5 +1781,124 @@ programs:
         let p3 = &resolved["vanilla_prog"];
         assert!(!p3.restart_when_binary_changed);
         assert_eq!(p3.restart_debounce_secs, Duration::from_secs(10)); // Inherited from defaults
+    }
+
+    #[test]
+    fn test_ctl_absent_section_not_synthesized_on_load() {
+        // No ctl section: load leaves None; resolve builds Vec via vec_from_server.
+        let yaml = r#"
+server:
+  http_bind: "127.0.0.1:9001"
+  username: "admin"
+  password: "secret"
+  auth_token: "tok"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        assert!(config.server.ctl_defaults, "YAML default must be true");
+        assert!(
+            config.ctl.is_none(),
+            "load must not synthesize a ctl section"
+        );
+        let chain = CtlConfig::vec_from_server(&config.server);
+        assert_eq!(chain.len(), 2, "IPC + TCP candidates");
+        assert_eq!(
+            chain[0].username.as_deref(),
+            Some("admin"),
+            "IPC inherits uds_username (Scheme B defaults from username)"
+        );
+        assert_eq!(chain[0].auth_token.as_deref(), Some("tok"));
+        assert_eq!(chain[1].serverurl.as_deref(), Some("http://127.0.0.1:9001"));
+        assert_eq!(chain[1].username.as_deref(), Some("admin"));
+        assert_eq!(chain[1].password.as_deref(), Some("secret"));
+        assert_eq!(chain[1].auth_token.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn test_ctl_fill_preserves_existing_none_only_fields() {
+        let yaml = r#"
+server:
+  http_bind: "127.0.0.1:9001"
+  username: "admin"
+  password: "secret"
+ctl:
+  serverurl: "http://custom:1234"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let ctl = config.ctl.as_ref().expect("ctl must exist");
+        assert_eq!(ctl.serverurl.as_deref(), Some("http://custom:1234"));
+        assert_eq!(ctl.username.as_deref(), Some("admin"));
+        assert_eq!(ctl.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_ctl_fill_disabled_when_defaults_false() {
+        let yaml = r#"
+server:
+  http_bind: "127.0.0.1:9001"
+  ctl_defaults: false
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        assert!(!config.server.ctl_defaults);
+        assert!(
+            config.ctl.is_none(),
+            "ctl_defaults=false must leave ctl as None"
+        );
+    }
+
+    #[test]
+    fn test_ctl_supervisorctl_yaml_alias() {
+        let yaml = r#"
+supervisorctl:
+  serverurl: "http://127.0.0.1:9001"
+  username: "u"
+  password: "p"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let ctl = config.ctl.as_ref().expect("alias must map to ctl");
+        assert_eq!(ctl.serverurl.as_deref(), Some("http://127.0.0.1:9001"));
+        assert_eq!(ctl.username.as_deref(), Some("u"));
+        assert_eq!(ctl.password.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn test_ctl_fill_credentials_follow_endpoint_type() {
+        // Partial section with IPC serverurl: fill picks uds credentials.
+        let yaml = r#"
+server:
+  uds_path: "/tmp/s.sock"
+  uds_username: "ipcuser"
+  uds_password: "ipcpass"
+  username: "tcpuser"
+  password: "tcppass"
+ctl:
+  serverurl: "/tmp/s.sock"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let ctl = config.ctl.as_ref().expect("section must exist");
+        assert_eq!(ctl.serverurl.as_deref(), Some("/tmp/s.sock"));
+        assert_eq!(ctl.username.as_deref(), Some("ipcuser"));
+        assert_eq!(ctl.password.as_deref(), Some("ipcpass"));
+
+        // TCP serverurl: fill picks server username/password instead.
+        let yaml = r#"
+server:
+  uds_path: "/tmp/s.sock"
+  uds_username: "ipcuser"
+  uds_password: "ipcpass"
+  username: "tcpuser"
+  password: "tcppass"
+ctl:
+  serverurl: "http://127.0.0.1:9001"
+programs: {}
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+        let ctl = config.ctl.as_ref().expect("section must exist");
+        assert_eq!(ctl.username.as_deref(), Some("tcpuser"));
+        assert_eq!(ctl.password.as_deref(), Some("tcppass"));
     }
 }

@@ -13,6 +13,7 @@ pub use args::{CliArgs, CliCommand};
 pub use client::{EndpointCandidate, SupervisorClient};
 pub use transport::{Endpoint, StreamTransport};
 
+use crate::config::{CtlConfig, SupervisorConfig};
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsString;
@@ -28,29 +29,124 @@ fn basic_pair(u: Option<String>, p: Option<String>) -> Option<(String, String)> 
     }
 }
 
-/// Endpoint candidate chain plus optional CLI/`[supervisorctl]` basic auth and token.
+/// Default endpoint when a ctl section exists but omits `serverurl` (Python parity:
+/// `options.py` uses `http://localhost:9001`).
+const PYTHON_DEFAULT_SERVERURL: &str = "http://localhost:9001";
+
+/// Endpoint candidate chain plus optional basic auth and token from ctl config.
+///
+/// Per-candidate `basic` comes from each `CtlConfig`; the tuple's second element
+/// is only a CLI-level `-u`/`-p` override (when those flags were given).
 pub type ResolvedCandidates = (
     Vec<EndpointCandidate>,
     Option<(String, String)>,
     Option<String>,
 );
 
-/// Resolves the ordered endpoint candidate chain.
+/// System default local endpoint as a `CtlConfig.serverurl` string
+/// (named pipe path on Windows, UDS path on Unix; TCP URL if ever selected).
+fn default_local_url() -> String {
+    match Endpoint::default_local() {
+        Endpoint::Tcp(addr) => format!("http://{}", addr),
+        other => other.to_string(),
+    }
+}
+
+/// Converts one `CtlConfig` into an endpoint candidate (per-candidate basic).
+fn ctl_to_candidate(ctl: &CtlConfig) -> EndpointCandidate {
+    let url = ctl
+        .serverurl
+        .clone()
+        .unwrap_or_else(|| PYTHON_DEFAULT_SERVERURL.to_string());
+    EndpointCandidate {
+        endpoint: Endpoint::parse(&url),
+        basic: basic_pair(ctl.username.clone(), ctl.password.clone()),
+    }
+}
+
+/// CLI `-u`/`-p` as a global basic override (applies to every candidate).
+fn cli_basic_override(args: &CliArgs) -> Option<(String, String)> {
+    match (&args.user, &args.password) {
+        (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+        (Some(u), None) => Some((u.clone(), String::new())),
+        (None, Some(p)) => Some((String::new(), p.clone())),
+        (None, None) => None,
+    }
+}
+
+/// Builds the ordered `CtlConfig` chain from an optional loaded config + CLI flags.
 ///
-/// Endpoint priority:
-/// 1. explicit `-s/--server`
-/// 2. `[supervisorctl] serverurl` from config (OI-1)
-/// 3. config-derived candidate chain (Windows: pipe → uds → TCP; Unix: TCP or UDS)
+/// Chain rules (confirmed):
+/// 1. **No config file** (`cfg = None`): `[default local UDS/pipe, http://localhost:9001]`
+///    (IPC first). Explicit `-c` load failures never reach here (hard error above).
+/// 2. **Section present** (`ctl = Some`): single entry — strict Python when a
+///    section exists (no server fallbacks). Partial fields already filled at load
+///    when `server.ctl_defaults`.
+/// 3. **No section + `ctl_defaults`**: full server backfill via
+///    [`CtlConfig::vec_from_server`] (IPC then TCP), every connection field set.
+/// 4. **No section + `!ctl_defaults`** (INI): hard error — Python requires
+///    `[supervisorctl]`.
 ///
-/// Basic-credential priority (second tuple element, applied as override):
-/// 1. CLI `-u`/`-p`
-/// 2. `[supervisorctl] username`/`password` (OI-1)
-/// 3. `None` — each candidate carries its own server-section credentials
+/// CLI: `-s` collapses a multi-entry chain to one seed whose endpoint type matches
+/// `-s` (credentials seed); then `CliArgs::apply` runs on every entry
+/// (`-s`/`-k` field-independent; `-u`/`-p` pair override).
 ///
-/// Config is always loaded when available so credentials/token apply even
-/// with explicit `-s` (CLI flags still win at the call site).
+/// Public for integration tests.
+pub fn resolve_ctl_chain(cfg: Option<&SupervisorConfig>, args: &CliArgs) -> Result<Vec<CtlConfig>> {
+    let mut ctls = match cfg {
+        None => vec![
+            CtlConfig {
+                serverurl: Some(default_local_url()),
+                ..Default::default()
+            },
+            CtlConfig {
+                serverurl: Some(PYTHON_DEFAULT_SERVERURL.to_string()),
+                ..Default::default()
+            },
+        ],
+        Some(cfg) => {
+            if let Some(ctl) = cfg.ctl.clone() {
+                vec![ctl]
+            } else if cfg.server.ctl_defaults {
+                CtlConfig::vec_from_server(&cfg.server)
+            } else {
+                anyhow::bail!(
+                    "configuration does not include a [supervisorctl] / ctl section \
+                     (server.ctl_defaults is false and no section was provided)"
+                );
+            }
+        }
+    };
+
+    // `-s` replaces the whole chain with a single endpoint; seed credentials from
+    // the config entry whose endpoint type matches `-s` (IPC vs TCP).
+    if args.server.is_some() && ctls.len() > 1 {
+        let want_tcp = Endpoint::parse(args.server.as_deref().unwrap_or_default()).is_tcp();
+        let idx = ctls
+            .iter()
+            .position(|c| {
+                Endpoint::parse(c.serverurl.as_deref().unwrap_or_default()).is_tcp() == want_tcp
+            })
+            .unwrap_or(0);
+        let seed = ctls.swap_remove(idx);
+        ctls.clear();
+        ctls.push(seed);
+    }
+
+    for ctl in &mut ctls {
+        args.apply(ctl);
+    }
+    Ok(ctls)
+}
+
+/// Resolves endpoint candidates plus credentials from ctl config.
 ///
-/// Public for integration tests covering OI-1 (`[supervisorctl]` defaults).
+/// Loads the config file (explicit `-c` failures hard-error), builds the chain
+/// via [`resolve_ctl_chain`], then converts each `CtlConfig` to an
+/// [`EndpointCandidate`] with its own basic credentials. Token is taken from the
+/// first entry (shared; `-k` / server backfill apply the same value chain-wide).
+///
+/// Public for integration tests covering OI-1 / Python parity.
 pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
     let cmd_name = crate::config::paths::get_cmd_name();
     let cfg_path = args
@@ -73,105 +169,10 @@ pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates>
         None => None,
     };
 
-    let cli_defaults = cfg.as_ref().and_then(|c| c.cli_defaults.as_ref());
-    let token = cfg.as_ref().and_then(|c| c.server.auth_token.clone());
-
-    let cli_basic = match (args.user.clone(), args.password.clone()) {
-        (Some(u), Some(p)) => Some((u, p)),
-        (Some(u), None) => Some((u, String::new())),
-        (None, Some(p)) => Some((String::new(), p)),
-        (None, None) => {
-            cli_defaults.and_then(|d| basic_pair(d.username.clone(), d.password.clone()))
-        }
-    };
-
-    // 1. Explicit -s
-    if let Some(ref s) = args.server {
-        return Ok((
-            vec![EndpointCandidate {
-                endpoint: Endpoint::parse(s),
-                basic: None,
-            }],
-            cli_basic,
-            token,
-        ));
-    }
-
-    if let Some(cfg) = cfg.as_ref() {
-        // 2. [supervisorctl] serverurl seeds the endpoint when -s is absent (OI-1).
-        if let Some(url) = cli_defaults.and_then(|d| d.serverurl.as_ref()) {
-            return Ok((
-                vec![EndpointCandidate {
-                    endpoint: Endpoint::parse(url),
-                    basic: None,
-                }],
-                cli_basic,
-                token,
-            ));
-        }
-
-        let tcp_basic = basic_pair(cfg.server.username.clone(), cfg.server.password.clone());
-        let uds_basic = basic_pair(
-            cfg.server.uds_username.clone(),
-            cfg.server.uds_password.clone(),
-        );
-
-        #[cfg(windows)]
-        {
-            // Candidate chain: default local pipe → configured uds_path → TCP.
-            let mut candidates: Vec<EndpointCandidate> = Vec::new();
-            let default_local = Endpoint::default_local();
-            candidates.push(EndpointCandidate {
-                endpoint: default_local.clone(),
-                basic: uds_basic.clone(),
-            });
-
-            let uds_ep = Endpoint::parse(&cfg.server.uds_path.to_string_lossy());
-            if uds_ep != default_local {
-                candidates.push(EndpointCandidate {
-                    endpoint: uds_ep,
-                    basic: uds_basic.clone(),
-                });
-            }
-
-            if let Some(ref http) = cfg.server.http_bind {
-                candidates.push(EndpointCandidate {
-                    endpoint: Endpoint::parse(http),
-                    basic: tcp_basic.clone(),
-                });
-            }
-
-            return Ok((candidates, cli_basic, token));
-        }
-
-        #[cfg(not(windows))]
-        {
-            // Preserve historical single-endpoint behavior on Unix:
-            // TCP first when http_bind is set, else IPC path.
-            let candidate = if let Some(ref http) = cfg.server.http_bind {
-                EndpointCandidate {
-                    endpoint: Endpoint::parse(http),
-                    basic: tcp_basic.clone(),
-                }
-            } else {
-                EndpointCandidate {
-                    endpoint: Endpoint::parse(&cfg.server.uds_path.to_string_lossy()),
-                    basic: uds_basic.clone(),
-                }
-            };
-            return Ok((vec![candidate], cli_basic, token));
-        }
-    }
-
-    // No config: single default local endpoint (pipe on Windows, UDS on Unix).
-    Ok((
-        vec![EndpointCandidate {
-            endpoint: Endpoint::default_local(),
-            basic: None,
-        }],
-        cli_basic,
-        token,
-    ))
+    let ctls = resolve_ctl_chain(cfg.as_ref(), args)?;
+    let candidates: Vec<EndpointCandidate> = ctls.iter().map(ctl_to_candidate).collect();
+    let token = ctls.first().and_then(|c| c.auth_token.clone());
+    Ok((candidates, cli_basic_override(args), token))
 }
 
 /// Entry point for the standalone `supervisorctl` binary.
@@ -223,23 +224,9 @@ pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> 
     // `args.config`, while local service operations need it too.
     let service_config = args.config.clone();
 
-    // Determine target daemon endpoint candidates & configuration credentials.
-    // Explicit `-s` still loads config so `-c` + `[supervisorctl]` defaults apply;
-    // CLI `-u`/`-p` always override config-derived credentials (OI-1).
-    let (candidates, cfg_basic_auth, cfg_token) = resolve_endpoint_candidates(&args)?;
-
-    // CLI -u/-p override config-derived basic auth for all candidates.
-    // resolve_endpoint_candidates already folds CLI flags / [supervisorctl] into
-    // cfg_basic_auth; re-apply CLI flags here so they always win if something
-    // upstream changed.
-    let basic_auth = match (args.user, args.password) {
-        (Some(u), Some(p)) => Some((u, p)),
-        (Some(u), None) => Some((u, String::new())),
-        (None, Some(p)) => Some((String::new(), p)),
-        (None, None) => cfg_basic_auth,
-    };
-
-    let auth_token = args.auth_token.or(cfg_token);
+    // Determine target daemon endpoint + credentials from ctl config.
+    // Per-candidate basic comes from each CtlConfig; basic_override is CLI -u/-p.
+    let (candidates, basic_auth, auth_token) = resolve_endpoint_candidates(&args)?;
 
     let client = SupervisorClient::new_with_candidates(candidates, auth_token, basic_auth);
 

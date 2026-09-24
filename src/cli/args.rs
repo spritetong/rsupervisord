@@ -4,6 +4,7 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::config::CtlConfig;
 use crate::consts::*;
 use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
@@ -40,6 +41,37 @@ pub struct CliArgs {
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,
+}
+
+impl CliArgs {
+    /// Applies CLI flags onto ctl config. Absent flags leave ctl values untouched.
+    ///
+    /// `-s` and `-k` are field-independent (Python/go parity: they only override
+    /// their own field and never clear credentials). `-u`/`-p` override as a
+    /// pair; a missing side becomes an empty string.
+    pub fn apply(&self, ctl: &mut CtlConfig) {
+        if let Some(s) = &self.server {
+            ctl.serverurl = Some(s.clone());
+        }
+        if let Some(k) = &self.auth_token {
+            ctl.auth_token = Some(k.clone());
+        }
+        match (&self.user, &self.password) {
+            (Some(u), Some(p)) => {
+                ctl.username = Some(u.clone());
+                ctl.password = Some(p.clone());
+            }
+            (Some(u), None) => {
+                ctl.username = Some(u.clone());
+                ctl.password = Some(String::new());
+            }
+            (None, Some(p)) => {
+                ctl.username = Some(String::new());
+                ctl.password = Some(p.clone());
+            }
+            (None, None) => {}
+        }
+    }
 }
 
 /// Available subcommands for supervisorctl.

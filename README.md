@@ -370,6 +370,23 @@ server:
   # Defaults when omitted: "0777" if allow_unelevated=true; otherwise "0700" on Unix or "0770" on Windows.
   # uds_chmod: "0700"
 
+  # When true (default), empty `ctl` fields are filled from this server section at load time.
+  # For INI (Python-compat) configs this is forced to false (no server→ctl backfill).
+  ctl_defaults: true
+
+# ------------------------------------------------------------------------------
+# 1b. supervisorctl Client Connection Defaults (not consumed by the daemon)
+# ------------------------------------------------------------------------------
+# YAML key `ctl` (alias `supervisorctl`); INI maps `[supervisorctl]`.
+# Fields are independent: -s only overrides serverurl, -k only auth_token;
+# -u/-p override as a pair. Missing serverurl with a present section
+# defaults to http://localhost:9001 (Python parity).
+ctl:
+  # serverurl: "http://127.0.0.1:9001"   # or unix:///path/to.sock
+  # username: "admin"
+  # password: "{SHA}..."
+  # auth_token: "${SUPERVISORD_TOKEN:-}"
+
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings
 # ------------------------------------------------------------------------------
@@ -556,6 +573,21 @@ event_listeners:
 - **`server.path_translation`** (*boolean*, default: `true`): When true, relative paths in config fields are absolutized against `config_dir` at the parse boundary. For INI (Python-compat) configs this is forced to `false` to match Python/go-supervisord baseline behavior (bare relative paths resolve against daemon CWD).
 - **`server.allow_unelevated`** (*boolean*, default: `false`): When daemon runs with root or Administrator privileges, permits non-elevated callers to connect via local IPC. For INI (Python-compat) configs this is forced to `true` to match Python/go-supervisord baseline behavior (no app-layer elevation gate; access governed by socket file permissions only).
 - **`server.uds_chmod`** (*string* / alias `chmod`, optional): Octal IPC endpoint permission mode. Recommended valid values are `"0700"`, `"0770"`, or `"0777"` (accepts `"0700"`, `"0o700"`, or `"700"` format). Defaults when omitted: `"0777"` if `allow_unelevated=true`; otherwise `"0700"` on Unix and `"0770"` on Windows. An explicit value always wins.
+- **`server.ctl_defaults`** (*boolean*, default: `true`): When true, empty fields on an **existing** `ctl` section are filled from the server section at load. When no section is written, the CLI builds a full multi-candidate chain from the server (`CtlConfig::vec_from_server`: IPC first, then TCP if `http_bind`). For INI (Python-compat) configs this is forced to `false` (no server→ctl fill; a missing `[supervisorctl]` section hard-errors, matching Python `options.py`).
+
+#### 1b. `ctl` Section (supervisorctl Client Connection Defaults)
+Client-only connection config (alias `supervisorctl`; INI maps `[supervisorctl]`). **Not consumed by the daemon** — never applied to `server.uds_*` / `server.username`. The CLI resolves an ordered **`Vec<CtlConfig>`** candidate chain:
+
+- **No config file** → `[default local UDS/pipe, http://localhost:9001]` (IPC first).
+- **Section present** → **single** endpoint from the section (strict Python; no server fallbacks). Missing `serverurl` → `http://localhost:9001`.
+- **No section + `ctl_defaults: true`** → full server backfill: IPC first (`uds_path` + uds credentials + token), then TCP when `http_bind` is set (matching credentials + token).
+- **No section + `ctl_defaults: false`** (INI) → hard error (Python requires `[supervisorctl]`).
+
+- **`ctl.serverurl`** (*string*, optional): Endpoint used when `-s` is absent. Supports `http://…`, `tcp://…`, `unix://…`, named pipes, and bare IPC paths.
+- **`ctl.username` / `ctl.password`** (*string*, optional): HTTP Basic Auth for this candidate. CLI `-u`/`-p` override as a pair on every candidate (missing side becomes `""`).
+- **`ctl.auth_token`** (*string*, optional): Bearer token; CLI `-k` overrides field-independently on every candidate.
+
+**`-s` replaces the whole chain** with one endpoint (credential seed picked by matching endpoint type). Explicit `-c` load failure always hard-errors. See `CLI_COMPAT.md` §5.1.4.
 
 #### 2. `logging` Section (Daemon Logging)
 - **`logging.enabled`** (*boolean*, default: `true`): Enable or disable internal daemon logging.

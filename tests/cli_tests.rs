@@ -414,3 +414,52 @@ async fn test_cli_handle_stdin() {
     let res = rsupervisord::cli::commands::handle_stdin(&client, "worker", "ping\n").await;
     assert!(res.is_ok());
 }
+
+#[test]
+fn test_cli_args_apply_field_independent_overrides() {
+    use rsupervisord::config::CtlConfig;
+
+    let base = || CtlConfig {
+        serverurl: Some("http://cfg:1".into()),
+        username: Some("cfgu".into()),
+        password: Some("cfgp".into()),
+        auth_token: Some("cfgk".into()),
+    };
+
+    // -s only: overrides serverurl, leaves credentials untouched.
+    let mut ctl = base();
+    let args = CliArgs::parse_from(["supervisorctl", "-s", "http://cli:2", "status"]);
+    args.apply(&mut ctl);
+    assert_eq!(ctl.serverurl.as_deref(), Some("http://cli:2"));
+    assert_eq!(ctl.username.as_deref(), Some("cfgu"));
+    assert_eq!(ctl.password.as_deref(), Some("cfgp"));
+    assert_eq!(ctl.auth_token.as_deref(), Some("cfgk"));
+
+    // -k only: overrides token, leaves serverurl/credentials untouched.
+    let mut ctl = base();
+    let args = CliArgs::parse_from(["supervisorctl", "-k", "newtoken", "status"]);
+    args.apply(&mut ctl);
+    assert_eq!(ctl.auth_token.as_deref(), Some("newtoken"));
+    assert_eq!(ctl.serverurl.as_deref(), Some("http://cfg:1"));
+    assert_eq!(ctl.username.as_deref(), Some("cfgu"));
+
+    // -u alone: password becomes empty string (pair override).
+    let mut ctl = base();
+    let args = CliArgs::parse_from(["supervisorctl", "-u", "cliu", "status"]);
+    args.apply(&mut ctl);
+    assert_eq!(ctl.username.as_deref(), Some("cliu"));
+    assert_eq!(ctl.password.as_deref(), Some(""));
+
+    // -p alone: username becomes empty string.
+    let mut ctl = base();
+    let args = CliArgs::parse_from(["supervisorctl", "-p", "clip", "status"]);
+    args.apply(&mut ctl);
+    assert_eq!(ctl.username.as_deref(), Some(""));
+    assert_eq!(ctl.password.as_deref(), Some("clip"));
+
+    // No flags: nothing changes.
+    let mut ctl = base();
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
+    args.apply(&mut ctl);
+    assert_eq!(ctl, base());
+}

@@ -40,7 +40,7 @@ Question answered: **what must be implemented for a standard Python `supervisord
 | 3 | `[supervisord]` | daemon global | `logging` + (runtime surface, SUPERVISORD #12 / §8 OI-8) | **P0**(logging part) |
 | 4 | `[program:x]` | supervised programs | `programs.x` | **P0** |
 | 5 | `[group:x]` | heterogeneous process groups | `groups.x` | **P0** |
-| 6 | `[supervisorctl]` | **client** connection config | CLI defaults (not daemon); stored as `CliDefaults` (§8 OI-1 **done**) | **P1** → done |
+| 6 | `[supervisorctl]` | **client** connection config | CLI defaults (not daemon); stored as `CtlConfig` under `SupervisorConfig::ctl` (§8 OI-1 **done**) | **P1** → done |
 | 7 | `[include]` | configuration inclusion | file merging | **P1** |
 | 8 | `[rpcinterface:supervisor]` | RPC interface registration | tolerated/ignored (§7 #5) | **P1** |
 | 9 | `[eventlistener:x]` | event listener programs | `event_listeners` (implemented: `parse_event_listener_config`) | **Implemented** |
@@ -260,7 +260,7 @@ groups:
 
 | INI Field | Target | Status / Action |
 | :--- | :--- | :--- |
-| `serverurl` | `rsupervisorctl -s` default | **consumed**: stored as `CliDefaults.serverurl`; `resolve_endpoint_candidates` seeds a single endpoint when `-s` is absent |
+| `serverurl` | `rsupervisorctl -s` default | **consumed**: stored as `CtlConfig.serverurl`. Section present → single candidate (strict Python); missing `serverurl` with a present section → `http://localhost:9001`. No section + YAML `ctl_defaults` → multi-candidate `vec_from_server` (IPC then TCP). INI forces `server.ctl_defaults=false` so missing section → hard error (no backfill). |
 | `username` | `-u` default | **consumed**: seeds basic auth when `-u`/`-p` are absent (CLI wins) |
 | `password` | `-p` default | same as `username` |
 | `prompt` | — | **Not Supported**(interactive shell; go also ignores) |
@@ -338,9 +338,10 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 | `redirect_stderr` | false | false | consistent |
 | `path_translation` | N/A (Python always CWD-resolves bare relative paths) | INI frontend forces `false` (YAML native default remains `true`) | **Aligned**: bare relative paths stay relative and resolve against daemon CWD, matching Python/go-supervisord |
 | `allow_unelevated` | N/A (Python/go have no elevation gate on IPC) | INI frontend forces `true` (YAML native default remains `false`) | **Aligned**: no app-layer elevation check; access governed by socket file permissions only, matching Python/go |
+| `ctl_defaults` | N/A (Python/go never backfill server→ctl) | INI frontend forces `false` (YAML native default remains `true`) | **Aligned**: no server→ctl fill; missing `[supervisorctl]` leaves `ctl=None` so `supervisorctl` hard-errors like Python `options.py` |
 
 > Default-value differences do not block loading; recommended: "if a config explicitly writes a value, use the explicit value"; when not written, use the ours default and note it in the docs.
-> **Note on `path_translation` / `allow_unelevated`**: these are rsupervisord-only knobs with no Python INI key. The INI frontend forces them to baseline-aligning values (`false` / `true`) before `translate_paths` + `validate`, so a stock Python `supervisord.conf` loads with path and IPC semantics equivalent to Python supervisor / go-supervisord. YAML native configs keep the rsupervisord defaults (`path_translation: true`, `allow_unelevated: false`).
+> **Note on `path_translation` / `allow_unelevated` / `ctl_defaults`**: these are rsupervisord-only knobs with no Python INI key. The INI frontend forces them to baseline-aligning values (`false` / `true` / `false`) before `translate_paths` + `validate`, so a stock Python `supervisord.conf` loads with path, IPC, and client-connection semantics equivalent to Python supervisor / go-supervisord. YAML native configs keep the rsupervisord defaults (`path_translation: true`, `allow_unelevated: false`, `ctl_defaults: true`).
 
 ---
 
@@ -384,7 +385,7 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 
 | ID | Issue | Go status | Ours | Technical approach | Priority |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **OI-1** | `[supervisorctl]` `serverurl`/`username`/`password` never reach the client | consumed (client) | **implemented** (`CliDefaults` + `resolve_endpoint_candidates` seeds; CLI flags still win) | Store a `SupervisorConfig`-adjacent `CliDefaults { serverurl, username, password }` **outside** the daemon `server` auth fields (or a skipped field on config). In `cli::resolve_endpoint_candidates`, when `-s`/`-u`/`-p` absent, seed candidates/auth from `CliDefaults`. Wire via `CLI_COMPAT` §5.1.4. **Do not** map into `server.uds_*`/`server.username` (those are daemon listener credentials). | **P1** → done |
+| **OI-1** | `[supervisorctl]` `serverurl`/`username`/`password` never reach the client | consumed (client) | **implemented** (`CtlConfig` under `SupervisorConfig::ctl` + `resolve_ctl_chain` / `resolve_endpoint_candidates`; CLI flags still win via `CliArgs::apply`) | Store client connection fields as `CtlConfig { serverurl, username, password, auth_token }` on `SupervisorConfig::ctl` (YAML key `ctl` / alias `supervisorctl`), **outside** the daemon `server` auth fields. Effective form is an ordered `Vec<CtlConfig>`: section present → single (strict Python); no section + YAML `ctl_defaults` → `vec_from_server` (IPC then TCP); no section + INI `ctl_defaults=false` → hard error. Missing `serverurl` with a present section → `http://localhost:9001`. **Do not** map into `server.uds_*`/`server.username` (those are daemon listener credentials). | **P1** → done |
 | **OI-2** | go extension `envFiles` (comma list of `.env` paths) on `[program:x]` / `[eventlistener:x]` / `[program-default]` | parsed & loaded at spawn | **implemented** (parse + absolutize + load before `environment`; missing file → warn skip) | Add `env_files: Vec<PathBuf>` to `ProgramConfigRaw`/`ProgramDefaults`/EL raw; INI `envFiles` alias; resolve relative to config dir (`abs_path`); load `KEY=VALUE` lines at spawn **before** `environment` (environment wins). Skip missing file with warn (align go) or hard error (Python has no equivalent — document choice). | **P1** → done |
 | **OI-3** | go `killwaitsecs` (post-SIGKILL reap wait, default 2) | honored (`process.go`) | **implemented** (`kill_wait_secs`, default `DEFAULT_KILL_WAIT`=2s) | Promote to config: `kill_wait_secs` on program (default 2s = current `DRAIN_TIMEOUT`). INI: parse `killwaitsecs` → `kill_wait_secs`. Use in post-`force_kill` wait instead of raw `DRAIN_TIMEOUT`. YAML: optional field with serde default. | **P2** → done |
 | **OI-4** | `nodaemon` only accepts Rust `bool` (`true`/`false`); `logfile_backups` parse failure is **silently dropped**; `silent` ignored | nodaemon/`logfile*` consumed properly | **implemented** (`string_to_bool` for nodaemon/silent; backups parse-or-Err; silent → `LoggingConfig.silent` + console layer skip) | Route `nodaemon` through `string_to_bool` (yes/no/1/0/on/off). Route backups through parse-or-`Err` like program backups. Accept `silent` → `logging.level=error` (or dedicated flag if schema grows) or keep P2 with warn. | **P1** → done |

@@ -34,6 +34,8 @@ impl Endpoint {
             .or_else(|| trimmed.strip_prefix("tcp://"))
         {
             Self::Tcp(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("unix://") {
+            Self::Ipc(PathBuf::from(rest))
         } else if trimmed.starts_with(r"\\.\pipe\") {
             Self::NamedPipe(PathBuf::from(trimmed))
         } else if trimmed.contains(':') && !trimmed.contains('/') && !trimmed.contains('\\') {
@@ -207,6 +209,10 @@ mod tests {
         );
         assert_eq!(
             Endpoint::parse("/tmp/supervisor.sock"),
+            Endpoint::Ipc(PathBuf::from("/tmp/supervisor.sock"))
+        );
+        assert_eq!(
+            Endpoint::parse("unix:///tmp/supervisor.sock"),
             Endpoint::Ipc(PathBuf::from("/tmp/supervisor.sock"))
         );
     }

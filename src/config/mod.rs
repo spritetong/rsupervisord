@@ -14,5 +14,6 @@ pub use diff::ConfigDiff;
 pub use expand::{MacroExpander, StringExpression, expand_env_vars};
 pub use paths::PathResolver;
 pub use schema::{
-    LoggingConfig, MetricsConfig, ProgramConfigRaw, ProgramDefaults, ServerConfig, SupervisorConfig,
+    CtlConfig, LoggingConfig, MetricsConfig, ProgramConfigRaw, ProgramDefaults, ServerConfig,
+    SupervisorConfig,
 };

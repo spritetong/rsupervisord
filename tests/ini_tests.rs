@@ -434,6 +434,10 @@ stdout_logfile = relative/path/web.out.log
         config.server.allow_unelevated,
         "INI frontend must force allow_unelevated=true"
     );
+    assert!(
+        !config.server.ctl_defaults,
+        "INI frontend must force ctl_defaults=false"
+    );
 
     // Bare relative paths must stay relative (not absolutized against config_dir)
     let log_file = config
@@ -526,17 +530,20 @@ killasgroup = false
 
     let config = SupervisorConfig::from_file(&conf_path).expect("INI load must succeed");
 
-    // OI-1
-    let cli = config
-        .cli_defaults
-        .as_ref()
-        .expect("cli_defaults must exist");
+    // OI-1 / Python parity: [supervisorctl] → Some(ctl)
+    let ctl = config.ctl.as_ref().expect("ctl section must exist");
     assert_eq!(
-        cli.serverurl.as_deref(),
+        ctl.serverurl.as_deref(),
         Some("unix:///tmp/supervisor.sock")
     );
-    assert_eq!(cli.username.as_deref(), Some("ctluser"));
-    assert_eq!(cli.password.as_deref(), Some("ctlpass"));
+    assert_eq!(ctl.username.as_deref(), Some("ctluser"));
+    assert_eq!(ctl.password.as_deref(), Some("ctlpass"));
+    // INI forces ctl_defaults=false: no server→ctl backfill into missing fields
+    assert!(ctl.auth_token.is_none());
+    assert!(
+        !config.server.ctl_defaults,
+        "INI must force ctl_defaults=false"
+    );
 
     // OI-4 / OI-6 / OI-8
     assert!(config.nodaemon, "nodaemon=yes must map to true");
@@ -634,13 +641,13 @@ password = ctlpass
     .unwrap();
 
     let args = CliArgs::parse_from(["supervisorctl", "-c", conf_path.to_str().unwrap(), "status"]);
-    let (candidates, basic, _token) =
+    let (candidates, basic_override, _token) =
         resolve_endpoint_candidates(&args).expect("resolve must succeed");
 
     assert_eq!(
         candidates.len(),
         1,
-        "serverurl seeds a single candidate, got {:?}",
+        "section present ⇒ single strict candidate, got {:?}",
         candidates
     );
     let ep = format!("{}", candidates[0].endpoint);
@@ -650,12 +657,16 @@ password = ctlpass
         ep
     );
     assert_eq!(
-        basic,
+        candidates[0].basic,
         Some(("ctluser".to_string(), "ctlpass".to_string())),
-        "username/password must seed basic auth"
+        "section username/password must seed per-candidate basic"
+    );
+    assert_eq!(
+        basic_override, None,
+        "no CLI -u/-p ⇒ no basic_override (per-candidate only)"
     );
 
-    // CLI -u/-p override [supervisorctl]
+    // CLI -u/-p override [supervisorctl] (both per-candidate and as override)
     let args = CliArgs::parse_from([
         "supervisorctl",
         "-c",
@@ -666,14 +677,20 @@ password = ctlpass
         "clipass",
         "status",
     ]);
-    let (_, basic, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
+    let (candidates, basic_override, _) =
+        resolve_endpoint_candidates(&args).expect("resolve must succeed");
     assert_eq!(
-        basic,
+        basic_override,
         Some(("cliuser".to_string(), "clipass".to_string())),
-        "CLI credentials must override [supervisorctl]"
+        "CLI credentials must be returned as basic_override"
+    );
+    assert_eq!(
+        candidates[0].basic,
+        Some(("cliuser".to_string(), "clipass".to_string())),
+        "CLI credentials must override section per-candidate basic"
     );
 
-    // Explicit -s overrides serverurl endpoint
+    // Explicit -s overrides serverurl endpoint (single candidate retained)
     let args = CliArgs::parse_from([
         "supervisorctl",
         "-c",
@@ -682,7 +699,7 @@ password = ctlpass
         "http://127.0.0.1:1234",
         "status",
     ]);
-    let (candidates, basic, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
+    let (candidates, _, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
     assert_eq!(candidates.len(), 1);
     let ep = format!("{}", candidates[0].endpoint);
     assert!(
@@ -691,7 +708,7 @@ password = ctlpass
         ep
     );
     assert_eq!(
-        basic,
+        candidates[0].basic,
         Some(("ctluser".to_string(), "ctlpass".to_string())),
         "credentials still apply with explicit -s"
     );
@@ -720,6 +737,194 @@ fn test_cli_explicit_bad_config_is_hard_error() {
         "error must mention config load failure, got: {}",
         err
     );
+}
+
+/// Python parity: INI without `[supervisorctl]` hard-errors (even with `-s`).
+#[test]
+fn test_cli_resolve_ini_missing_supervisorctl_section_errors() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_endpoint_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        "[unix_http_server]\nfile = /tmp/supervisor.sock\n",
+    )
+    .unwrap();
+
+    let args = CliArgs::parse_from(["supervisorctl", "-c", conf_path.to_str().unwrap(), "status"]);
+    let err = resolve_endpoint_candidates(&args)
+        .expect_err("missing [supervisorctl] must hard-error (Python options.py)");
+    assert!(
+        err.to_string().contains("[supervisorctl] / ctl section"),
+        "error must name the missing section, got: {}",
+        err
+    );
+
+    // Explicit -s does not bypass the missing-section requirement.
+    let args = CliArgs::parse_from([
+        "supervisorctl",
+        "-c",
+        conf_path.to_str().unwrap(),
+        "-s",
+        "http://127.0.0.1:9001",
+        "status",
+    ]);
+    let err = resolve_endpoint_candidates(&args)
+        .expect_err("-s must not bypass missing [supervisorctl] section");
+    assert!(
+        err.to_string().contains("[supervisorctl] / ctl section"),
+        "error must name the missing section, got: {}",
+        err
+    );
+}
+
+/// Python parity: `[supervisorctl]` without `serverurl` defaults to `http://localhost:9001`.
+#[test]
+fn test_cli_resolve_ini_missing_serverurl_defaults_9001() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_endpoint_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        "[unix_http_server]\nfile = /tmp/supervisor.sock\n\n[supervisorctl]\nusername = ctluser\n",
+    )
+    .unwrap();
+
+    let args = CliArgs::parse_from(["supervisorctl", "-c", conf_path.to_str().unwrap(), "status"]);
+    let (candidates, _, _) = resolve_endpoint_candidates(&args).expect("resolve must succeed");
+    assert_eq!(candidates.len(), 1);
+    let ep = format!("{}", candidates[0].endpoint);
+    assert!(
+        ep.contains("localhost:9001") || ep.contains("127.0.0.1:9001"),
+        "missing serverurl must default to http://localhost:9001, got {}",
+        ep
+    );
+    assert_eq!(
+        candidates[0].basic,
+        Some(("ctluser".to_string(), String::new())),
+        "username with omitted password must become empty password"
+    );
+}
+
+/// No config file: dual chain — local IPC first, then `http://localhost:9001`.
+#[test]
+fn test_resolve_ctl_chain_no_config_dual_candidates() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_ctl_chain};
+
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
+    let ctls = resolve_ctl_chain(None, &args).expect("no-config chain must succeed");
+    assert_eq!(ctls.len(), 2, "expected [local UDS/pipe, localhost:9001]");
+    let ep0 = ctls[0].serverurl.as_deref().unwrap_or_default();
+    let ep1 = ctls[1].serverurl.as_deref().unwrap_or_default();
+    assert_eq!(
+        ep1, "http://localhost:9001",
+        "second must be http://localhost:9001, got {}",
+        ep1
+    );
+    assert_ne!(
+        ep0, ep1,
+        "first must be local IPC endpoint, not the TCP default"
+    );
+    assert!(
+        ep0.contains("pipe") || ep0.contains(".sock") || ep0.starts_with("/"),
+        "first must be a local IPC path, got {}",
+        ep0
+    );
+
+    // -s collapses the dual chain to a single endpoint.
+    let args = CliArgs::parse_from(["supervisorctl", "-s", "http://10.0.0.1:9001", "status"]);
+    let ctls = resolve_ctl_chain(None, &args).expect("-s collapse must succeed");
+    assert_eq!(ctls.len(), 1, "-s must replace the whole chain");
+    assert_eq!(ctls[0].serverurl.as_deref(), Some("http://10.0.0.1:9001"));
+}
+
+/// YAML no section + ctl_defaults: full server backfill → IPC then TCP.
+#[test]
+fn test_resolve_ctl_chain_server_backfill_multi() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_ctl_chain};
+    use rsupervisord::config::SupervisorConfig;
+
+    let yaml = r#"
+server:
+  uds_path: "/tmp/srv.sock"
+  http_bind: "127.0.0.1:9001"
+  username: "tcpu"
+  password: "tcpp"
+  uds_username: "ipcu"
+  uds_password: "icpp"
+  auth_token: "tok"
+  ctl_defaults: true
+programs: {}
+"#;
+    let cfg = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+    assert!(cfg.ctl.is_none(), "no section written");
+
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
+    let ctls = resolve_ctl_chain(Some(&cfg), &args).expect("backfill chain");
+    assert_eq!(ctls.len(), 2, "IPC + TCP");
+    // IPC first
+    assert_eq!(ctls[0].serverurl.as_deref(), Some("/tmp/srv.sock"));
+    assert_eq!(ctls[0].username.as_deref(), Some("ipcu"));
+    assert_eq!(ctls[0].password.as_deref(), Some("icpp"));
+    assert_eq!(ctls[0].auth_token.as_deref(), Some("tok"));
+    // TCP second with full server connection fields
+    assert_eq!(ctls[1].serverurl.as_deref(), Some("http://127.0.0.1:9001"));
+    assert_eq!(ctls[1].username.as_deref(), Some("tcpu"));
+    assert_eq!(ctls[1].password.as_deref(), Some("tcpp"));
+    assert_eq!(ctls[1].auth_token.as_deref(), Some("tok"));
+
+    // -s with http URL collapses to the TCP seed (credentials from TCP entry).
+    let args = CliArgs::parse_from(["supervisorctl", "-s", "http://192.168.1.5:9001", "status"]);
+    let ctls = resolve_ctl_chain(Some(&cfg), &args).expect("-s TCP seed");
+    assert_eq!(ctls.len(), 1);
+    assert_eq!(
+        ctls[0].serverurl.as_deref(),
+        Some("http://192.168.1.5:9001")
+    );
+    assert_eq!(
+        ctls[0].username.as_deref(),
+        Some("tcpu"),
+        "-s http seed must take TCP credentials"
+    );
+
+    // -s with bare IPC path collapses to the IPC seed.
+    let args = CliArgs::parse_from(["supervisorctl", "-s", "/other.sock", "status"]);
+    let ctls = resolve_ctl_chain(Some(&cfg), &args).expect("-s IPC seed");
+    assert_eq!(ctls.len(), 1);
+    assert_eq!(ctls[0].serverurl.as_deref(), Some("/other.sock"));
+    assert_eq!(
+        ctls[0].username.as_deref(),
+        Some("ipcu"),
+        "-s IPC seed must take IPC credentials"
+    );
+}
+
+/// Section present: strict single candidate even when server also has endpoints.
+#[test]
+fn test_resolve_ctl_chain_section_strict_single() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_ctl_chain};
+    use rsupervisord::config::SupervisorConfig;
+
+    let yaml = r#"
+server:
+  http_bind: "127.0.0.1:9001"
+  uds_path: "/tmp/srv.sock"
+ctl:
+  serverurl: "http://only-this:1234"
+programs: {}
+"#;
+    let cfg = SupervisorConfig::from_yaml_str(yaml).expect("Valid YAML");
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
+    let ctls = resolve_ctl_chain(Some(&cfg), &args).expect("section chain");
+    assert_eq!(ctls.len(), 1, "section present ⇒ no server fallbacks");
+    assert_eq!(ctls[0].serverurl.as_deref(), Some("http://only-this:1234"));
 }
 
 /// OI-9: event listeners reject stop_as_group=true && kill_as_group=false.

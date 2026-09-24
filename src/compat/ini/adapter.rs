@@ -9,7 +9,7 @@ use crate::compat::ini::values::{
     parse_autorestart, parse_environment, parse_log_path, parse_stop_signal,
 };
 use crate::config::schema::{
-    CliDefaults, GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw,
+    CtlConfig, GroupConfigRaw, ProgramConfigRaw, ProgramDefaults, ProgramLogsConfigRaw,
     SupervisorConfig,
 };
 use crate::consts::*;
@@ -296,13 +296,24 @@ pub fn adapt_ini_to_config(
         );
     }
 
-    // 3b. Process [supervisorctl] → client defaults (OI-1).
+    // 3b. Process [supervisorctl] → client config (OI-1 / Python parity).
+    // Section presence maps to Some(ctl); missing section stays None so
+    // supervisorctl can hard-error (Python requires the section).
     if let Some(sec) = ini.sections.get("supervisorctl") {
-        config.cli_defaults = Some(CliDefaults {
-            serverurl: sec.get("serverurl").cloned(),
-            username: sec.get("username").cloned(),
-            password: sec.get("password").cloned(),
-        });
+        let mut ctl = CtlConfig::default();
+        if let Some(v) = sec.get("serverurl") {
+            ctl.serverurl = Some(v.clone());
+        }
+        if let Some(v) = sec.get("username") {
+            ctl.username = Some(v.clone());
+        }
+        if let Some(v) = sec.get("password") {
+            ctl.password = Some(v.clone());
+        }
+        if let Some(v) = sec.get("auth_token") {
+            ctl.auth_token = Some(v.clone());
+        }
+        config.ctl = Some(ctl);
         warn_unknown_keys(
             "supervisorctl",
             sec,
@@ -310,6 +321,7 @@ pub fn adapt_ini_to_config(
                 "serverurl",
                 "username",
                 "password",
+                "auth_token",
                 // Known Python keys we do not map yet.
                 "prompt",
                 "history_file",
@@ -391,8 +403,11 @@ pub fn adapt_ini_to_config(
     //   the daemon working directory at runtime), matching Python/go behavior.
     // - allow_unelevated=true: no elevation gate on IPC, matching Python/go which
     //   only rely on socket file permissions.
+    // - ctl_defaults=false: no server→ctl backfill; missing [supervisorctl] stays
+    //   None so supervisorctl hard-errors like Python (options.py).
     config.server.path_translation = false;
     config.server.allow_unelevated = true;
+    config.server.ctl_defaults = false;
 
     config.apply_default_paths();
     config = config.translate_paths()?;
