@@ -137,6 +137,11 @@ program_defaults:
   # Maximum consecutive retry attempts when entering BACKOFF state (default: 3)
   start_retries: 3
 
+  # go-parity `restartpause`: flat wait (seconds) before start-failure retries
+  # when > 0; otherwise exponential backoff 2^n (capped at 2^5 = 32s) applies.
+  # Does not delay autorestart after a process already reached RUNNING.
+  # restart_pause_secs: 5
+
   # Signal sent for graceful stop: TERM, INT, QUIT, KILL, CTRL_BREAK, CTRL_C
   # Default: TERM on Unix, CTRL_BREAK on Windows
   stop_signal: TERM

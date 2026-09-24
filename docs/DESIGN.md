@@ -801,8 +801,8 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 
 ### 15.8 Responsive Cancellation in Exponential Backoff
 
-- During the startup failure backoff window (`2^retry_count` seconds), the backoff timer is multiplexed using `tokio::select!` against `cancel_token.cancelled()`.
-- Daemon shutdowns or program stop commands trigger immediate termination without stalling for up to 32 seconds in backoff sleep.
+- During the startup failure backoff window, the delay is `restart_pause_secs` when configured (go `restartpause`, flat), otherwise `2^min(retry_count, BACKOFF_MAX_EXPONENT)` seconds (cap 32s). The timer is multiplexed using `tokio::select!` against `cancel_token.cancelled()`.
+- Daemon shutdowns or program stop commands trigger immediate termination without stalling for the full backoff/pause sleep.
 
 ### 15.9 Configuration Strictness & Hot Reload Boundaries
 

@@ -339,6 +339,36 @@ async fn test_backoff_stop_cancellation() {
 }
 
 #[tokio::test]
+async fn test_restart_pause_replaces_exponential_backoff() {
+    let (cmd, args) = get_exit_command(1);
+    let mut config = ProgramConfig::new("restart_pause_backoff", cmd);
+    config.args = args;
+    config.start_secs = Duration::from_secs(3);
+    config.start_retries = 3;
+    config.autorestart = AutoRestartPolicy::Never;
+    // Flat 3s pause beats default first backoff of 2^1 = 2s.
+    config.restart_pause_secs = Duration::from_secs(3);
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+
+    program
+        .wait_for_state(ProgramState::Backoff, Duration::from_secs(3))
+        .await
+        .expect("Program should enter Backoff");
+
+    // At 2.5s the exponential path would already have respawned; pause holds.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        program.status().state,
+        ProgramState::Backoff,
+        "restart_pause_secs must hold BACKOFF past the default 2s exponential delay"
+    );
+
+    program.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn test_autorestart_never_startup_retries() {
     let (cmd, args) = get_exit_command(1);
     let mut config = ProgramConfig::new("retry_never", cmd);

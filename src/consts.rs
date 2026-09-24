@@ -112,6 +112,10 @@ pub const MAX_PRIORITY: u32 = 999;
 pub_const!(DEFAULT_START: Duration = Duration::from_secs(1));
 // Startup retry count before fatal.
 pub_const!(DEFAULT_START_RETRIES: u32 = 3);
+// Max exponent for start-failure backoff: delay = 2^min(retry, this) seconds (cap 32s).
+pub_const!(BACKOFF_MAX_EXPONENT: u32 = 5);
+// go `restartpause`: flat delay before start-failure retries when > 0 (default off).
+pub_const!(DEFAULT_RESTART_PAUSE: Duration = Duration::from_secs(0));
 // pre_start / pre_stop hook timeout.
 pub_const!(DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(15));
 // File-change restart debounce.

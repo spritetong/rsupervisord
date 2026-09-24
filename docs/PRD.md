@@ -105,7 +105,7 @@ Each managed program transitions across deterministic states:
 - `STOPPED`: Initial state or explicitly stopped.
 - `STARTING`: Process spawned; within the `start_secs` observation window.
 - `RUNNING`: Process remained alive past `start_secs`; confirmed healthy and stable.
-- `BACKOFF`: Crashed within `start_secs`; executing exponential backoff delay before restarting.
+- `BACKOFF`: Crashed within `start_secs`; executing delay before restarting. Default is exponential backoff `2^min(retry, BACKOFF_MAX_EXPONENT)` seconds (cap 32s); when `restart_pause_secs > 0` (go `restartpause`) a flat pause replaces the exponential delay for start-failure retries only.
 - `STOPPING`: Graceful stop signal delivered; awaiting exit before `stop_wait_secs` timeout.
 - `EXITED`: Clean exit matching configured `exit_codes`; will not be automatically restarted.
 - `FATAL`: Crash count exceeded `start_retries`, or unrecoverable initialization error encountered.
@@ -124,7 +124,7 @@ Each managed program transitions across deterministic states:
 
 To eliminate boilerplate across multiple programs, the engine provides a `program_defaults` inheritance mechanism:
 
-- Inherited fields include: `autostart`, `autorestart`, `start_secs`, `start_retries`, `stop_signal`, `stop_wait_secs`, and `logs`.
+- Inherited fields include: `autostart`, `autorestart`, `start_secs`, `start_retries`, `restart_pause_secs`, `stop_signal`, `stop_wait_secs`, and `logs`.
 - **Three-Tier Precedence**:
   $$\text{Program Private Config} > \text{program\_defaults Global Defaults} > \text{Engine Hardcoded Defaults}$$
 

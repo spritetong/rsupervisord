@@ -154,6 +154,8 @@ pub struct ProgramDefaults {
     pub start_secs: Option<Duration>,
     #[serde(default)]
     pub start_retries: Option<u32>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub restart_pause_secs: Option<Duration>,
     #[serde(default)]
     pub stop_signal: Option<StopSignal>,
     #[serde(default, with = "crate::serde_util::option_duration_secs")]
@@ -250,6 +252,8 @@ pub struct ProgramConfigRaw {
     pub start_secs: Option<Duration>,
     #[serde(default)]
     pub start_retries: Option<u32>,
+    #[serde(default, with = "crate::serde_util::option_duration_secs")]
+    pub restart_pause_secs: Option<Duration>,
     #[serde(default)]
     pub stop_signal: Option<StopSignal>,
     #[serde(default, with = "crate::serde_util::option_duration_secs")]
@@ -794,6 +798,9 @@ impl SupervisorConfig {
             let start_retries = inherit!(raw, self.program_defaults, start_retries)
                 .unwrap_or(DEFAULT_START_RETRIES);
 
+            let restart_pause_secs = inherit!(raw, self.program_defaults, restart_pause_secs)
+                .unwrap_or(DEFAULT_RESTART_PAUSE);
+
             let stop_signal = inherit!(raw, self.program_defaults, stop_signal).unwrap_or_default();
 
             let stop_wait_secs =
@@ -1112,6 +1119,7 @@ impl SupervisorConfig {
                     autorestart,
                     start_secs,
                     start_retries,
+                    restart_pause_secs,
                     stop_signal,
                     stop_wait_secs,
                     exit_codes: exit_codes.clone(),
@@ -1308,6 +1316,7 @@ impl SupervisorConfig {
                     autorestart,
                     start_secs,
                     start_retries,
+                    restart_pause_secs: DEFAULT_RESTART_PAUSE,
                     stop_signal,
                     stop_wait_secs,
                     exit_codes: default_exit_codes(),
@@ -1781,6 +1790,39 @@ programs:
         let p3 = &resolved["vanilla_prog"];
         assert!(!p3.restart_when_binary_changed);
         assert_eq!(p3.restart_debounce_secs, Duration::from_secs(10)); // Inherited from defaults
+    }
+
+    #[test]
+    fn test_restart_pause_inheritance() {
+        let yaml = r#"
+server:
+  path_translation: false
+program_defaults:
+  restart_pause_secs: 7
+programs:
+  inherited_pause:
+    command: "app1"
+  overridden_pause:
+    command: "app2"
+    restart_pause_secs: 2
+  vanilla_pause:
+    command: "app3"
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let resolved = config.resolve_programs().unwrap();
+
+        assert_eq!(
+            resolved["inherited_pause"].restart_pause_secs,
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            resolved["overridden_pause"].restart_pause_secs,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            resolved["vanilla_pause"].restart_pause_secs,
+            Duration::from_secs(7)
+        );
     }
 
     #[test]

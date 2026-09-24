@@ -158,6 +158,7 @@ logging:
 | `autostart` | `autostart` | boolean parsing difference (see §5) |
 | `startsecs` | `start_secs` | naming; default 1 (same as Python) |
 | `startretries` | `start_retries` | naming |
+| `restartpause` | `restart_pause_secs` | **go extension** (not Python); flat delay before start-failure retries when `> 0`; aliases `restart_pause`, `restart_pause_secs` |
 | `autorestart` | `autorestart` | **value mapping**: `false→never`,`true→always`,`unexpected→unexpected` |
 | `exitcodes` | `exit_codes` | list parsing (`0,2` → `[0,2]`) |
 | `stopsignal` | `stop_signal` | alias `SIGTERM` already supported |
@@ -184,7 +185,7 @@ logging:
 | `killwaitsecs` | — | `kill_wait_secs` (default 2s) (§8 OI-3 **done**) |
 | `liveness_check_*` | `health_check` | mapped to exec `HealthCheckConfig` (§8 OI-5 **done**) |
 
-> ours/Go extension fields (not in Python): `depends_on`, `cron`, `pre_start`/`pre_stop`, `health_check`, `restart_*`, `envFiles`, `killwaitsecs`, `liveness_check_*`. If they appear in INI, accept them as extensions where mapped (§8).
+> ours/Go extension fields (not in Python): `depends_on`, `cron`, `pre_start`/`pre_stop`, `health_check`, `restart_*`, `restartpause`/`restart_pause_secs`, `envFiles`, `killwaitsecs`, `liveness_check_*`. If they appear in INI, accept them as extensions where mapped (§8).
 
 **Example**
 

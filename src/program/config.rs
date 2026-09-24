@@ -188,6 +188,10 @@ pub struct ProgramConfig {
     #[serde(default = "default_start_retries")]
     #[default(DEFAULT_START_RETRIES)]
     pub start_retries: u32,
+    /// go `restartpause`: flat wait before start-failure retries when > 0.
+    #[serde(default = "default_restart_pause", with = "duration_secs")]
+    #[default(DEFAULT_RESTART_PAUSE)]
+    pub restart_pause_secs: Duration,
     #[serde(default)]
     pub stop_signal: StopSignal,
     #[serde(default = "default_stop_wait", with = "duration_secs")]

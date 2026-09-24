@@ -478,6 +478,17 @@ fn parse_program_config(
             ))
         })?;
 
+    let restart_pause_secs = parse_opt_duration(
+        sec,
+        &["restartpause", "restart_pause", "restart_pause_secs"],
+    )
+    .map_err(|e| {
+        ProgramError::ConfigError(format!(
+            "Program '{}' invalid restartpause: {}",
+            prog_name, e
+        ))
+    })?;
+
     let exit_codes = sec
         .get("exitcodes")
         .or_else(|| sec.get("exit_codes"))
@@ -651,6 +662,9 @@ fn parse_program_config(
         "start_secs",
         "startretries",
         "start_retries",
+        "restartpause",
+        "restart_pause",
+        "restart_pause_secs",
         "exitcodes",
         "exit_codes",
         "stopsignal",
@@ -737,6 +751,7 @@ fn parse_program_config(
         autorestart,
         start_secs,
         start_retries,
+        restart_pause_secs,
         stop_signal,
         stop_wait_secs,
         exit_codes,
@@ -984,6 +999,11 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         .map(|s| s.parse::<u32>())
         .transpose()
         .map_err(|e| ProgramError::ConfigError(format!("Invalid default startretries: {}", e)))?;
+    let restart_pause_secs = parse_opt_duration(
+        sec,
+        &["restartpause", "restart_pause", "restart_pause_secs"],
+    )
+    .map_err(|e| ProgramError::ConfigError(format!("Invalid default restartpause: {}", e)))?;
     let stop_signal = sec
         .get("stopsignal")
         .or_else(|| sec.get("stop_signal"))
@@ -1059,6 +1079,7 @@ fn parse_program_defaults(sec: &HashMap<String, String>) -> Result<ProgramDefaul
         autorestart,
         start_secs,
         start_retries,
+        restart_pause_secs,
         stop_signal,
         stop_wait_secs,
         priority,

@@ -275,6 +275,7 @@ fn test_program_default_inheritance() {
     autorestart = always
     startsecs = 10
     startretries = 5
+    restartpause = 7
     stopsignal = INT
     stopwaitsecs = 20
     priority = 300
@@ -283,11 +284,16 @@ fn test_program_default_inheritance() {
 
     [program:worker]
     command = /usr/bin/worker
+
+    [program:overridden]
+    command = /usr/bin/overridden
+    restartpause = 2
     "#;
 
     let config = SupervisorConfig::from_ini_str(ini_str).unwrap();
     let resolved = config.resolve_programs().unwrap();
     let worker = resolved.get("worker").unwrap();
+    let overridden = resolved.get("overridden").unwrap();
 
     assert!(!worker.autostart);
     assert_eq!(
@@ -296,6 +302,8 @@ fn test_program_default_inheritance() {
     );
     assert_eq!(worker.start_secs, Duration::from_secs(10));
     assert_eq!(worker.start_retries, 5);
+    assert_eq!(worker.restart_pause_secs, Duration::from_secs(7));
+    assert_eq!(overridden.restart_pause_secs, Duration::from_secs(2));
     assert_eq!(
         worker.stop_signal,
         rsupervisord::program::config::StopSignal::Int

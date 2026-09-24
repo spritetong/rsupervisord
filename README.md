@@ -617,6 +617,7 @@ Client-only connection config (alias `supervisorctl`; INI maps `[supervisorctl]`
   - **`exit_codes`** (*list of integers*, default: `[0]`): Exit codes considered successful/normal termination.
   - **`start_secs`** (*integer*, default: `1`): Minimum runtime in seconds before a process is considered in `RUNNING` state.
   - **`start_retries`** (*integer*, default: `3`): Maximum consecutive restart attempts before entering `FATAL` state.
+  - **`restart_pause_secs`** (*integer*, default: `0`): go-parity `restartpause`. Flat wait in seconds before start-failure retries when `> 0`; otherwise backoff uses `2^n` seconds (capped at `32`). Does not delay autorestart after `RUNNING`.
   - **`priority`** (*integer 0..99*, default: `50`): Startup/shutdown priority. Lower numbers start earlier and stop later.
   - **`depends_on`** (*list of strings*, optional): Dependent programs. The DAG engine performs topological sorting and layered parallel startup.
   - **`group`** (*string*, optional): Logical group classification.

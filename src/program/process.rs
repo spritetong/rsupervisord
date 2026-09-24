@@ -1275,9 +1275,12 @@ impl ProgramActor {
                         self.retry_count, self.config.start_retries
                     ),
                 );
-                let backoff_secs = 2u64.pow(self.retry_count.min(5));
-                self.backoff_deadline =
-                    Some(tokio::time::Instant::now() + Duration::from_secs(backoff_secs));
+                let backoff_delay = if !self.config.restart_pause_secs.is_zero() {
+                    self.config.restart_pause_secs
+                } else {
+                    Duration::from_secs(2u64.pow(self.retry_count.min(BACKOFF_MAX_EXPONENT)))
+                };
+                self.backoff_deadline = Some(tokio::time::Instant::now() + backoff_delay);
                 false
             } else {
                 self.update_status(
