@@ -54,10 +54,25 @@ pub trait PlatformProcessGuard: Send + Sync {
     ) -> io::Result<std::process::ExitStatus>;
 }
 
+/// Configuration for creating a child process log transport.
+#[derive(Debug, Clone)]
+pub struct ProcessTransportConfig {
+    pub program_name: String,
+    pub capture_stdout: bool,
+    pub capture_stderr: bool,
+    pub redirect_stderr: bool,
+}
+
 /// Trait providing platform-specific abstractions for process configuration,
 /// child tracking, IPC communication, and platform defaults.
 #[async_trait]
 pub trait PlatformBackend: Send + Sync {
+    /// Creates a platform-optimized log transport for child process stdio communication.
+    async fn create_process_log_transport(
+        &self,
+        config: &ProcessTransportConfig,
+    ) -> Result<Box<dyn crate::logging::LogTransport>, ProgramError>;
+
     /// Configures the command builder before spawning (e.g. process groups, user privileges, umask).
     fn configure_command(
         &self,

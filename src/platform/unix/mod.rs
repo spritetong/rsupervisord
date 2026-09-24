@@ -5,12 +5,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 pub mod service;
+pub mod transport;
 pub use service::UnixService;
 
 use crate::error::ProgramError;
 use crate::platform::traits::{
     AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
-    abs_path,
+    ProcessTransportConfig, abs_path,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -185,6 +186,14 @@ pub struct UnixPlatformBackend;
 
 #[async_trait]
 impl PlatformBackend for UnixPlatformBackend {
+    async fn create_process_log_transport(
+        &self,
+        config: &ProcessTransportConfig,
+    ) -> Result<Box<dyn crate::logging::LogTransport>, ProgramError> {
+        let transport = transport::UnixProcessLogTransport::create(config).await?;
+        Ok(Box::new(transport))
+    }
+
     fn configure_command(
         &self,
         cmd: &mut TokioCommand,

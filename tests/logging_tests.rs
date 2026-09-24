@@ -219,3 +219,107 @@ async fn test_process_live_log_subscription() {
         "Expected to receive 'live-msg' from live subscription"
     );
 }
+
+#[tokio::test]
+async fn test_in_memory_rotator_and_reader() {
+    use bytes::Bytes;
+    use rsupervisord::logging::{
+        InstantLogReader, InMemoryLogRotator, LogBackend, LogChannel, LogChunk,
+    };
+
+    // Max 30 bytes per segment, 2 backups
+    let rotator = InMemoryLogRotator::new(30, 2);
+
+    // 1. Write chunks to stdout
+    let chunk1 = LogChunk::new(
+        LogChannel::Stdout,
+        "test_app",
+        Some(100),
+        Bytes::from_static(b"line 1: 1234567890\n"),
+    );
+    rotator.write_chunk(&chunk1).await.unwrap();
+
+    let chunk2 = LogChunk::new(
+        LogChannel::Stdout,
+        "test_app",
+        Some(100),
+        Bytes::from_static(b"line 2: 1234567890\n"),
+    );
+    rotator.write_chunk(&chunk2).await.unwrap();
+
+    // Line count and byte size check
+    assert_eq!(rotator.line_count(LogChannel::Stdout), 2);
+    assert_eq!(rotator.line_count(LogChannel::Stderr), 0);
+
+    // 2. Trigger rotation by writing 3rd and 4th chunks
+    let chunk3 = LogChunk::new(
+        LogChannel::Stdout,
+        "test_app",
+        Some(100),
+        Bytes::from_static(b"line 3: 1234567890\n"),
+    );
+    rotator.write_chunk(&chunk3).await.unwrap();
+
+    let chunk4 = LogChunk::new(
+        LogChannel::Stdout,
+        "test_app",
+        Some(100),
+        Bytes::from_static(b"line 4: 1234567890\n"),
+    );
+    rotator.write_chunk(&chunk4).await.unwrap();
+
+    // 3. Test read_lines
+    let lines = rotator.read_lines(LogChannel::Stdout, Some(2));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1], "line 4: 1234567890");
+
+    // 4. Test XML-RPC read_bytes
+    let (data, sz, overflow) = rotator.read_bytes(LogChannel::Stdout, 0, 10);
+    assert_eq!(data.len(), 10);
+    assert!(sz > 10);
+    assert!(!overflow);
+
+    // 5. Test XML-RPC tail_bytes
+    // Total size is ~76 bytes. Requesting 10 bytes results in overflow = true (more history exists)
+    let (tail_data, tail_sz, tail_overflow) = rotator.tail_bytes(LogChannel::Stdout, 0, 10);
+    assert_eq!(tail_data.len(), 10);
+    assert!(tail_sz > 10);
+    assert!(tail_overflow);
+
+    // Requesting entire size results in overflow = false
+    let (_, _, no_overflow) = rotator.tail_bytes(LogChannel::Stdout, 0, 200);
+    assert!(!no_overflow);
+
+    // 6. Test clear
+    rotator.clear(Some(LogChannel::Stdout));
+    assert_eq!(rotator.line_count(LogChannel::Stdout), 0);
+    assert_eq!(rotator.byte_size(LogChannel::Stdout), 0);
+}
+
+#[tokio::test]
+async fn test_platform_process_log_transport() {
+    use rsupervisord::platform::{ProcessTransportConfig, native_platform};
+
+    let config = ProcessTransportConfig {
+        program_name: "test_transport".to_string(),
+        capture_stdout: true,
+        capture_stderr: true,
+        redirect_stderr: false,
+    };
+
+    let platform = native_platform();
+    let mut transport = platform.create_process_log_transport(&config).await.unwrap();
+
+    // Take stdio handles for child process
+    let stdio_handles = transport.take_child_stdio().unwrap();
+    assert!(stdio_handles.stdout.is_some());
+    assert!(stdio_handles.stderr.is_some());
+
+    // Subsequent take must fail
+    assert!(transport.take_child_stdio().is_err());
+
+    // Convert into async reading streams
+    let streams = transport.into_streams().unwrap();
+    assert!(streams.stdout.is_some());
+    assert!(streams.stderr.is_some());
+}

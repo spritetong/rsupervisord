@@ -1,0 +1,165 @@
+# Asynchronous Process Logging & Transport Architecture Design
+
+| Document Version | Status | Target System | Scope |
+| :--- | :--- | :--- | :--- |
+| **v1.0.0** | Approved / Implementation Phase | Rust (Edition 2024) / Windows & Unix | Zero-Thread OS Process Transport, Extensible Log Backend Abstractions, and In-Memory Rotator |
+
+---
+
+## 1. Background & Problem Statement
+
+### 1.1 Root Cause of Windows Thread Escalation
+In `rsupervisord`, each supervised subprocess was previously configured with:
+```rust
+cmd.stdout(std::process::Stdio::piped());
+cmd.stderr(std::process::Stdio::piped());
+```
+When running under `tokio::process` on Windows:
+1. `std::process::Stdio::piped()` internally creates synchronous Windows anonymous pipes via `CreatePipe`.
+2. Windows anonymous pipes do **not** support overlapped I/O (`FILE_FLAG_OVERLAPPED`) and cannot be bound to Windows I/O Completion Ports (IOCP).
+3. Tokio bridges synchronous anonymous pipes by wrapping them in `tokio::io::Blocking<ArcFile>`, delegating every `poll_read` operation to Tokio's blocking thread pool (`tokio::task::spawn_blocking`).
+4. Because supervised long-running child processes do not produce continuous output every millisecond, the underlying Win32 `ReadFile` call blocks synchronously inside a thread pool worker.
+5. With both `stdout` and `stderr` actively pumped, **exactly 2 OS worker threads are permanently pinned per running subprocess**. Running 50 subprocesses wastes 100 OS threads in blocked `ReadFile` calls.
+
+### 1.2 Functional Requirements (LOG_COMPAT.md)
+The logging subsystem must support:
+- Extensible log backends (file rotation, syslog RFC 3164, memory ring, `/dev/stdout`, composite).
+- Instant memory cache reader for XML-RPC (`readProcessStdoutLog`, `tailProcessStdoutLog`, `clearProcessLogs`), CLI (`supervisorctl tail -f`), and Web UI streaming.
+- Independent stream-specific log rotation thresholds (OI-10: `stdout_logfile_maxbytes`, `stderr_logfile_maxbytes`, `backups`).
+- Seamless support for `redirect_stderr=true`.
+
+---
+
+## 2. Architecture Overview
+
+```text
+[ ProcessProgram / Subprocess ]
+       │ 1. platform.create_process_log_transport()
+       ▼
+┌────────────────────────────────────────────────────────┐
+│                   LogController                        │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │             Platform LogTransport                │  │
+│  │  - Windows: Overlapped Named Pipe (IOCP, 0 thr)  │  │
+│  │  - Unix: O_NONBLOCK Pipe (Epoll/Kqueue, 0 thr)   │  │
+│  │  - Child Inheritable Stdio (stdout, stderr)      │  │
+│  │  - Optional AsyncWrite (Direct Ingestion/Mock)   │  │
+│  └──────────────────────────────────────────────────┘  │
+│                         │                              │
+│       ┌─────────────────┴─────────────────┐            │
+│       ▼                                   ▼            │
+│  Stdout AsyncRead                     Stderr AsyncRead │
+│       │                                   │            │
+│       ├───────────────────┬───────────────┴────────┐   │
+│       ▼                   ▼                        ▼   │
+│ ┌───────────────┐  ┌───────────────┐      ┌────────────┐│
+│ │InMemoryRotator│  │Future External│      │  EventHub  ││
+│ │(Built-in Sink)│  │  LogBackend   │      │(LogBus Evt)││
+│ └───────────────┘  └───────────────┘      └────────────┘│
+│       ▲                                                │
+│       │ InstantLogReader (read_bytes / tail_bytes)     │
+└───────┼────────────────────────────────────────────────┘
+        │
+[ XML-RPC / supervisorctl / Web UI ]
+```
+
+---
+
+## 3. Step 1: Abstract Interfaces
+
+### 3.1 Basic Types (`src/logging/types.rs`)
+- `LogChannel`: `Stdout`, `Stderr`.
+- `LogChunk`: Immutable, zero-copy byte slice container (`bytes::Bytes`) with metadata (timestamp, channel, process name, PID).
+
+### 3.2 Transport Trait (`src/logging/transport.rs`)
+Encapsulates OS handles passed to the child process and exposes async read streams to the logging engine:
+```rust
+pub struct ProcessStdioHandles {
+    pub stdout: Option<std::process::Stdio>,
+    pub stderr: Option<std::process::Stdio>,
+}
+
+pub struct TransportStreams {
+    pub stdout: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+    pub stderr: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+}
+
+pub trait LogTransport: Send + Sync + 'static {
+    fn take_child_stdio(&mut self) -> Result<ProcessStdioHandles, ProgramError>;
+    fn into_streams(self: Box<Self>) -> Result<TransportStreams, ProgramError>;
+    fn direct_writer(&self, channel: LogChannel) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> {
+        None
+    }
+}
+```
+
+### 3.3 Extensible LogBackend Trait (`src/logging/backend.rs`)
+Provides an open interface for log destinations without coupling the core runtime to any specific external backend:
+```rust
+#[async_trait]
+pub trait LogBackend: Send + Sync + 'static {
+    async fn write_chunk(&self, chunk: &LogChunk) -> Result<(), ProgramError>;
+    async fn flush(&self) -> Result<(), ProgramError>;
+    async fn close(&self) -> Result<(), ProgramError> {
+        self.flush().await
+    }
+}
+```
+
+### 3.4 InstantLogReader Trait (`src/logging/reader.rs`)
+Exposes real-time in-memory reading, subscription, and byte-offset seeking for RPC/Web APIs:
+```rust
+pub trait InstantLogReader: Send + Sync + 'static {
+    fn read_bytes(&self, channel: LogChannel, offset: i64, length: i64) -> (String, i64, bool);
+    fn tail_bytes(&self, channel: LogChannel, offset: i64, length: i64) -> (String, i64, bool);
+    fn read_lines(&self, channel: LogChannel, max_lines: Option<usize>) -> Vec<String>;
+    fn subscribe(&self, channel: LogChannel) -> tokio::sync::broadcast::Receiver<String>;
+    fn clear(&self, channel: Option<LogChannel>);
+}
+```
+
+---
+
+## 4. Step 2: Platform Integration (Zero-Thread Subprocess I/O)
+
+### 4.1 Windows Overlapped Named Pipes
+To eliminate the 2 blocked threads per child process on Windows:
+1. Generate an isolated named pipe per stream: `\\.\pipe\rsupervisord-{pid}-{stream}-{uuid}`.
+2. Server end is created using `tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&pipe_name)`. This handle is opened with `FILE_FLAG_OVERLAPPED` and registered directly with Tokio's IOCP reactor.
+3. Client end is opened synchronously with `GENERIC_WRITE` and `bInheritHandle = TRUE`, then passed to `std::process::Command` via `Stdio::from(client_handle)`.
+4. The child process writes to its standard descriptor synchronously; the parent wakes up on native IOCP packet arrival.
+5. **Thread count cost: 0 extra OS threads**.
+
+### 4.2 Unix Non-blocking Pipes
+1. Created via `nix::unistd::pipe2(O_NONBLOCK | O_CLOEXEC)`.
+2. Read end is integrated with Tokio's async reactor (`tokio::io::unix::AsyncFd`).
+3. Write end is converted into `std::process::Stdio` for process inheritance.
+4. **Thread count cost: 0 extra OS threads**.
+
+### 4.3 Platform Backend Factory
+`PlatformBackend` in `src/platform/traits.rs` exposes:
+```rust
+fn create_process_log_transport(
+    &self,
+    config: &TransportConfig,
+) -> Result<Box<dyn LogTransport>, ProgramError>;
+```
+
+---
+
+## 5. Step 3: In-Memory LogRotator (Built-in Logger Backend)
+
+`InMemoryLogRotator` acts as the primary in-memory log warehouse and default backend:
+1. **Generational Memory Segments**:
+   - Organized into an `active_segment` and a bounded queue of `backup_segments` (`VecDeque<MemorySegment>`).
+   - When the active segment exceeds `max_bytes`, it rotates into the backup queue.
+   - If `backup_segments.len() > backups`, the oldest segment is dropped.
+2. **Byte & Line Seeking**:
+   - Calculates global offsets across backup and active segments.
+   - Implements XML-RPC compliant `read_bytes` and `tail_bytes` with accurate overflow detection.
+3. **Dual Role**:
+   - Implements `LogBackend`: Receives stream chunks from the transport pump.
+   - Implements `InstantLogReader`: Directly consumed by `supervisorctl`, XML-RPC server, and Web UI.
+4. **Zero Disk Dependency**:
+   - Retains 100% of supervisor logging capabilities entirely in RAM without requiring disk access.

@@ -12,7 +12,7 @@ pub mod windows;
 
 pub use traits::{
     AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
-    abs_path, norm_path,
+    ProcessMetrics, ProcessTransportConfig, abs_path, norm_path,
 };
 
 /// Returns the native platform backend singleton.

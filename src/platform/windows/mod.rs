@@ -6,12 +6,13 @@
 
 pub mod security;
 pub mod service;
+pub mod transport;
 pub use service::WindowsService;
 
 use crate::error::ProgramError;
 use crate::platform::traits::{
     AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
-    abs_path,
+    ProcessTransportConfig, abs_path,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -275,6 +276,14 @@ pub struct WindowsPlatformBackend;
 
 #[async_trait]
 impl PlatformBackend for WindowsPlatformBackend {
+    async fn create_process_log_transport(
+        &self,
+        config: &ProcessTransportConfig,
+    ) -> Result<Box<dyn crate::logging::LogTransport>, ProgramError> {
+        let transport = transport::WindowsProcessLogTransport::create(config).await?;
+        Ok(Box::new(transport))
+    }
+
     fn configure_command(
         &self,
         _cmd: &mut TokioCommand,
