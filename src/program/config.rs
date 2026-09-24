@@ -131,11 +131,11 @@ pub struct ProgramLogsConfig {
     pub stdout_backups: Option<usize>,
     #[serde(default)]
     pub stderr_backups: Option<usize>,
-    #[serde(default = "bool_value::<true>")]
-    #[default(true)]
+    #[serde(default = "bool_value::<false>")]
+    #[default(false)]
     pub stdout_timestamp_suffix: bool,
-    #[serde(default = "bool_value::<true>")]
-    #[default(true)]
+    #[serde(default = "bool_value::<false>")]
+    #[default(false)]
     pub stderr_timestamp_suffix: bool,
     #[serde(default)]
     pub stdout_syslog: bool,
@@ -163,6 +163,9 @@ impl ProgramLogsConfig {
     }
 
     pub fn is_stdout_disabled(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
         if self.stdout_syslog {
             return false;
         }
@@ -170,6 +173,9 @@ impl ProgramLogsConfig {
     }
 
     pub fn is_stderr_disabled(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
         if self.stderr_syslog {
             return false;
         }

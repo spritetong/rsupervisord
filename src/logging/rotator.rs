@@ -9,7 +9,7 @@ use crate::logging::backend::LogBackend;
 use crate::logging::types::LogChunk;
 use async_trait::async_trait;
 use file_rotate::suffix::{AppendCount, AppendTimestamp, DateFrom, FileLimit};
-use file_rotate::{compression::Compression, ContentLimit, FileRotate};
+use file_rotate::{ContentLimit, FileRotate, compression::Compression};
 use parking_lot::Mutex;
 use std::fs::File;
 use std::io::Write;
@@ -49,7 +49,7 @@ pub struct LogRotator {
 
 impl LogRotator {
     /// Creates a new LogRotator at the given path with max_bytes and retained backups count
-    /// using Go default timestamp suffix naming.
+    /// using classic numeric suffix naming (`.1`, `.2`, ...).
     pub fn new(
         path: impl AsRef<Path>,
         max_bytes: usize,
@@ -202,7 +202,10 @@ mod tests {
 
         assert!(log_file.exists());
         let backup1 = dir.path().join("test.log.1");
-        assert!(backup1.exists(), "Backup test.log.1 should exist in numeric mode");
+        assert!(
+            backup1.exists(),
+            "Backup test.log.1 should exist in numeric mode"
+        );
         assert!(rotator.file_size().is_ok());
     }
 
@@ -225,7 +228,9 @@ mod tests {
             .collect();
 
         assert!(
-            entries.iter().any(|name| name.starts_with("timestamp_test.log.20")),
+            entries
+                .iter()
+                .any(|name| name.starts_with("timestamp_test.log.20")),
             "Expected timestamp rotated file in {:?}: {:?}",
             dir.path(),
             entries
@@ -241,7 +246,9 @@ mod tests {
         let rotator = LogRotator::with_options(&log_file, 0, 5, false).unwrap();
 
         for i in 0..10 {
-            rotator.write_line(&format!("Line {}: some log output", i)).unwrap();
+            rotator
+                .write_line(&format!("Line {}: some log output", i))
+                .unwrap();
         }
 
         assert!(log_file.exists());
@@ -249,7 +256,11 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
-        assert_eq!(entries.len(), 1, "Only primary log file should exist when max_bytes=0");
+        assert_eq!(
+            entries.len(),
+            1,
+            "Only primary log file should exist when max_bytes=0"
+        );
     }
 
     #[tokio::test]

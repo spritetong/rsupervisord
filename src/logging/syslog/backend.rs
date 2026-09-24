@@ -43,6 +43,9 @@ pub struct SyslogLogBackend {
     hostname: String,
     #[cfg(unix)]
     sender: Option<SyslogSender>,
+    /// Ensures the "no local socket" warning is emitted only once per backend.
+    #[cfg(unix)]
+    no_socket_warned: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(unix)]
@@ -104,7 +107,11 @@ impl SyslogLogBackend {
                 SyslogTarget::Remote { proto, host, port } => match proto {
                     SyslogProto::Udp => {
                         let addr = format!("{}:{}", host, port);
-                        let bind_addr = if host.contains(':') { "[::]:0" } else { "0.0.0.0:0" };
+                        let bind_addr = if host.contains(':') {
+                            "[::]:0"
+                        } else {
+                            "0.0.0.0:0"
+                        };
                         let std_sock = std::net::UdpSocket::bind(bind_addr).map_err(|e| {
                             ProgramError::PlatformError(format!(
                                 "Failed to bind UDP socket for syslog '{}': {}",
@@ -123,12 +130,13 @@ impl SyslogLogBackend {
                                 addr, e
                             ))
                         })?;
-                        let tokio_sock = tokio::net::UdpSocket::from_std(std_sock).map_err(|e| {
-                            ProgramError::PlatformError(format!(
-                                "Failed to convert UDP socket to Tokio: {}",
-                                e
-                            ))
-                        })?;
+                        let tokio_sock =
+                            tokio::net::UdpSocket::from_std(std_sock).map_err(|e| {
+                                ProgramError::PlatformError(format!(
+                                    "Failed to convert UDP socket to Tokio: {}",
+                                    e
+                                ))
+                            })?;
                         Some(SyslogSender::Udp(tokio_sock))
                     }
                     SyslogProto::Tcp => {
@@ -160,6 +168,7 @@ impl SyslogLogBackend {
                 tag,
                 hostname,
                 sender,
+                no_socket_warned: std::sync::atomic::AtomicBool::new(false),
             })
         }
     }
@@ -178,7 +187,18 @@ impl LogBackend for SyslogLogBackend {
         {
             let sender = match &self.sender {
                 Some(s) => s,
-                None => return Ok(()),
+                None => {
+                    if !self
+                        .no_socket_warned
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tracing::warn!(
+                            "Syslog backend for tag '{}' has no reachable local socket; messages are discarded",
+                            self.tag
+                        );
+                    }
+                    return Ok(());
+                }
             };
 
             let text = String::from_utf8_lossy(&chunk.data);
@@ -203,7 +223,12 @@ impl LogBackend for SyslogLogBackend {
                         let _ = s.send(&packet).await;
                     }
                     SyslogSender::Tcp(tx) => {
-                        let _ = tx.try_send(packet);
+                        if let Err(e) = tx.try_send(packet) {
+                            tracing::warn!(
+                                "Syslog TCP channel full or closed, message dropped: {}",
+                                e
+                            );
+                        }
                     }
                 }
             }

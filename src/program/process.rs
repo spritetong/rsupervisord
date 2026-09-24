@@ -351,6 +351,52 @@ impl Program for ProcessProgram {
 
 const MAX_STDIN_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Builds a local syslog backend from program log settings and composites it onto `base`.
+/// Errors are logged (fail-loud) and `base` is returned unchanged so file sinks keep working.
+fn attach_syslog_backend(
+    base: Option<Arc<dyn crate::logging::LogBackend>>,
+    logs: &crate::program::config::ProgramLogsConfig,
+    priority: Option<&str>,
+    program_name: &str,
+) -> Option<Arc<dyn crate::logging::LogBackend>> {
+    let facility = logs
+        .syslog_facility
+        .as_deref()
+        .and_then(|f| f.parse::<crate::logging::SyslogFacility>().ok())
+        .unwrap_or_default();
+    let severity = priority
+        .and_then(|p| p.parse::<crate::logging::SyslogSeverity>().ok())
+        .unwrap_or_default();
+    let tag = logs
+        .syslog_tag
+        .clone()
+        .unwrap_or_else(|| program_name.to_string());
+    match crate::logging::SyslogLogBackend::new(
+        crate::logging::SyslogTarget::Local,
+        facility,
+        severity,
+        tag,
+    ) {
+        Ok(syslog_b) => {
+            let syslog_arc: Arc<dyn crate::logging::LogBackend> = Arc::new(syslog_b);
+            Some(match base {
+                Some(b) => Arc::new(crate::logging::CompositeLogBackend::new(vec![
+                    b, syslog_arc,
+                ])),
+                None => syslog_arc,
+            })
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to initialize syslog backend for '{}': {}",
+                program_name,
+                e
+            );
+            base
+        }
+    }
+}
+
 fn spawn_stdin_writer(
     program_name: String,
     mut child_stdin: tokio::process::ChildStdin,
@@ -545,12 +591,24 @@ impl ProgramActor {
         let stdout_disabled = config.logs.is_stdout_disabled();
         let stderr_disabled = config.logs.is_stderr_disabled();
 
-        let stdout_dest = config
-            .logs
-            .stdout
-            .as_ref()
-            .and_then(|p| crate::logging::LogDestination::parse(&p.to_string_lossy()).ok())
-            .unwrap_or(crate::logging::LogDestination::Auto);
+        let stdout_dest = match config.logs.stdout.as_ref() {
+            Some(p) => {
+                let s = p.to_string_lossy();
+                match crate::logging::LogDestination::parse(&s) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(
+                            "Program '{}' invalid stdout log destination '{}': {}; falling back to AUTO",
+                            config.name,
+                            s,
+                            e
+                        );
+                        crate::logging::LogDestination::Auto
+                    }
+                }
+            }
+            None => crate::logging::LogDestination::Auto,
+        };
 
         let stdout_opts = crate::logging::BackendBuildOptions {
             program_name: &config.name,
@@ -564,55 +622,67 @@ impl ProgramActor {
         };
 
         let mut stdout_backend = if !stdout_disabled {
-            stdout_dest.build_backend(&stdout_opts).unwrap_or(None)
+            match stdout_dest.build_backend(&stdout_opts) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize stdout log backend for '{}': {}",
+                        config.name,
+                        e
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
-        if config.logs.stdout_syslog && !stdout_disabled {
-            let facility = config
-                .logs
-                .syslog_facility
-                .as_deref()
-                .and_then(|f| f.parse::<crate::logging::SyslogFacility>().ok())
-                .unwrap_or_default();
-            let severity = config
-                .logs
-                .syslog_stdout_priority
-                .as_deref()
-                .and_then(|p| p.parse::<crate::logging::SyslogSeverity>().ok())
-                .unwrap_or_default();
-            let tag = config
-                .logs
-                .syslog_tag
-                .clone()
-                .unwrap_or_else(|| config.name.clone());
-            if let Ok(syslog_b) = crate::logging::SyslogLogBackend::new(
-                crate::logging::SyslogTarget::Local,
-                facility,
-                severity,
-                tag,
-            ) {
-                let syslog_arc: Arc<dyn crate::logging::LogBackend> = Arc::new(syslog_b);
-                stdout_backend = match stdout_backend {
-                    Some(base) => Some(Arc::new(crate::logging::CompositeLogBackend::new(vec![
-                        base, syslog_arc,
-                    ]))),
-                    None => Some(syslog_arc),
-                };
-            }
+        // Attach flag-based syslog only when the destination does not already include it.
+        if config.logs.stdout_syslog && !stdout_disabled && !stdout_dest.contains_syslog() {
+            stdout_backend = attach_syslog_backend(
+                stdout_backend,
+                &config.logs,
+                config.logs.syslog_stdout_priority.as_deref(),
+                &config.name,
+            );
         }
 
         let stderr_backend = if !stderr_disabled {
             if config.logs.redirect_stderr {
-                stdout_backend.clone()
+                let mut b = stdout_backend.clone();
+                // Honor stderr_syslog on the shared (redirected) backend only when
+                // the shared backend does not already include a syslog sink.
+                if config.logs.stderr_syslog
+                    && !config.logs.stdout_syslog
+                    && !stdout_dest.contains_syslog()
+                {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
+                }
+                b
             } else {
-                let stderr_dest = config
-                    .logs
-                    .stderr
-                    .as_ref()
-                    .and_then(|p| crate::logging::LogDestination::parse(&p.to_string_lossy()).ok())
-                    .unwrap_or(crate::logging::LogDestination::Auto);
+                let stderr_dest = match config.logs.stderr.as_ref() {
+                    Some(p) => {
+                        let s = p.to_string_lossy();
+                        match crate::logging::LogDestination::parse(&s) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Program '{}' invalid stderr log destination '{}': {}; falling back to AUTO",
+                                    config.name,
+                                    s,
+                                    e
+                                );
+                                crate::logging::LogDestination::Auto
+                            }
+                        }
+                    }
+                    None => crate::logging::LogDestination::Auto,
+                };
 
                 let stderr_opts = crate::logging::BackendBuildOptions {
                     program_name: &config.name,
@@ -625,42 +695,25 @@ impl ProgramActor {
                     syslog_priority: config.logs.syslog_stderr_priority.as_deref(),
                 };
 
-                let mut b = stderr_dest.build_backend(&stderr_opts).unwrap_or(None);
-
-                if config.logs.stderr_syslog {
-                    let facility = config
-                        .logs
-                        .syslog_facility
-                        .as_deref()
-                        .and_then(|f| f.parse::<crate::logging::SyslogFacility>().ok())
-                        .unwrap_or_default();
-                    let severity = config
-                        .logs
-                        .syslog_stderr_priority
-                        .as_deref()
-                        .and_then(|p| p.parse::<crate::logging::SyslogSeverity>().ok())
-                        .unwrap_or_default();
-                    let tag = config
-                        .logs
-                        .syslog_tag
-                        .clone()
-                        .unwrap_or_else(|| config.name.clone());
-                    if let Ok(syslog_b) = crate::logging::SyslogLogBackend::new(
-                        crate::logging::SyslogTarget::Local,
-                        facility,
-                        severity,
-                        tag,
-                    ) {
-                        let syslog_arc: Arc<dyn crate::logging::LogBackend> = Arc::new(syslog_b);
-                        b = match b {
-                            Some(base) => {
-                                Some(Arc::new(crate::logging::CompositeLogBackend::new(vec![
-                                    base, syslog_arc,
-                                ])))
-                            }
-                            None => Some(syslog_arc),
-                        };
+                let mut b = match stderr_dest.build_backend(&stderr_opts) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to initialize stderr log backend for '{}': {}",
+                            config.name,
+                            e
+                        );
+                        None
                     }
+                };
+
+                if config.logs.stderr_syslog && !stderr_dest.contains_syslog() {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
                 }
                 b
             }

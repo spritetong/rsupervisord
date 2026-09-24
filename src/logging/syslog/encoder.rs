@@ -37,7 +37,8 @@ pub fn format_rfc3164(
     let prefix_bytes = prefix.as_bytes();
     let msg_bytes = message.trim_end().as_bytes();
 
-    let mut result = Vec::with_capacity(RFC3164_MAX_LEN.min(prefix_bytes.len() + msg_bytes.len() + 1));
+    let mut result =
+        Vec::with_capacity(RFC3164_MAX_LEN.min(prefix_bytes.len() + msg_bytes.len() + 1));
     result.extend_from_slice(prefix_bytes);
 
     let remaining = RFC3164_MAX_LEN.saturating_sub(result.len() + 1);

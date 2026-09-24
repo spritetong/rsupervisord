@@ -220,8 +220,8 @@ fn test_ini_yaml_equivalence() {
         logs:
           redirect_stderr: true
           stdout: /var/log/web.out.log
-          max_bytes: 5MB
-          backups: 2
+          stdout_max_bytes: 5MB
+          stdout_backups: 2
         environment:
           ENV_MODE: test
           PORT: "8080"
@@ -262,8 +262,11 @@ fn test_ini_yaml_equivalence() {
     assert_eq!(ini_web.environment, yaml_web.environment);
     assert_eq!(ini_web.group, yaml_web.group);
     assert_eq!(ini_web.logs.stdout, yaml_web.logs.stdout);
-    assert_eq!(ini_web.logs.max_bytes, yaml_web.logs.max_bytes);
-    assert_eq!(ini_web.logs.backups, yaml_web.logs.backups);
+    assert_eq!(
+        ini_web.logs.stdout_max_bytes,
+        yaml_web.logs.stdout_max_bytes
+    );
+    assert_eq!(ini_web.logs.stdout_backups, yaml_web.logs.stdout_backups);
     assert_eq!(ini_web.logs.redirect_stderr, yaml_web.logs.redirect_stderr);
 }
 
@@ -310,8 +313,8 @@ fn test_program_default_inheritance() {
     );
     assert_eq!(worker.stop_wait_secs, Duration::from_secs(20));
     assert_eq!(worker.priority, 300);
-    assert_eq!(worker.logs.max_bytes, Some(50 * 1024 * 1024));
-    assert_eq!(worker.logs.backups, Some(10));
+    assert_eq!(worker.logs.stdout_max_bytes, Some(50 * 1024 * 1024));
+    assert_eq!(worker.logs.stdout_backups, Some(10));
 }
 
 #[test]
@@ -1013,7 +1016,21 @@ fn test_ini_env_files_missing_is_skipped() {
 
 #[test]
 fn test_ini_independent_stream_rotation_and_syslog_keys() {
-    let ini_str = r#"
+    // syslog keys intentionally fail config validation on Windows (fail-loud per design §8.3).
+    #[cfg(unix)]
+    let syslog_keys = r#"
+    stdout_syslog = true
+    stderr_syslog = false
+    syslog_facility = local3
+    syslog_tag = my_custom_app
+    syslog_stdout_priority = info
+    syslog_stderr_priority = err
+    "#;
+    #[cfg(not(unix))]
+    let syslog_keys = "";
+
+    let ini_str = format!(
+        r#"
     [supervisord]
     logfile = /var/log/supervisord.log
     logfile_timestamp_suffix = false
@@ -1028,15 +1045,11 @@ fn test_ini_independent_stream_rotation_and_syslog_keys() {
     stderr_logfile_backups = 7
     stdout_logfile_timestamp_suffix = false
     stderr_logfile_timestamp_suffix = true
-    stdout_syslog = true
-    stderr_syslog = false
-    syslog_facility = local3
-    syslog_tag = my_custom_app
-    syslog_stdout_priority = info
-    syslog_stderr_priority = err
-    "#;
+    {syslog_keys}
+    "#
+    );
 
-    let config = SupervisorConfig::from_ini_str(ini_str).unwrap();
+    let config = SupervisorConfig::from_ini_str(&ini_str).unwrap();
     assert!(!config.logging.timestamp_suffix);
 
     let resolved = config.resolve_programs().unwrap();
@@ -1048,10 +1061,16 @@ fn test_ini_independent_stream_rotation_and_syslog_keys() {
     assert_eq!(prog.logs.effective_stderr_backups(), 7);
     assert!(!prog.logs.stdout_timestamp_suffix);
     assert!(prog.logs.stderr_timestamp_suffix);
-    assert!(prog.logs.stdout_syslog);
-    assert!(!prog.logs.stderr_syslog);
-    assert_eq!(prog.logs.syslog_facility.as_deref(), Some("local3"));
-    assert_eq!(prog.logs.syslog_tag.as_deref(), Some("my_custom_app"));
-    assert_eq!(prog.logs.syslog_stdout_priority.as_deref(), Some("info"));
-    assert_eq!(prog.logs.syslog_stderr_priority.as_deref(), Some("err"));
+
+    #[cfg(unix)]
+    {
+        assert!(prog.logs.stdout_syslog);
+        assert!(!prog.logs.stderr_syslog);
+        assert_eq!(prog.logs.syslog_facility.as_deref(), Some("local3"));
+        assert_eq!(prog.logs.syslog_tag.as_deref(), Some("my_custom_app"));
+        assert_eq!(prog.logs.syslog_stdout_priority.as_deref(), Some("info"));
+        assert_eq!(prog.logs.syslog_stderr_priority.as_deref(), Some("err"));
+    }
+    #[cfg(not(unix))]
+    let _ = prog;
 }

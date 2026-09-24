@@ -247,10 +247,17 @@ impl LogDestination {
             (SyslogProto::Udp, rest)
         } else if let Some(rest) = address.strip_prefix("tcp:") {
             (SyslogProto::Tcp, rest)
-        } else if address.contains(':') && !address.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':') {
+        } else if address.contains(':')
+            && !address
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+        {
             // Check for unknown protocol prefix e.g. "http:host"
             let parts: Vec<&str> = address.splitn(2, ':').collect();
-            if parts.len() == 2 && !parts[0].contains('.') && parts[0].chars().all(|c| c.is_ascii_alphabetic()) {
+            if parts.len() == 2
+                && !parts[0].contains('.')
+                && parts[0].chars().all(|c| c.is_ascii_alphabetic())
+            {
                 return Err(ProgramError::ConfigError(format!(
                     "Unsupported syslog protocol '{}' in 'syslog@{}'. Only 'udp' and 'tcp' are supported.",
                     parts[0], address
@@ -294,6 +301,15 @@ impl LogDestination {
     /// Returns true if this destination produces no output.
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
+    }
+
+    /// Returns true if this destination (or any composite member) targets syslog.
+    pub fn contains_syslog(&self) -> bool {
+        match self {
+            Self::Syslog(_) => true,
+            Self::Composite(list) => list.iter().any(|d| d.contains_syslog()),
+            _ => false,
+        }
     }
 
     /// Returns the primary file path if this destination contains a file sink.
@@ -403,12 +419,24 @@ mod tests {
         assert_eq!(LogDestination::parse("").unwrap(), LogDestination::Null);
         assert_eq!(LogDestination::parse("none").unwrap(), LogDestination::Null);
         assert_eq!(LogDestination::parse("NONE").unwrap(), LogDestination::Null);
-        assert_eq!(LogDestination::parse("/dev/null").unwrap(), LogDestination::Null);
+        assert_eq!(
+            LogDestination::parse("/dev/null").unwrap(),
+            LogDestination::Null
+        );
         assert_eq!(LogDestination::parse("AUTO").unwrap(), LogDestination::Auto);
         assert_eq!(LogDestination::parse("auto").unwrap(), LogDestination::Auto);
-        assert_eq!(LogDestination::parse("memory").unwrap(), LogDestination::Auto);
-        assert_eq!(LogDestination::parse("/dev/stdout").unwrap(), LogDestination::DevStdout);
-        assert_eq!(LogDestination::parse("/dev/stderr").unwrap(), LogDestination::DevStderr);
+        assert_eq!(
+            LogDestination::parse("memory").unwrap(),
+            LogDestination::Auto
+        );
+        assert_eq!(
+            LogDestination::parse("/dev/stdout").unwrap(),
+            LogDestination::DevStdout
+        );
+        assert_eq!(
+            LogDestination::parse("/dev/stderr").unwrap(),
+            LogDestination::DevStderr
+        );
         assert_eq!(
             LogDestination::parse("syslog").unwrap(),
             LogDestination::Syslog(SyslogTarget::Local)
@@ -466,7 +494,10 @@ mod tests {
                 LogDestination::DevStdout,
             ])
         );
-        assert_eq!(dest.primary_file_path(), Some(std::path::Path::new("test.log")));
+        assert_eq!(
+            dest.primary_file_path(),
+            Some(std::path::Path::new("test.log"))
+        );
 
         let multi = LogDestination::parse("a.log, syslog@udp:127.0.0.1:514, /dev/stderr").unwrap();
         assert_eq!(
@@ -485,12 +516,30 @@ mod tests {
 
     #[test]
     fn test_syslog_facility_and_severity() {
-        assert_eq!("local0".parse::<SyslogFacility>().unwrap(), SyslogFacility::Local0);
-        assert_eq!("LOG_LOCAL7".parse::<SyslogFacility>().unwrap(), SyslogFacility::Local7);
-        assert_eq!("daemon".parse::<SyslogFacility>().unwrap(), SyslogFacility::Daemon);
+        assert_eq!(
+            "local0".parse::<SyslogFacility>().unwrap(),
+            SyslogFacility::Local0
+        );
+        assert_eq!(
+            "LOG_LOCAL7".parse::<SyslogFacility>().unwrap(),
+            SyslogFacility::Local7
+        );
+        assert_eq!(
+            "daemon".parse::<SyslogFacility>().unwrap(),
+            SyslogFacility::Daemon
+        );
 
-        assert_eq!("notice".parse::<SyslogSeverity>().unwrap(), SyslogSeverity::Notice);
-        assert_eq!("LOG_ERR".parse::<SyslogSeverity>().unwrap(), SyslogSeverity::Err);
-        assert_eq!("DEBUG".parse::<SyslogSeverity>().unwrap(), SyslogSeverity::Debug);
+        assert_eq!(
+            "notice".parse::<SyslogSeverity>().unwrap(),
+            SyslogSeverity::Notice
+        );
+        assert_eq!(
+            "LOG_ERR".parse::<SyslogSeverity>().unwrap(),
+            SyslogSeverity::Err
+        );
+        assert_eq!(
+            "DEBUG".parse::<SyslogSeverity>().unwrap(),
+            SyslogSeverity::Debug
+        );
     }
 }

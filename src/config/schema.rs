@@ -123,8 +123,8 @@ pub struct LoggingConfig {
     #[serde(default = "default_log_backups")]
     #[default(DEFAULT_LOG_BACKUPS)]
     pub backups: usize,
-    #[serde(default = "bool_value::<true>")]
-    #[default(true)]
+    #[serde(default = "bool_value::<false>")]
+    #[default(false)]
     pub timestamp_suffix: bool,
     /// When true, suppress console (stdout/stderr) log output (INI `silent`).
     #[serde(default)]
@@ -698,6 +698,112 @@ impl SupervisorConfig {
                     name, p_template
                 )));
             }
+
+            // Log destination / syslog validation (fail loud before spawn).
+            {
+                use crate::logging::{LogDestination, SyslogFacility, SyslogSeverity};
+
+                let raw_logs = raw.logs.as_ref();
+                let def_logs = self.program_defaults.logs.as_ref();
+
+                let stdout_syslog = raw_logs
+                    .and_then(|l| l.stdout_syslog)
+                    .or_else(|| def_logs.and_then(|l| l.stdout_syslog))
+                    .unwrap_or(false);
+                let stderr_syslog = raw_logs
+                    .and_then(|l| l.stderr_syslog)
+                    .or_else(|| def_logs.and_then(|l| l.stderr_syslog))
+                    .unwrap_or(false);
+
+                if let Some(f) = raw_logs
+                    .and_then(|l| l.syslog_facility.as_deref())
+                    .or_else(|| def_logs.and_then(|l| l.syslog_facility.as_deref()))
+                {
+                    f.parse::<SyslogFacility>().map_err(|e| {
+                        ProgramError::ConfigError(format!("Program '{}': {}", name, e))
+                    })?;
+                }
+                if let Some(p) = raw_logs
+                    .and_then(|l| l.syslog_stdout_priority.as_deref())
+                    .or_else(|| def_logs.and_then(|l| l.syslog_stdout_priority.as_deref()))
+                {
+                    p.parse::<SyslogSeverity>().map_err(|e| {
+                        ProgramError::ConfigError(format!("Program '{}': {}", name, e))
+                    })?;
+                }
+                if let Some(p) = raw_logs
+                    .and_then(|l| l.syslog_stderr_priority.as_deref())
+                    .or_else(|| def_logs.and_then(|l| l.syslog_stderr_priority.as_deref()))
+                {
+                    p.parse::<SyslogSeverity>().map_err(|e| {
+                        ProgramError::ConfigError(format!("Program '{}': {}", name, e))
+                    })?;
+                }
+
+                let validate_dest = |stream: &str, path: &PathBuf| -> Result<(), ProgramError> {
+                    let s = path.to_string_lossy();
+                    let dest = LogDestination::parse(&s).map_err(|e| {
+                        ProgramError::ConfigError(format!(
+                            "Program '{}' invalid {} log destination '{}': {}",
+                            name, stream, s, e
+                        ))
+                    })?;
+                    #[cfg(windows)]
+                    if dest.contains_syslog() {
+                        return Err(ProgramError::ConfigError(format!(
+                            "Program '{}' {} log destination '{}' uses syslog, which is not supported on Windows",
+                            name, stream, s
+                        )));
+                    }
+                    let _ = &dest;
+                    Ok(())
+                };
+
+                if let Some(p) = raw_logs
+                    .and_then(|l| l.stdout.as_ref())
+                    .or_else(|| def_logs.and_then(|l| l.stdout.as_ref()))
+                {
+                    validate_dest("stdout", p)?;
+                }
+                if let Some(p) = raw_logs
+                    .and_then(|l| l.stderr.as_ref())
+                    .or_else(|| def_logs.and_then(|l| l.stderr.as_ref()))
+                {
+                    validate_dest("stderr", p)?;
+                }
+
+                #[cfg(windows)]
+                if stdout_syslog || stderr_syslog {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Program '{}' stdout_syslog/stderr_syslog is not supported on Windows",
+                        name
+                    )));
+                }
+                #[cfg(not(windows))]
+                let _ = (stdout_syslog, stderr_syslog);
+            }
+        }
+
+        // Daemon main log destination validation.
+        {
+            use crate::logging::LogDestination;
+            if let Some(ref f) = self.logging.file {
+                let s = f.to_string_lossy();
+                let dest = LogDestination::parse(&s).map_err(|e| {
+                    ProgramError::ConfigError(format!(
+                        "Invalid daemon log destination '{}': {}",
+                        s, e
+                    ))
+                })?;
+                #[cfg(windows)]
+                if dest.contains_syslog() {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Daemon log destination '{}' uses syslog, which is not supported on Windows",
+                        s
+                    )));
+                }
+                let _ = &dest;
+            }
         }
 
         for (group_name, group_cfg) in &self.groups {
@@ -1004,12 +1110,12 @@ impl SupervisorConfig {
                     let stdout_timestamp_suffix = raw_logs
                         .and_then(|l| l.stdout_timestamp_suffix)
                         .or_else(|| def_logs.and_then(|l| l.stdout_timestamp_suffix))
-                        .unwrap_or(true);
+                        .unwrap_or(false);
 
                     let stderr_timestamp_suffix = raw_logs
                         .and_then(|l| l.stderr_timestamp_suffix)
                         .or_else(|| def_logs.and_then(|l| l.stderr_timestamp_suffix))
-                        .unwrap_or(true);
+                        .unwrap_or(false);
 
                     let stdout_syslog = raw_logs
                         .and_then(|l| l.stdout_syslog)
@@ -1452,7 +1558,9 @@ impl SupervisorConfig {
             }
 
             if prog.logs.effective_stdout_max_bytes() > 0
-                && let Some(dest) = prog.logs.stdout.as_ref().and_then(|p| crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok())
+                && let Some(dest) = prog.logs.stdout.as_ref().and_then(|p| {
+                    crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok()
+                })
             {
                 for file_path in dest.file_paths() {
                     rotating_files
@@ -1464,7 +1572,9 @@ impl SupervisorConfig {
 
             if !prog.logs.redirect_stderr
                 && prog.logs.effective_stderr_max_bytes() > 0
-                && let Some(dest) = prog.logs.stderr.as_ref().and_then(|p| crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok())
+                && let Some(dest) = prog.logs.stderr.as_ref().and_then(|p| {
+                    crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok()
+                })
             {
                 for file_path in dest.file_paths() {
                     rotating_files

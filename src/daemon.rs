@@ -321,7 +321,49 @@ fn init_tracing(config: &SupervisorConfig) {
                 let dest = crate::logging::LogDestination::parse(&path_str)
                     .unwrap_or(crate::logging::LogDestination::File(path.clone()));
 
-                let writer_box: Option<Box<dyn std::io::Write + Send>> = match dest {
+                // Resolve composite destinations to the primary concrete sink so
+                // `a.log, /dev/stdout` still writes a file layer instead of being dropped.
+                let effective_dest = match dest {
+                    crate::logging::LogDestination::Composite(ref list) => {
+                        let primary = dest
+                            .primary_file_path()
+                            .map(|p| crate::logging::LogDestination::File(p.to_path_buf()))
+                            .or_else(|| {
+                                list.iter().find_map(|d| match d {
+                                    crate::logging::LogDestination::DevStdout => {
+                                        Some(crate::logging::LogDestination::DevStdout)
+                                    }
+                                    crate::logging::LogDestination::DevStderr => {
+                                        Some(crate::logging::LogDestination::DevStderr)
+                                    }
+                                    _ => None,
+                                })
+                            });
+                        match primary {
+                            Some(d) => d,
+                            None => {
+                                tracing::warn!(
+                                    "Daemon log destination '{}' has no writable file/stdio sink; console logging only",
+                                    path_str
+                                );
+                                crate::logging::LogDestination::Null
+                            }
+                        }
+                    }
+                    crate::logging::LogDestination::Syslog(_) => {
+                        tracing::warn!(
+                            "Daemon log destination '{}' uses syslog which is not supported for the daemon file layer; console logging only",
+                            path_str
+                        );
+                        crate::logging::LogDestination::Null
+                    }
+                    crate::logging::LogDestination::Auto => {
+                        crate::logging::LogDestination::Null
+                    }
+                    other => other,
+                };
+
+                let writer_box: Option<Box<dyn std::io::Write + Send>> = match effective_dest {
                     crate::logging::LogDestination::Null => None,
                     crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
                     crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),

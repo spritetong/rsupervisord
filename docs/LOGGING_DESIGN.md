@@ -203,13 +203,13 @@ Go supervisord supports comma-separated destinations (e.g. `stdout_logfile = tes
 `FileLogBackend` wraps file rotation with full Python and Go behavioral fidelity:
 
 ### 7.1 Rotation Naming Modes (`timestamp_suffix`)
-- **Timestamp Mode (`timestamp_suffix = true`, Default)**:
-  - Matches Go supervisord default.
+- **Numeric Mode (`timestamp_suffix = false`, Default)**:
+  - Matches Python Supervisor classic behavior and preserves pre-existing rsupervisord upgrade naming.
+  - Rotated files are named `app.log.1`, `app.log.2`, ..., `app.log.N` (using `file_rotate::suffix::AppendCount`).
+- **Timestamp Mode (`timestamp_suffix = true`)**:
+  - Matches Go supervisord default when explicitly enabled.
   - Rotated files are named `app.log.YYYY-MM-DDTHH-MM-SS` (using `file_rotate::suffix::AppendTimestamp`).
   - Automatically prunes oldest backup files exceeding the `backups` count.
-- **Numeric Mode (`timestamp_suffix = false`)**:
-  - Matches Python Supervisor classic behavior.
-  - Rotated files are named `app.log.1`, `app.log.2`, ..., `app.log.N` (using `file_rotate::suffix::AppendCount`).
 
 ### 7.2 Append-Only Mode (`max_bytes = 0`)
 - When `max_bytes == 0` (or `logfile_maxbytes = 0`), rotation is completely disabled.

@@ -494,10 +494,7 @@ async fn test_process_composite_logging() {
     #[cfg(not(windows))]
     let (cmd, args) = (
         "sh",
-        vec![
-            "-c".to_string(),
-            "echo composite-fanout-line".to_string(),
-        ],
+        vec!["-c".to_string(), "echo composite-fanout-line".to_string()],
     );
 
     let mut config = ProgramConfig::new("composite_test", cmd);
@@ -531,8 +528,14 @@ async fn test_process_composite_logging() {
 
     let c1 = std::fs::read_to_string(&file1).expect("file1 should exist");
     let c2 = std::fs::read_to_string(&file2).expect("file2 should exist");
-    assert!(c1.contains("composite-fanout-line"), "file1 should receive output");
-    assert!(c2.contains("composite-fanout-line"), "file2 should receive output");
+    assert!(
+        c1.contains("composite-fanout-line"),
+        "file1 should receive output"
+    );
+    assert!(
+        c2.contains("composite-fanout-line"),
+        "file2 should receive output"
+    );
 }
 
 #[tokio::test]
@@ -593,7 +596,10 @@ async fn test_process_timestamp_suffix_rotation() {
     let _ = program.stop(Duration::from_secs(1)).await;
 
     assert!(stdout_log.exists(), "Primary stdout log should exist");
-    assert!(rotated_found, "Rotated file with timestamp suffix should exist");
+    assert!(
+        rotated_found,
+        "Rotated file with timestamp suffix should exist"
+    );
 }
 
 #[tokio::test]
@@ -652,7 +658,11 @@ async fn test_process_max_bytes_zero_no_rotate() {
         .flatten()
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(entries, vec!["no_rotate.log"], "Only the primary un-rotated file should exist");
+    assert_eq!(
+        entries,
+        vec!["no_rotate.log"],
+        "Only the primary un-rotated file should exist"
+    );
 }
 
 #[cfg(windows)]
@@ -695,7 +705,10 @@ programs:
 
     let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
     let resolved = config.resolve_programs();
-    assert!(resolved.is_ok(), "resolve_programs should succeed while logging warning");
+    assert!(
+        resolved.is_ok(),
+        "resolve_programs should succeed while logging warning"
+    );
     let resolved_map = resolved.unwrap();
     assert_eq!(resolved_map.len(), 2);
 }

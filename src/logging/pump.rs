@@ -6,7 +6,6 @@
 
 use crate::logging::backend::LogBackend;
 use crate::logging::ring_buffer::RingBuffer;
-use crate::logging::rotator::LogRotator;
 use crate::logging::types::{LogChannel, LogChunk};
 use crate::manager::{EventHub, LogEntry};
 use std::sync::Arc;
@@ -18,7 +17,6 @@ pub struct LogPumpBuilder<R> {
     reader: R,
     ring_buffer: Arc<RingBuffer>,
     stream_name: &'static str,
-    rotator: Option<LogRotator>,
     backend: Option<Arc<dyn LogBackend>>,
     ring_prefix: Option<String>,
     event_hub: Option<EventHub>,
@@ -38,7 +36,6 @@ where
             reader,
             ring_buffer,
             stream_name,
-            rotator: None,
             backend: None,
             ring_prefix: None,
             event_hub: None,
@@ -47,12 +44,6 @@ where
             pid: None,
             events_enabled: false,
         }
-    }
-
-    /// Configures the optional rotating file writer.
-    pub fn with_rotator(mut self, rotator: Option<LogRotator>) -> Self {
-        self.rotator = rotator;
-        self
     }
 
     /// Configures the extensible log backend (File, Syslog, Stdio, Composite).
@@ -103,7 +94,6 @@ where
             reader,
             ring_buffer,
             stream_name,
-            rotator,
             backend,
             ring_prefix,
             event_hub,
@@ -121,20 +111,9 @@ where
 
         tokio::spawn(async move {
             // Guarantee file flush on EOF, task cancellation, or unexpected loop termination
-            let flush_rotator = rotator.clone();
             let flush_backend = backend.clone();
             let prog_name_diag = program_name.clone();
             scopeguard::defer! {
-                if let Some(ref rot) = flush_rotator
-                    && let Err(e) = rot.flush()
-                {
-                    tracing::warn!(
-                        program = ?prog_name_diag,
-                        stream = stream_name,
-                        error = %e,
-                        "Failed to flush log rotator on shutdown"
-                    );
-                }
                 if let Some(ref b) = flush_backend {
                     let b_clone = b.clone();
                     let diag = prog_name_diag.clone();
@@ -175,18 +154,6 @@ where
                     ));
                 }
 
-                // Write raw line to file rotator if configured
-                if let Some(ref rot) = rotator
-                    && let Err(e) = rot.write_line(&line)
-                {
-                    tracing::warn!(
-                        program = ?program_name,
-                        stream = stream_name,
-                        error = %e,
-                        "Failed to write log line to rotator"
-                    );
-                }
-
                 // Write chunk to generic log backend if configured
                 if let Some(ref b) = backend {
                     let chunk = LogChunk::new(
@@ -211,26 +178,4 @@ where
             }
         })
     }
-}
-
-/// Spawns an asynchronous background task to pump lines from an async reader (stdout/stderr)
-/// into a RingBuffer, an optional LogRotator file writer, and the central EventHub.
-pub fn spawn_log_pump<R>(
-    reader: R,
-    ring_buffer: Arc<RingBuffer>,
-    rotator: Option<LogRotator>,
-    ring_prefix: Option<String>,
-    event_hub: Option<EventHub>,
-    program_name: Option<String>,
-    stream_name: &'static str,
-) -> JoinHandle<()>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    LogPumpBuilder::new(reader, ring_buffer, stream_name)
-        .with_rotator(rotator)
-        .with_ring_prefix(ring_prefix)
-        .with_event_hub(event_hub)
-        .with_program_name(program_name)
-        .spawn()
 }

@@ -376,7 +376,11 @@ const SERVER_INET_MAPPINGS: &[FieldMapping] = &[
 const SUPERVISORD_MAPPINGS: &[FieldMapping] = &[
     map_field!(&["logfile_maxbytes"], "logging.max_bytes", ByteSize),
     map_field!(&["logfile_backups"], "logging.backups", Usize),
-    map_field!(&["logfile_timestamp_suffix"], "logging.timestamp_suffix", Bool),
+    map_field!(
+        &["logfile_timestamp_suffix"],
+        "logging.timestamp_suffix",
+        Bool
+    ),
     map_field!(&["loglevel"], "logging.level", Lowercase),
     map_field!(&["silent"], "logging.silent", Bool),
     map_field!(&["identifier"], "server.identifier", Identity),
@@ -428,30 +432,12 @@ const PROGRAM_SHARED_MAPPINGS: &[FieldMapping] = &[
         ByteSize
     ),
     map_field!(
-        &["stdout_logfile_maxbytes", "stdout_logfile_bytes"],
-        "logs.max_bytes",
-        ByteSize
-    ),
-    map_field!(
         &["stderr_logfile_maxbytes", "stderr_logfile_bytes"],
         "logs.stderr_max_bytes",
         ByteSize
     ),
-    map_field!(
-        &["stdout_logfile_backups"],
-        "logs.stdout_backups",
-        Usize
-    ),
-    map_field!(
-        &["stdout_logfile_backups"],
-        "logs.backups",
-        Usize
-    ),
-    map_field!(
-        &["stderr_logfile_backups"],
-        "logs.stderr_backups",
-        Usize
-    ),
+    map_field!(&["stdout_logfile_backups"], "logs.stdout_backups", Usize),
+    map_field!(&["stderr_logfile_backups"], "logs.stderr_backups", Usize),
     map_field!(
         &["stdout_logfile_timestamp_suffix"],
         "logs.stdout_timestamp_suffix",
@@ -466,8 +452,16 @@ const PROGRAM_SHARED_MAPPINGS: &[FieldMapping] = &[
     map_field!(&["stderr_syslog"], "logs.stderr_syslog", Bool),
     map_field!(&["syslog_facility"], "logs.syslog_facility", Identity),
     map_field!(&["syslog_tag"], "logs.syslog_tag", Identity),
-    map_field!(&["syslog_stdout_priority"], "logs.syslog_stdout_priority", Identity),
-    map_field!(&["syslog_stderr_priority"], "logs.syslog_stderr_priority", Identity),
+    map_field!(
+        &["syslog_stdout_priority"],
+        "logs.syslog_stdout_priority",
+        Identity
+    ),
+    map_field!(
+        &["syslog_stderr_priority"],
+        "logs.syslog_stderr_priority",
+        Identity
+    ),
     map_field!(&["redirect_stderr"], "logs.redirect_stderr", Bool),
     map_field!(
         &["stdout_events_enabled"],
@@ -548,10 +542,7 @@ const EVENT_LISTENER_MAPPINGS: &[FieldMapping] = &[
 
 /// Python supervisor keys accepted under `[program:*]` / `[program-default]`
 /// but not yet mapped (OI-11; silent, matching the pre-table allowlist).
-const PYTHON_UNMAPPED_PROGRAM_KEYS: &[&str] = &[
-    "environment_set",
-    "serverurl",
-];
+const PYTHON_UNMAPPED_PROGRAM_KEYS: &[&str] = &["environment_set", "serverurl"];
 
 // ---------------------------------------------------------------------------
 // Main Adapter Pipeline

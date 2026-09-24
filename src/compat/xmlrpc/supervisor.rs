@@ -806,25 +806,23 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
         };
         map.insert("stderr_logfile".to_string(), Value::String(stderr_logfile));
 
-        let stdout_maxbytes = cfg
-            .logs
-            .max_bytes
-            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
         map.insert(
             "stdout_logfile_maxbytes".to_string(),
-            Value::Int(stdout_maxbytes as i32),
+            Value::Int(cfg.logs.effective_stdout_max_bytes() as i32),
         );
         map.insert(
             "stderr_logfile_maxbytes".to_string(),
-            Value::Int(stdout_maxbytes as i32),
+            Value::Int(cfg.logs.effective_stderr_max_bytes() as i32),
         );
 
-        let backups = cfg
-            .logs
-            .backups
-            .unwrap_or(crate::consts::DEFAULT_LOG_BACKUPS) as i32;
-        map.insert("stdout_logfile_backups".to_string(), Value::Int(backups));
-        map.insert("stderr_logfile_backups".to_string(), Value::Int(backups));
+        map.insert(
+            "stdout_logfile_backups".to_string(),
+            Value::Int(cfg.logs.effective_stdout_backups() as i32),
+        );
+        map.insert(
+            "stderr_logfile_backups".to_string(),
+            Value::Int(cfg.logs.effective_stderr_backups() as i32),
+        );
 
         map.insert("stdout_capture_maxbytes".to_string(), Value::Int(0));
         map.insert("stderr_capture_maxbytes".to_string(), Value::Int(0));
@@ -836,8 +834,14 @@ async fn get_all_config_info(ctx: &SupervisorRpcContext) -> Result<Value, Fault>
             "stderr_events_enabled".to_string(),
             Value::Boolean(cfg.logs.stderr_events_enabled),
         );
-        map.insert("stdout_syslog".to_string(), Value::Boolean(false));
-        map.insert("stderr_syslog".to_string(), Value::Boolean(false));
+        map.insert(
+            "stdout_syslog".to_string(),
+            Value::Boolean(cfg.logs.stdout_syslog),
+        );
+        map.insert(
+            "stderr_syslog".to_string(),
+            Value::Boolean(cfg.logs.stderr_syslog),
+        );
         map.insert("serverurl".to_string(), Value::String("none".to_string()));
 
         infos.push(Value::Struct(map));

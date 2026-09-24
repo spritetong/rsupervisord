@@ -22,7 +22,7 @@ pub use destination::{
     BackendBuildOptions, LogDestination, SyslogFacility, SyslogProto, SyslogSeverity, SyslogTarget,
 };
 pub use in_memory_rotator::{InMemoryChannelRotator, InMemoryLogRotator};
-pub use pump::{LogPumpBuilder, spawn_log_pump};
+pub use pump::LogPumpBuilder;
 pub use reader::InstantLogReader;
 pub use ring_buffer::RingBuffer;
 pub use rotator::LogRotator;

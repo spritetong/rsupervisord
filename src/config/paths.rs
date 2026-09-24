@@ -66,7 +66,7 @@ impl<'a> PathResolver<'a> {
             }
         }
 
-        let extensions = [".yaml", ".yml", ".conf", ".ini"];
+        let extensions = [".conf", ".ini", ".yaml", ".yml"];
 
         // 2. Current Working Directory (CWD) & ./etc/ (Python Supervisor compatibility)
         if let Ok(cwd) = std::env::current_dir() {
@@ -136,8 +136,6 @@ impl<'a> PathResolver<'a> {
         }
 
         let sys_candidates = [
-            PathBuf::from("/etc/supervisor/supervisord.yaml"),
-            PathBuf::from("/etc/supervisord.yaml"),
             PathBuf::from("/etc/supervisor/supervisord.conf"),
             PathBuf::from("/etc/supervisord.conf"),
         ];
@@ -159,7 +157,7 @@ impl<'a> PathResolver<'a> {
                 return PathBuf::from(trimmed);
             }
         }
-        get_executable_dir().join(format!("{}.yaml", self.cmd_name))
+        get_executable_dir().join(format!("{}.conf", self.cmd_name))
     }
 
     /// Returns the default local IPC path (named pipe on Windows, Unix domain socket on Unix).
@@ -487,23 +485,17 @@ mod tests {
         let old_cwd = std::env::current_dir().unwrap();
 
         let cwd_conf = dir.path().join("mycustomd.conf");
-        let cwd_yaml = dir.path().join("mycustomd.yaml");
+        let cwd_ini = dir.path().join("mycustomd.ini");
         std::fs::write(&cwd_conf, "test: conf").unwrap();
-        std::fs::write(&cwd_yaml, "test: yaml").unwrap();
+        std::fs::write(&cwd_ini, "test: ini").unwrap();
 
         std::env::set_current_dir(dir.path()).unwrap();
         let found = find_default_config_path("mycustomd");
-        // Verify .yaml takes precedence over .conf when both exist
-        assert_eq!(found.as_ref(), Some(&cwd_yaml));
-
-        // When .yaml is absent, .conf should be discovered
-        if let Some(yaml_path) = found {
-            let _ = std::fs::remove_file(yaml_path);
-        }
-        let found_conf = find_default_config_path("mycustomd");
-        assert_eq!(found_conf, Some(cwd_conf));
-
+        // Restore CWD before asserting so a failure cannot leak the temp dir.
         let _ = std::env::set_current_dir(&old_cwd);
+
+        // .conf takes precedence over .ini when both exist.
+        assert_eq!(found.as_ref(), Some(&cwd_conf));
     }
 
     #[test]
