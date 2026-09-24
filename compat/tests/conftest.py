@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -66,6 +67,24 @@ RCTL_BIN = Path(
     os.environ.get("RSUPERVISORCTL_BIN")
     or REPO_ROOT / "target" / PROFILE / "supervisorctl"
 )
+
+
+def _expected_supervisor_version() -> str:
+    """Daemon version expected from ``getSupervisorVersion`` / ``ctl version``.
+
+    The python target reports its own stock version; the compiled target
+    reports ``CARGO_PKG_VERSION`` (compat/docs/XMLRPC_COMPAT.md: "not 4.2.5").
+    """
+    if TARGET == "python":
+        return "4.2.5"
+    cargo = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.M)
+    if not m:
+        raise RuntimeError("cannot read package version from Cargo.toml")
+    return m.group(1)
+
+
+EXPECTED_SUPERVISOR_VERSION = _expected_supervisor_version()
 
 # [unix_http_server]/[inet_http_server] credentials for the python target.
 CTL_USER, CTL_PASS = "ctluser", "ctlpass"

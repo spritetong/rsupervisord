@@ -11,6 +11,8 @@ import time
 
 import pytest
 
+from conftest import EXPECTED_SUPERVISOR_VERSION
+
 pytestmark = pytest.mark.oracle
 
 
@@ -26,7 +28,7 @@ def _out(result) -> str:
 def test_cli_version(instance):
     res = instance.ctl("version")
     assert res.returncode == 0
-    assert "4.2.5" in _out(res)
+    assert EXPECTED_SUPERVISOR_VERSION in _out(res)
 
 
 def test_cli_pid(instance):

@@ -11,7 +11,7 @@ from xmlrpc.client import Fault
 
 import pytest
 
-from conftest import TARGET
+from conftest import EXPECTED_SUPERVISOR_VERSION, TARGET
 
 pytestmark = pytest.mark.oracle
 
@@ -67,7 +67,7 @@ def test_get_version_alias(rpc):
 
 
 def test_get_supervisor_version(rpc):
-    assert rpc.supervisor.getSupervisorVersion() == "4.2.5"
+    assert rpc.supervisor.getSupervisorVersion() == EXPECTED_SUPERVISOR_VERSION
 
 
 def test_get_identification(rpc):
