@@ -2,7 +2,9 @@
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.0.0** | Draft / For Review | Rust (Edition 2024) | Log destination model (file / syslog / memory / composite), `[supervisord]` + `[program:x]` log keys, go-supervisord full parity + Python config-style parity, OI-7 / OI-10 requirements |
+| **v1.1.0** | **Implemented (P0 + P1); P2 partial** | Rust (Edition 2024) | Log destination model (file / syslog / memory / composite), `[supervisord]` + `[program:x]` log keys, go-supervisord full parity + Python config-style parity, OI-7 / OI-10 requirements |
+
+> **Implementation status** (commits `e3cc3f6`…`dd45115`): P0 and P1 are implemented and tested (`tests/logging_tests.rs`, `tests/ini_tests.rs`). Open: main-log `logfile=syslog` only warns (daemon tracing layer has no syslog sink — §6.6), Python debug child mirror (§6.3 recipe 2) not implemented, `childlogdir` deferred. §9 checklist reflects actual state.
 
 ---
 
@@ -16,8 +18,8 @@ Question answered: **which log destinations and config keys must rsupervisord su
 | :--- | :--- |
 | Authoritative config contract (keys + defaults) | Python Supervisor **4.2.5** (`options.py`, `datatypes.py`, `dispatchers.py`, `loggers.py`, `skel/sample.conf`) |
 | Reference implementation (destination dispatch, syslog address grammar, multi-file) | Go `ochinchina/supervisord` `logger/log.go` + `logger/log_unix.go` + `process/process.go` (commit `7a73369`) |
-| Current-state baseline | `src/config/schema.rs` (`LoggingConfig`, `ProgramLogsConfig*`), `src/logging/{rotator,ring_buffer,pump}.rs`, `src/daemon.rs` (`init_tracing`), `src/compat/ini/adapter.rs` |
-| Related | `INI_COMPAT.md` §4.3/§4.4 + §8 OI-7/OI-10; `XMLRPC_COMPAT.md` `getProcessInfo` / `readLog` / `tailLog` / `clearLog` |
+| Current-state baseline | `src/logging/{destination,composite,backend,rotator,in_memory_rotator,pump,reader}.rs`, `src/logging/syslog/{backend,encoder}.rs`, `src/config/schema.rs`, `src/program/{config,process}.rs`, `src/daemon.rs` (`init_tracing`), `src/compat/ini/adapter.rs` |
+| Related | `INI_COMPAT.md` §4.3/§4.4 + §8 OI-7/OI-10; `docs/LOGGING_DESIGN.md` (internal design, v1.1.0) |
 
 **Non-goals (explicit)**
 
@@ -70,16 +72,16 @@ Accepted values for **`[supervisord] logfile`** and **`[program:x] stdout_logfil
 
 | Value | Sink | Python | go | Ours |
 | :--- | :--- | :--- | :--- | :--- |
-| absolute / relative path (after macros + `~`) | `FileSink` | ✅ | ✅ | ✅ (exists) |
-| `AUTO` / `auto` (program only) | **memory** ring (go) **or** temp file in `childlogdir` (Python) | temp file | memory **1000** | **memory (go parity)** — see §5.1 |
+| absolute / relative path (after macros + `~`) | `FileSink` | ✅ | ✅ | ✅ |
+| `AUTO` / `auto` (program only) | INI `AUTO`→default file path; literal `auto`→ring-only | temp file | memory **1000** | ✅ — see §6.1 |
 | `NONE` / `none` / `off` / empty | `NullSink` | ✅ | ✅ (empty→Null) | ✅ |
 | `/dev/null` / `null` | `NullSink` | ✅ | ✅ | ✅ |
-| `/dev/stdout` | `StdIoSink::Stdout` | non-seekable path | ✅ explicit | **new** |
-| `/dev/stderr` | `StdIoSink::Stderr` | non-seekable path | ✅ explicit | **new** |
-| `syslog` | `SyslogSink::Local` | main only (`logfile=syslog`) | ✅ both | **new** (OI-7) |
-| `syslog@[proto:]host[:port]` | `SyslogSink::Remote` | ❌ | ✅ | **new** |
-| `memory` (program only) | `MemorySink` (explicit) | ❌ | ✅ | **new** |
-| `path1, path2, …` | `CompositeSink` | ❌ | ✅ | **new** |
+| `/dev/stdout` | `StdIoSink::Stdout` | non-seekable path | ✅ explicit | ✅ |
+| `/dev/stderr` | `StdIoSink::Stderr` | non-seekable path | ✅ explicit | ✅ |
+| `syslog` | `SyslogSink::Local` | main only (`logfile=syslog`) | ✅ both | ✅ program; main warn-only (§6.6) |
+| `syslog@[proto:]host[:port]` | `SyslogSink::Remote` | ❌ | ✅ | ✅ |
+| `memory` (program only) | `MemorySink` (explicit) | ❌ | ✅ | ✅ |
+| `path1, path2, …` | `CompositeSink` | ❌ | ✅ | ✅ |
 
 **Address grammar (`syslog@…`)** — go `parseSysLogConfig` (`log_unix.go`):
 
@@ -105,14 +107,14 @@ Accepted values for **`[supervisord] logfile`** and **`[program:x] stdout_logfil
 
 | INI Key | Target | Default | Status / Action | Priority |
 | :--- | :--- | :--- | :--- | :--- |
-| `logfile` | `logging.file` + destination parse | `$CWD/supervisord.log` (ours: platform default path) | Extend parser: path \| `syslog` \| `syslog@…` \| `/dev/stdout` \| `/dev/null` \| comma-list. Special: `logfile=/dev/stdout` → no file rotator (go early-return). | P0/P1 |
+| `logfile` | `logging.file` + destination parse | `$CWD/supervisord.log` (ours: platform default path) | Implemented: path \| `syslog` \| `syslog@…` \| `/dev/stdout` \| `/dev/null` \| comma-list (§6.5: main syslog is warn-only today). | ✅ |
 | `logfile_maxbytes` | `logging.max_bytes` | 50MB | exists; `0` = never rotate (required when sharing path / `/dev/stdout`) | ✅ |
 | `logfile_backups` | `logging.backups` | 10 | exists | ✅ |
-| `logfile_timestamp_suffix` | `logging.timestamp_suffix: bool` | **true** (go) | **new** — see §6.2 | P1 |
-| `loglevel` | `logging.level` | info | exists; also gates **debug child mirror** (§6.4) | ✅ (+ P2 mirror) |
+| `logfile_timestamp_suffix` | `logging.timestamp_suffix: bool` | **false** (Python numeric parity; go defaults true) | implemented — see §6.2 | ✅ |
+| `loglevel` | `logging.level` | info | exists; also gates **debug child mirror** (§6.3, **not implemented**) | ✅ (+ P2 mirror) |
 | `silent` | `logging.silent` | false | done (OI-4) | ✅ |
 | `nodaemon` / `pidfile` / `minfds` / `minprocs` / `environment` / `identifier` | outside pure-log surface | — | done (OI-6/OI-8) | ✅ |
-| `childlogdir` | `logging.child_log_dir` | tempdir (Python) | only required if Python `AUTO`→file mode is ever enabled; **deferred** (we ship go `AUTO`→memory) | P2 |
+| `childlogdir` | `logging.child_log_dir` | tempdir (Python) | only required if Python `AUTO`→file mode is ever enabled; **deferred** (accepted-ignored by INI allowlist) | P2 |
 | `nocleanup` / `strip_ansi` / `umask` / `directory` | — | — | Not Supported / separate OI | — |
 
 **YAML native shape** (additive; existing keys unchanged):
@@ -123,7 +125,7 @@ logging:
   file: /var/log/supervisord.log   # or "syslog" / "syslog@udp:logs:514"
   max_bytes: 50MB
   backups: 10
-  timestamp_suffix: true           # new, default true
+  timestamp_suffix: false          # default false (numeric .1/.2)
   level: info
   silent: false
 ```
@@ -132,17 +134,17 @@ logging:
 
 | INI Key | Target | Default | Status / Action | Priority |
 | :--- | :--- | :--- | :--- | :--- |
-| `stdout_logfile` | `logs.stdout` | `AUTO` | exists (AUTO→default path today) → **redefine AUTO→memory** per §5.1/go | P0 |
-| `stderr_logfile` | `logs.stderr` | `AUTO` | same | P0 |
-| `stdout_logfile_maxbytes` | `logs.stdout_max_bytes` | 50MB | **OI-10**: independent; fallback to shared `logs.max_bytes` | P0 |
-| `stderr_logfile_maxbytes` | `logs.stderr_max_bytes` | 50MB | **OI-10** | P0 |
-| `stdout_logfile_backups` | `logs.stdout_backups` | 10 | **OI-10** | P0 |
-| `stderr_logfile_backups` | `logs.stderr_backups` | 10 | **OI-10** | P0 |
-| `stdout_logfile_timestamp_suffix` | `logs.stdout_timestamp_suffix` | true | **new** (go) | P1 |
-| `stderr_logfile_timestamp_suffix` | `logs.stderr_timestamp_suffix` | true | **new** (go) | P1 |
+| `stdout_logfile` | `logs.stdout` | `AUTO` | implemented — see §6.1 for actual AUTO resolution | ✅ |
+| `stderr_logfile` | `logs.stderr` | `AUTO` | same | ✅ |
+| `stdout_logfile_maxbytes` | `logs.stdout_max_bytes` | 50MB | **OI-10 done**: independent; fallback to shared `logs.max_bytes` | ✅ |
+| `stderr_logfile_maxbytes` | `logs.stderr_max_bytes` | 50MB | **OI-10 done** | ✅ |
+| `stdout_logfile_backups` | `logs.stdout_backups` | 10 | **OI-10 done** | ✅ |
+| `stderr_logfile_backups` | `logs.stderr_backups` | 10 | **OI-10 done** | ✅ |
+| `stdout_logfile_timestamp_suffix` | `logs.stdout_timestamp_suffix` | false | implemented (go key; default false for Python parity) | ✅ |
+| `stderr_logfile_timestamp_suffix` | `logs.stderr_timestamp_suffix` | false | same | ✅ |
 | `redirect_stderr` | `logs.redirect_stderr` | false | exists; stderr sink := stdout sink | ✅ |
-| `stdout_syslog` | `logs.stdout_syslog: bool` | false | **Python way**: also mirror this stream to syslog (tag = program name). Coexists with file sink → implement as implicit `CompositeSink(file, syslog)` when true. | P0 (Python) |
-| `stderr_syslog` | `logs.stderr_syslog: bool` | false | same | P0 (Python) |
+| `stdout_syslog` | `logs.stdout_syslog: bool` | false | **Python way implemented**: implicit `Composite(file-or-null, syslog)`; deduped when destination already contains syslog; Windows = config error | ✅ |
+| `stderr_syslog` | `logs.stderr_syslog: bool` | false | same (incl. shared-backend `redirect_stderr` case) | ✅ |
 | `stdout_events_enabled` / `stderr_events_enabled` | existing | false | exists | ✅ |
 | `stdout_capture_maxbytes` / `stderr_capture_maxbytes` | — | 0 | Not Supported (XML-RPC still reports 0) | — |
 | `serverurl` | — | — | Not Supported | — |
@@ -156,24 +158,29 @@ logs:
   stderr: none
   max_bytes: 50MB              # shared fallback (backward compat)
   backups: 10                  # shared fallback
-  stdout_max_bytes: 10MB       # optional override
+  stdout_max_bytes: 10MB       # stream-specific override
   stderr_max_bytes: 50MB
   stdout_backups: 5
   stderr_backups: 10
-  stdout_timestamp_suffix: true
-  stderr_timestamp_suffix: true
+  stdout_timestamp_suffix: false
+  stderr_timestamp_suffix: false
   redirect_stderr: false
   stdout_syslog: false         # Python-style fan-out flag
   stderr_syslog: false
   stdout_events_enabled: false
   stderr_events_enabled: false
+  # go syslog extensions:
+  syslog_facility: local0
+  syslog_tag: myapp
+  syslog_stdout_priority: notice
+  syslog_stderr_priority: err
 ```
 
-Resolution order (per stream): stream-specific field → shared `max_bytes`/`backups` → `DEFAULT_LOG_MAX_BYTES` / `DEFAULT_LOG_BACKUPS`.
+Resolution order (per stream): stream-specific field → shared `max_bytes`/`backups` → `DEFAULT_LOG_MAX_BYTES` / `DEFAULT_LOG_BACKUPS`. Effective values reported over XML-RPC (`effective_stdout_max_bytes` etc.).
 
-**`redirect_stderr=true`**: ignore explicit `stderr_logfile` (Python warns; we warn + ignore), force stderr → stdout sink (go assignment).
+**`redirect_stderr=true`**: Python forces `stderr_logfile=None`; we share the stdout backend (go assignment) — equivalent visible behavior.
 
-**Deprecated form**: `stdout_logfile=syslog` (value) is accepted (go path). Python rewrites it to `NULL` + `stdout_syslog=true` — **equivalent outcome under Composite model**: treat value `syslog` as syslog-only sink (Null file + syslog). Do **not** double-log.
+**Deprecated form**: `stdout_logfile=syslog` (value) is accepted (go path) as syslog-only sink; `stdout_syslog=true` adds syslog to an existing file sink (Python). No double-log when both express syslog.
 
 ### 5.3 go syslog extension keys (program section)
 
@@ -203,26 +210,22 @@ Not Supported (same as INI_COMPAT §4.10).
 
 ## 6. Behavioral Requirements
 
-### 6.1 `AUTO` semantics (decision)
+### 6.1 `AUTO` semantics (as implemented)
 
-| Mode | Behavior |
+| Path | Behavior |
 | :--- | :--- |
-| **Chosen: go parity** | `stdout_logfile=AUTO` / unset → `MemorySink(1000)` (or configurable `DEFAULT_LOG_MEMORY_LINES`). Readable via `readProcessStdoutLog` / `tailProcessStdoutLog` / ring. No file on disk; no `childlogdir`; no `nocleanup`. |
-| Rejected for now: Python | Temp file `{name}-{channel}---{identifier}-XXXX.log` in `childlogdir`, deleted on restart unless `nocleanup`. |
+| INI `stdout_logfile=AUTO` / empty (`parse_log_path`) | → `None` → schema resolves **default per-program file path** when `logs.enabled` (rsupervisord default path, e.g. `/var/log/<cmd>/<prog>.log`). File backend with normal rotation. |
+| Literal `auto` / `memory` reaching runtime (e.g. YAML `stdout: auto`) | → `LogDestination::Auto` → **no disk backend**; lines flow only to the per-program `RingBuffer` (tail/`-f`/web). Go-parity intent: 0 disk writes. |
+| `InMemoryLogRotator` (generational memory ring) | Implemented + unit-tested (`src/logging/in_memory_rotator.rs`), **not yet wired** as the `Auto` backend; `docs/LOGGING_DESIGN.md` §286 describes the intended wiring. |
+| Python temp-file mode (`childlogdir` + `nocleanup`) | Not Supported (deferred, §5.1). |
 
-**Migration note**: current rsupervisord treats AUTO/unset as “default per-program path”. Changing to memory is a **behavior break** for YAML configs that relied on the default path. Mitigation options (pick at implementation):
-
-1. INI frontend only: AUTO→memory; YAML `stdout: null`/`auto` string still file (asymmetric — reject).
-2. Global: AUTO/unset → memory; YAML users must set explicit path (clean, go-aligned).
-3. Global: keep file default; only literal `AUTO` (case-sensitive) → memory (partial go).
-
-**Recommendation: (2)** — one rule, matches go, document in INI_COMPAT §5. Explicit path always means file.
+**Divergence note**: go maps `AUTO` → `MemoryLogger(1000)` always; we split INI (default file path — backward compatible with rsupervisord’s historic behavior) vs literal `auto`/`memory` (ring only). Full go parity for INI `AUTO` = wire `InMemoryLogRotator` into `LogDestination::Auto` + make INI `AUTO` parse to it — **open**, low priority because ring buffer already covers read/tail.
 
 ### 6.2 Rotation naming
 
 | Mode | Trigger key | Filenames |
 | :--- | :--- | :--- |
-| Numeric (Python / classic) | `*_timestamp_suffix=false` | `app.log` → `app.log.1` … `.N` (N = backups) |
+| Numeric (Python / classic) | `*_timestamp_suffix=false` — **our default** | `app.log` → `app.log.1` … `.N` (N = backups) |
 | Timestamp (go default) | `*_timestamp_suffix=true` | `app.log.2006-01-02T15-04-05`; prune oldest beyond backups |
 
 - `backups <= 0` with timestamp mode → no file (go).
@@ -233,43 +236,49 @@ Implementation: extend `LogRotator` / wrap `file_rotate` suffix strategy, or ado
 
 ### 6.3 Shared main log (“all programs + main in one file”)
 
-No dedicated mode (matches all three upstreams). Support the two documented recipes:
+No dedicated mode (matches all three upstreams). Two documented recipes:
 
-1. **Same path, rotation off**: every program `stdout_logfile=<shared>` + `*_logfile_maxbytes=0`, main `logfile=<shared>` + `logfile_maxbytes=0`. Appends interleave; **warn at startup if >1 stream targets same path with rotation enabled** (Python warns conceptually; we enforce warn not error).
-2. **Python debug mirror**: when effective `loglevel ≤ debug`, each child stdout/stderr line is **also** written to the **main log sink** at debug level with Python format:
+1. **Same path, rotation off** ✅: every program `stdout_logfile=<shared>` + `*_logfile_maxbytes=0`, main `logfile=<shared>` + `logfile_maxbytes=0`. Appends interleave; **startup warn when >1 stream targets the same rotating file with `max_bytes > 0`** (schema Phase 4 validation — implemented).
+2. **Python debug mirror** ❌ **open (P2)**: when effective `loglevel ≤ debug`, each child stdout/stderr line is **also** written to the **main log sink** at debug level with Python format:
    ```text
    '{process_name}' {stdout|stderr} output:\n{line}
    ```
-   - Applies to file **and** syslog main sinks.
+   - Would apply to file **and** syslog main sinks.
    - Controlled solely by `loglevel` (no extra key), matching Python `dispatchers.py`.
-   - go does **not** implement this — still required for Python config parity.
+   - go does **not** implement this — required only for Python config parity.
 
 `redirect_stderr` remains “within one program only”, never “into main log”.
 
 ### 6.4 `logfile=/dev/stdout` (main)
 
-- No file layer; tracing console layer remains (unless `silent`).
+- Implemented: no file layer; tracing console layer remains (unless `silent`); destination resolves to the daemon stdout writer.
 - Matches go early-return + Python non-seekable requirement (`logfile_maxbytes` should be 0; warn if non-zero).
 
 ### 6.5 Program → daemon stdout
 
-`stdout_logfile=/dev/stdout` writes child bytes to the **daemon process stdout** (StdioSink). In daemonized mode the OS fd may already point at `logfile` (platform daemonize concern, not log-sink concern).
+`stdout_logfile=/dev/stdout` writes child bytes to the **daemon process stdout** (StdIoLogBackend). In daemonized mode the OS fd may already point at `logfile` (platform daemonize concern, not log-sink concern).
+
+### 6.6 Main log syslog (open gap)
+
+`logfile=syslog` / `syslog@…` **passes config validation** (non-Windows) but `init_tracing` currently warns `"…not supported for the daemon file layer; console logging only"` and falls back to console — the `tracing` subscriber has no syslog writer yet. Program-level syslog is fully implemented; **daemon activity log → syslog is the one remaining P1 item**. `supervisorctl maintail`/`readMainLog` read the file path, so they also see nothing when `logfile=syslog`.
 
 ---
 
 ## 7. Syslog Design (OI-7)
 
-### 7.1 Components
+### 7.1 Components (as implemented)
 
 ```text
-src/logging/syslog.rs          // pure encoder + connection (Unix)
-src/logging/sink.rs            // LogSink enum + dispatch
-// Windows: cfg(unix) real; cfg(windows) returns Err(ConfigError)
+src/logging/destination.rs          // LogDestination grammar + build_backend()
+src/logging/syslog/backend.rs       // SyslogLogBackend (UDS/UDP/TCP, async)
+src/logging/syslog/encoder.rs       // RFC 3164 encoder
+src/logging/composite.rs            // CompositeLogBackend / Null / StdIo
+// Windows: SyslogLogBackend::new → Err(ConfigError); schema validates fail-loud
 ```
 
-- Local: connect unix datagram/stream to `/dev/log`, `/var/run/syslog`, `/var/run/log` (probe order); fallback: ignore + warn (Python `syslog.syslog()` uses libc; go `log/syslog.New` similar).
-- Remote: `UdpSocket` / `TcpStream` to parsed address; **async write from pump** must not block forever — use try-write with timeout or dedicated writer task + bounded channel (go uses background goroutine + re-dial).
-- Facility/severity enums: mirror go tables; accept optional `LOG_` prefix; case-insensitive.
+- Local: unix datagram to `/dev/log`-style sockets (probe); unreachable → warn once, drop (never blocks pumps).
+- Remote: UDP socket / TCP with dedicated writer task + bounded channel (auto-reconnect; full channel → warn + drop).
+- Facility/severity enums mirror go tables; optional `LOG_` prefix, case-insensitive; invalid values are config errors (schema validation).
 
 ### 7.2 Message shape
 
@@ -304,63 +313,53 @@ src/logging/sink.rs            // LogSink enum + dispatch
 
 ---
 
-## 8. Schema / Adapter / Runtime Touchpoints
+## 8. Schema / Adapter / Runtime Touchpoints (shipped reference)
 
-| Layer | Change |
+| Layer | Shipped change |
 | :--- | :--- |
-| `LoggingConfig` | + `timestamp_suffix: bool` (default true); `file` may hold non-path sentinel — prefer parallel `destination: Option<LogDestination>` parsed once, keep `file: Option<PathBuf>` for pure paths (XML-RPC / path probing). |
-| `ProgramLogsConfigRaw` / resolved | + `stdout_max_bytes`, `stderr_max_bytes`, `stdout_backups`, `stderr_backups`, `stdout_timestamp_suffix`, `stderr_timestamp_suffix`, `stdout_syslog`, `stderr_syslog`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`; `stdout`/`stderr` become destination strings pre-resolve → `LogDestination`. |
-| `ProgramLogsConfig` (resolved) | + same stream-specific fields; helpers `stdout_sink()` / `stderr_sink()` build `LogSink` tree. |
-| INI adapter | Parse OI-10 keys (stop first-wins); parse syslog keys; remove `stdout_syslog`/`stderr_syslog` from “ignored allowlist” into real consumers; parse `logfile_timestamp_suffix`. |
-| INI allowlist | Add go keys: `stdout_logfile_timestamp_suffix`, `stderr_logfile_timestamp_suffix`, `logfile_timestamp_suffix`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`. |
-| `init_tracing` | Main `LogSink`: file \| syslog \| stdout fan-out; console layer rules unchanged (`silent`). |
-| `LogPump` | Optional secondary sinks (syslog/stdio/composite) after rotator write; memory sink replaces file rotator when AUTO. |
-| `LogRotator` | Timestamp suffix mode + per-stream max/backups (already parameterized — wire distinct instances). |
-| XML-RPC `getProcessInfo` | Report real `stdout_syslog`/`stderr_syslog`/`stdout_logfile_maxbytes`/`…backups` (stop hardcoding `false`/`0`). |
-| XML-RPC `readLog`/`tailLog`/`clearLog` | Memory sink: read from `RingBuffer` (capacity ≥ go 1000 when AUTO); syslog sink: `NO_FILE` fault. |
-| Docs | This file is source of truth; update `INI_COMPAT.md` §4.3/§4.4 cells + §8 OI-7/OI-10 → done when shipped. |
+| `LoggingConfig` | + `timestamp_suffix: bool` (**default false**); main `file` may hold destination sentinels (parsed in `init_tracing` via `LogDestination::parse`). |
+| `ProgramLogsConfigRaw` / resolved | + `stdout_max_bytes`, `stderr_max_bytes`, `stdout_backups`, `stderr_backups`, `stdout_timestamp_suffix`, `stderr_timestamp_suffix`, `stdout_syslog`, `stderr_syslog`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`. |
+| `ProgramLogsConfig` (resolved) | helpers `effective_stdout_max_bytes()` / `effective_stderr_*` (stream-specific → shared fallback → default). |
+| INI adapter | Table-driven `map_field!` for OI-10 + syslog + timestamp keys (no first-wins); `stdout_syslog`/`stderr_syslog` removed from ignored allowlist. |
+| `init_tracing` | Resolves `logfile` through `LogDestination::parse`; file/stdio/composite-primary wired; syslog → warn + console-only (§6.6); `silent` unchanged. |
+| `LogPump` | Generic `LogBackend` (File/Syslog/StdIo/Composite) after ring push; syslog flag attach via `attach_syslog_backend` (dedupe). |
+| `LogRotator` | `with_options(path, max_bytes, backups, timestamp_suffix)`; per-stream instances. |
+| XML-RPC `getProcessInfo` | Reports `effective_*` + real `stdout_syslog`/`stderr_syslog`. |
+| Config validation | Fail-loud: invalid destination, invalid facility/priority, syslog-on-Windows, shared rotating file multi-writer warn. |
+| Docs | This file + `docs/LOGGING_DESIGN.md` v1.1.0; `INI_COMPAT.md` §4.3/§4.4 + §8 OI-7/OI-10 → done. |
 
 ---
 
-## 9. Implementation Checklist
+## 9. Implementation Checklist (actual state)
 
 ### P0 — destination model + Python keys + OI-10
 
-1. [ ] `LogDestination` parse (path / NONE / AUTO / memory / syslog / syslog@ / /dev/stdout|stderr|null / comma) shared by main + program.
-2. [ ] OI-10: four stream-specific fields + resolution fallback; adapter reads `stdout_*` / `stderr_*` separately (no first-wins).
-3. [ ] `stdout_syslog` / `stderr_syslog` bool → Composite(file-or-null, syslog).
-4. [ ] Local syslog sink (Unix) + RFC 3164 encoder; Windows hard-error.
-5. [ ] AUTO → `MemorySink`; wire XML-RPC read/tail/clear to ring for AUTO programs.
-6. [ ] Startup warn: multiple writers, same file, rotation enabled.
+1. [x] `LogDestination` parse (path / NONE / AUTO / memory / syslog / syslog@ / /dev/stdout|stderr|null / comma) shared by main + program.
+2. [x] OI-10: four stream-specific fields + resolution fallback; adapter reads `stdout_*` / `stderr_*` separately (no first-wins).
+3. [x] `stdout_syslog` / `stderr_syslog` bool → Composite(file-or-null, syslog); no double-log.
+4. [x] Local syslog sink (Unix) + RFC 3164 encoder; Windows hard-error (schema + backend).
+5. [x] AUTO destination → ring-only path (no disk); `InMemoryLogRotator` built + unit-tested — **wiring as Auto backend still open** (§6.1).
+6. [x] Startup warn: multiple writers, same rotating file (schema Phase 4).
 
 ### P1 — go full parity
 
-7. [ ] Remote `syslog@udp|tcp:host[:port]` + async writer.
-8. [ ] `syslog_facility` / `syslog_tag` / `syslog_{stdout,stderr}_priority`.
-9. [ ] `logfile_timestamp_suffix` + per-stream timestamp suffix (default true).
-10. [ ] `/dev/stdout` / `/dev/stderr` program destinations.
-11. [ ] Comma `CompositeSink` (first-token lock/events).
-12. [ ] Main `logfile=syslog` / `syslog@…` / `/dev/stdout`.
-13. [ ] XML-RPC snapshot fields for syslog/backups/maxbytes truth.
+7. [x] Remote `syslog@udp|tcp:host[:port]` + async writer (UDP socket; TCP writer task + re-dial).
+8. [x] `syslog_facility` / `syslog_tag` / `syslog_{stdout,stderr}_priority`.
+9. [x] `logfile_timestamp_suffix` + per-stream timestamp suffix (**default false** — Python parity; go defaults true).
+10. [x] `/dev/stdout` / `/dev/stderr` program destinations (+ daemon `logfile=/dev/stdout`).
+11. [x] Comma `CompositeSink` (first = primary reader).
+12. [ ] **Main `logfile=syslog` / `syslog@…`** — validation ✅ but tracing layer has no syslog writer (§6.6, **open**).
+13. [x] XML-RPC snapshot fields for syslog/backups/maxbytes truth.
 
 ### P2 — Python polish
 
-14. [ ] Debug-level child mirror into main sink (`loglevel≤debug`).
-15. [ ] Optional: `childlogdir` + Python AUTO-tempfile mode behind explicit value (only if users demand; not default).
-16. [ ] `supervisorctl maintail` → main-log tail (thin over `readLog`).
+14. [ ] Debug-level child mirror into main sink (`loglevel≤debug`) — **open** (§6.3 recipe 2).
+15. [ ] Optional: `childlogdir` + Python AUTO-tempfile mode — **deferred** (only if users demand).
+16. [x] `supervisorctl maintail` → main-log tail (CLI `handle_maintail`).
 
-### Not Supported
+### Not Supported (confirmed unchanged)
 
-17. [ ] capture_maxbytes, strip_ansi, serverurl, fcgi logs — unchanged.
-
-### Suggested landing order
-
-| Step | Contents | Rationale |
-| :--- | :--- | :--- |
-| 1 | §9 P0 items 1–2 (model + OI-10) | Unblocks everything else; pure schema/adapter/rotator |
-| 2 | P0 3–5 (syslog local + AUTO memory + XML-RPC) | User-visible feature complete for “file + syslog + mem” |
-| 3 | P1 7–13 | go parity |
-| 4 | P2 14–16 | Python polish |
+17. [x] capture_maxbytes, strip_ansi, serverurl, fcgi logs — unchanged.
 
 ---
 
@@ -372,16 +371,16 @@ src/logging/sink.rs            // LogSink enum + dispatch
 | T2 | `stdout_logfile=syslog` (Unix CI) | no file; local syslog write; XML-RPC `stdout_syslog` report consistent |
 | T3 | `stdout_syslog=true` + `stdout_logfile=/tmp/a.log` | file **and** syslog both receive lines |
 | T4 | `syslog@udp:127.0.0.1:1514` | datagram received by test listener; bad proto → config error |
-| T5 | `stdout_logfile=AUTO` | no file; `readProcessStdoutLog` returns lines; capacity ≥ 1000 |
+| T5 | literal `stdout: auto` / `memory` | no file; lines readable via ring/tail |
 | T6 | `stdout_logfile=/dev/stdout` | child bytes on daemon stdout |
 | T7 | `stdout_logfile=a.log,b.log` | both files grow; clear/read use first |
-| T8 | `logfile_timestamp_suffix=false` | rotated names `.1` `.2` (Python shape) |
+| T8 | `logfile_timestamp_suffix=false` (default) | rotated names `.1` `.2` (Python shape) |
 | T9 | `logfile_timestamp_suffix=true` | timestamp names; prune at backups |
 | T10 | same path, `maxbytes=0` ×2 streams | appends OK; no rotate |
-| T11 | same path, `maxbytes=50MB` ×2 | startup **warn** |
-| T12 | `loglevel=debug` + child output | main log contains `'{name}' stdout output:\n…` |
-| T13 | Windows + any syslog | config error (or agreed degrade) |
-| T14 | `redirect_stderr=true` + explicit `stderr_logfile` | stderr → stdout sink; stderr path warn-ignored |
+| T11 | same path, `maxbytes>0` ×2 | startup **warn** |
+| T12 | `loglevel=debug` + child output | main log contains `'{name}' stdout output:\n…` — **spec only, not implemented (§6.3)** |
+| T13 | Windows + any syslog | config error (implemented) |
+| T14 | `redirect_stderr=true` + explicit `stderr_logfile` | stderr → stdout sink (shared backend) |
 | T15 | YAML regression: existing `logs.max_bytes` only | still applies to both streams (fallback) |
 
 Unit: `tests/log_tests.rs` (new) + extend `tests/ini_tests.rs` for key parsing. Integration: local UDP syslog listener on ephemeral port.
@@ -392,15 +391,16 @@ Unit: `tests/log_tests.rs` (new) + extend `tests/ini_tests.rs` for key parsing. 
 
 | Topic | Python | go | **Ours** |
 | :--- | :--- | :--- | :--- |
-| `AUTO` | temp file in `childlogdir` | memory ring 1000 | **memory (go)** |
-| `logfile_timestamp_suffix` | always numeric | default **true** | default **true**; `false` → Python numeric |
+| `AUTO` | temp file in `childlogdir` | memory ring 1000 | **INI → default file path; literal `auto`/`memory` → ring-only (§6.1)** |
+| `logfile_timestamp_suffix` | always numeric | default **true** | **default false** (Python numeric); `true` → go timestamp mode |
 | `stdout_syslog` bool | yes | no (value-only) | **yes (both)** |
 | `syslog@remote` | no | yes | yes |
 | `syslog_facility/tag/priority` | no | yes | yes (program only) |
-| debug child mirror | yes | no | **yes (Python)** |
+| debug child mirror | yes | no | **spec only — not implemented (§6.3)** |
+| main `logfile=syslog` | yes | yes | **warn + console only (§6.6, open)** |
 | Windows syslog | works (libc) | stub no-op | **config error** |
 | shared file + rotation on | corrupt (docs warn) | not special-cased | **startup warn** |
-| `maintail` | yes | no | P2 thin wrapper |
+| `maintail` | yes | no | yes (CLI) |
 | comma multi-destination | no | yes | yes |
 
 ---

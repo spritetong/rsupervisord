@@ -2,7 +2,9 @@
 
 | Document Version | Status | Target Language | Scope |
 | :--- | :--- | :--- | :--- |
-| **v1.1.0** | Draft / For Review | Rust (Edition 2024) | Section/field mapping, differences, examples, priorities, and **open issues** for Python `supervisord.conf`(INI) → rsupervisord; includes go-supervisord field audit results |
+| **v1.2.0** | **Implemented (all §8 OI done; remaining items are P2/Not Supported)** | Rust (Edition 2024) | Section/field mapping, differences, examples, priorities, and **open issues** for Python `supervisord.conf`(INI) → rsupervisord; includes go-supervisord field audit results |
+
+> **OI status**: OI-1…OI-11 all **done** (OI-7/OI-10 shipped with the logging stack — see `LOG_COMPAT.md`). Remaining §7 P2/Not Supported items: `umask`/`directory`/`childlogdir`, `chown`, capture keys, `[supervisorctl] prompt`/`history_file`, `[fcgi-program:x]`.
 
 ---
 
@@ -112,7 +114,7 @@ server:
 | `loglevel` | `logging.level` | direct |
 | `pidfile` | — | `pidfile` written/removed at runtime (§8 OI-8 **done**) |
 | `nodaemon` | `nodaemon` | `string_to_bool` (§8 OI-4 **done**) |
-| `silent` | — | **P2** (go also ignores) |
+| `silent` | — | implemented → `logging.silent` + console layer skip (§8 OI-4 **done**) |
 | `minfds` | — | `minfds` → Unix `setrlimit` best-effort (§8 OI-8 **done**) |
 | `minprocs` | — | `minprocs` → Unix `setrlimit` best-effort (§8 OI-8 **done**) |
 | `umask` | — | **P2** (daemon-level; go also ignores at `[supervisord]`) |
@@ -168,18 +170,19 @@ logging:
 | `user` | `user` | direct |
 | `redirect_stderr` | `logs.redirect_stderr` | direct |
 | `stdout_logfile` | `logs.stdout` | **`AUTO`/`NONE` semantics**(see §5) |
-| `stdout_logfile_maxbytes` | `logs.max_bytes` | naming; **ours uses a single value shared by stdout/stderr → SUPERVISORD #12 / §8 OI-10** |
-| `stdout_logfile_backups` | `logs.backups` | same as above |
+| `stdout_logfile_maxbytes` | `logs.stdout_max_bytes` | **independent per-stream** (shared `logs.max_bytes` fallback; §8 OI-10 **done**) |
+| `stdout_logfile_backups` | `logs.stdout_backups` | independent (OI-10 **done**) |
 | `stderr_logfile` | `logs.stderr` | `AUTO`/`NONE` |
-| `stderr_logfile_maxbytes` | `logs.max_bytes` | shared inconsistency (OI-10) |
-| `stderr_logfile_backups` | `logs.backups` | shared inconsistency (OI-10) |
+| `stderr_logfile_maxbytes` | `logs.stderr_max_bytes` | independent (OI-10 **done**) |
+| `stderr_logfile_backups` | `logs.stderr_backups` | independent (OI-10 **done**) |
 | `environment` | `environment` | **format**: `A="1",B="2"` → map (see §5) |
 | `stdout_capture_maxbytes` | — | **Not Supported**(capture mode/event) |
 | `stdout_events_enabled` | `logs.stdout_events_enabled` | **implemented** (parsed; feeds EventHub when listeners registered) |
-| `stdout_syslog` | — | **Not Supported** (go: ignored unless `syslog_facility` set → §8 OI-7) |
+| `stdout_syslog` | `logs.stdout_syslog` | **implemented** (composite file+syslog; §8 OI-7 **done**) |
 | `stderr_capture_maxbytes` | — | **Not Supported** |
 | `stderr_events_enabled` | `logs.stderr_events_enabled` | **implemented** (same as stdout) |
-| `stderr_syslog` | — | **Not Supported** (OI-7) |
+| `stderr_syslog` | `logs.stderr_syslog` | **implemented** (OI-7 **done**) |
+| `syslog_facility` / `syslog_tag` / `syslog_stdout_priority` / `syslog_stderr_priority` | `logs.syslog_*` | **implemented** (go extension keys; §8 OI-7 **done**) |
 | `serverurl` | — | **Not Supported**(childutils; go also ignores) |
 | `envFiles` | — | `env_files` loaded at spawn (§8 OI-2 **done**) |
 | `killwaitsecs` | — | `kill_wait_secs` (default 2s) (§8 OI-3 **done**) |
@@ -368,13 +371,13 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 
 11. `[supervisord]` runtime-surface fields (`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`silent`) → depends on SUPERVISORD §7 #12 — **done** §8 OI-8 (pidfile/minfds/minprocs/nodaemon/silent).
 12. `[unix_http_server]` `chown` (`chmod` implemented, see §4.1).
-13. Independent stdout/stderr `maxbytes`/`backups` (currently a single shared `logs` value) — **open** §8 OI-10.
+13. Independent stdout/stderr `maxbytes`/`backups` — **done** §8 OI-10.
 14. Daemon `[supervisord] environment` without `set_var` side effect — **done** §8 OI-6.
 
 ### Not Supported
 
 15. `[fcgi-program:x]` (complex, not present in the Go version either).
-16. `[program:x]` `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`*_syslog`/`serverurl` childutils.
+16. `[program:x]` `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`serverurl` childutils (`*_syslog` **implemented**, see §8 OI-7).
 17. `[supervisord]` `nocleanup`/`strip_ansi`.
 18. `[supervisorctl]` `prompt`/`history_file`.
 
@@ -392,18 +395,18 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 | **OI-4** | `nodaemon` only accepts Rust `bool` (`true`/`false`); `logfile_backups` parse failure is **silently dropped**; `silent` ignored | nodaemon/`logfile*` consumed properly | **implemented** (`string_to_bool` for nodaemon/silent; backups parse-or-Err; silent → `LoggingConfig.silent` + console layer skip) | Route `nodaemon` through `string_to_bool` (yes/no/1/0/on/off). Route backups through parse-or-`Err` like program backups. Accept `silent` → `logging.level=error` (or dedicated flag if schema grows) or keep P2 with warn. | **P1** → done |
 | **OI-5** | go `liveness_check_*` (8 keys: script/period/timeout/initial_delay/thresholds/actions) | fully consumed | **implemented** (mapped to `HealthCheckConfig` exec; only `restart` failure action; others warn) | Map subset onto existing `HealthCheckConfig` (exec/http/tcp): `liveness_check_script` → `exec`, period/timeout/thresholds → matching fields; `success_action`/`failure_action` — only map actions we support (`restart`); otherwise warn. Reject unknown action values. | **P2** → done |
 | **OI-6** | `[supervisord] environment` applied via `std::env::set_var` (process-global side effect at **parse** time) | only program-level env honored | **implemented** (store on config; `set_var` at daemon startup, never at parse) | Stop mutating process env during parse. Prefer: (a) keep a `daemon_environment` map on config and apply in daemon startup **before** children spawn, or (b) document that INI `[supervisord] environment` seeds process env at load (matches go’s implicit “parent env”) and gate behind explicit load path with a comment. Prefer (a) if field lands with OI-8; else (b) + test. | **P2** → done |
-| **OI-7** | go `syslog_facility`/`syslog_tag`/`syslog_{stdout,stderr}_priority` (program) | consumed (Unix logger) | **not parsed**; program `*_syslog` Not Supported | Keep **Not Supported** until a log-transport abstraction exists (file-only today). If later: parse into optional `LoggingTransport::Syslog { .. }` Unix-only; ignore with warn on Windows. | **Not Supported** (revisit with #12) |
+| **OI-7** | go `syslog_facility`/`syslog_tag`/`syslog_{stdout,stderr}_priority` (program) + Python `stdout_syslog`/`stderr_syslog` | consumed (Unix logger) | **implemented** (`logs.stdout_syslog`/`stderr_syslog` bool + four go keys; `LogDestination` syslog/composite; Windows = config error) | Log-transport abstraction landed with `LOG_COMPAT.md` (`LogDestination` + `SyslogLogBackend` + `CompositeLogBackend`): `*_syslog=true` → implicit composite(file-or-null, syslog), deduped when destination already syslog; `syslog@udp\|tcp:host[:port]` remote; RFC 3164 encoder. Main `logfile=syslog` still warn-only (LOG_COMPAT §6.6). | **P1** → done |
 | **OI-8** | go honors `pidfile` / `minfds` / `minprocs`; listed P2 under SUPERVISORD #12 but **do not parse** | implemented | **implemented** (schema + adapter + write/remove pidfile + Unix `setrlimit` best-effort) | **Bundle under SUPERVISORD #12**: add `pidfile: Option<PathBuf>`, `minfds`/`minprocs: Option<u32>` to daemon config; adapter maps INI keys; runtime: write/remove pidfile on start/shutdown; `setrlimit(RLIMIT_NOFILE/RLIMIT_NPROC)` on Unix at startup (best-effort warn on failure). Windows: pidfile only; rlimits N/A. | **P2** → done |
 | **OI-9** | go `stopasgroup`/`killasgroup` | consumed (group signals) | **implemented** (Unix group vs pid; Windows ignore; XML-RPC snapshot from config; `stop && !kill` rejected) | Add `stop_as_group`/`kill_as_group: Option<bool>` to program raw; Unix: send stop/kill to process **group** (`kill(-pgid)`) when true (spawn already `setpgid`); default false for Python parity of single-PID signal unless Python config says true. Windows: ignore + warn. Update XML-RPC `getProcessInfo` snapshot from config. | **P2** → done |
-| **OI-10** | Independent stdout/stderr `maxbytes`/`backups` (Python has separate keys; we share one `logs.max_bytes`/`logs.backups`) | separate keys conceptually | single shared field; adapter `find_map` first of stdout/stderr keys | Schema: add optional `stdout_max_bytes`/`stderr_max_bytes`/`stdout_backups`/`stderr_backups` **or** nested `logs.stdout.*`. Adapter: prefer stdout key for stdout pump, stderr for stderr (stop first-wins). Backward compat: shared `max_bytes` remains fallback. | **P2** (checklist #13) |
+| **OI-10** | Independent stdout/stderr `maxbytes`/`backups` (Python has separate keys; we shared one `logs.max_bytes`/`logs.backups`) | separate keys conceptually | **implemented** (`logs.stdout_max_bytes`/`stderr_max_bytes`/`stdout_backups`/`stderr_backups`; adapter no longer first-wins; shared `logs.max_bytes`/`backups` remain fallback; XML-RPC reports `effective_*`) | Schema: four optional stream-specific fields; adapter maps each key to its own stream; resolution order stream → shared → default. | **P2** → done |
 | **OI-11** | Unknown INI keys under known sections are silently ignored (no warn) | lex stores; getters ignore | **implemented** (`warn_unknown_keys` allowlists + program known-key list) | After section adapt, diff section key set vs known-key allowlist per section; `tracing::warn!` for leftovers (not error — go/Python both tolerate). Enable behind `log` level ≥ debug or always warn once per key. | **P2** → done |
 
 ### 8.1 Suggested landing order
 
 1. **P1 batch (OI-1, OI-4, OI-2)** — unblocks `supervisorctl -c` defaults, correct value parsing, and go-parity env files without schema surgery on daemon runtime. **Status: implemented + tested.**
-2. **P2 batch A (OI-3, OI-9, OI-10)** — process lifecycle / log rotation knobs; each is a small schema + adapter + runtime touchpoint. **OI-3/OI-9: implemented; OI-10 remains open.**
+2. **P2 batch A (OI-3, OI-9, OI-10)** — process lifecycle / log rotation knobs; each is a small schema + adapter + runtime touchpoint. **Status: implemented + tested.**
 3. **P2 batch B (OI-5, OI-6, OI-8, OI-11)** — health mapping polish, daemon env ownership, #12 runtime surface, observability of ignored keys. **Status: implemented + tested.**
-4. **Not Supported** (OI-7) — revisit only with a syslog transport design.
+4. **OI-7 (syslog)** — implemented with the logging stack (`LOG_COMPAT.md`); only main-log `logfile=syslog` remains warn-only there.
 
 ### 8.2 Explicitly out of scope (go dead keys — do not chase)
 
