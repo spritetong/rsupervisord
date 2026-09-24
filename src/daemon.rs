@@ -116,6 +116,13 @@ impl SupervisorDaemon {
             config.nodaemon = true;
         }
 
+        // Initialize tracing before any early startup logs so environment
+        // application, rlimit, and pidfile messages are not lost to the
+        // default no-op subscriber.
+        init_tracing(&args, &config);
+
+        let cmd_name = crate::config::paths::get_cmd_name();
+
         // OI-6: apply `[supervisord] environment` at daemon startup (not parse time),
         // before any children spawn so they inherit the expanded environment.
         for (k, v) in &config.environment {
@@ -144,92 +151,26 @@ impl SupervisorDaemon {
             }
         }
 
-        // OI-8: write pidfile on startup; removed on clean shutdown below.
-        let pidfile_path = config.pidfile.clone();
-        if let Some(ref pidfile) = pidfile_path {
+        // OI-8: write pidfile on startup; scopeguard removes it on any exit path.
+        let pidfile_guard = config.pidfile.clone().map(|pidfile| {
             if let Some(parent) = pidfile.parent()
                 && !parent.as_os_str().is_empty()
             {
                 let _ = std::fs::create_dir_all(parent);
             }
-            match std::fs::write(pidfile, format!("{}\n", std::process::id())) {
+            match std::fs::write(&pidfile, format!("{}\n", std::process::id())) {
                 Ok(()) => tracing::info!("Wrote pidfile {:?}", pidfile),
                 Err(e) => tracing::warn!("Failed to write pidfile {:?}: {}", pidfile, e),
             }
-        }
+            scopeguard::guard(pidfile, |path| {
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!("Failed to remove pidfile {:?}: {}", path, e);
+                }
+            })
+        });
 
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        // Check if logging is completely disabled
-        let is_logging_disabled = !config.logging.enabled
-            || args.loglevel.to_lowercase() == "off"
-            || config.logging.level.to_lowercase() == "off";
-
-        if is_logging_disabled {
-            let filter = tracing_subscriber::EnvFilter::new("off");
-            let _ = tracing_subscriber::registry().with(filter).try_init();
-        } else {
-            // Initialize logging subscriber with console and optional rotating file output
-            let log_level = if args.loglevel != "info" {
-                &args.loglevel
-            } else {
-                &config.logging.level
-            };
-
-            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-
-            // OI-4: `silent` suppresses the console layer; file layer still applies.
-            // Build the file layer inside each branch so `Layer<S>` types match
-            // the subscriber stack (filter-only vs filter+console).
-            let silent = config.logging.silent;
-            let log_file = config.logging.file.clone();
-
-            macro_rules! try_with_file {
-                ($reg:expr) => {
-                    if let Some(ref path) = log_file {
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let max_bytes = config
-                            .logging
-                            .max_bytes
-                            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-                        let file_rotator = file_rotate::FileRotate::new(
-                            path,
-                            file_rotate::suffix::AppendCount::new(config.logging.backups),
-                            file_rotate::ContentLimit::Bytes(max_bytes),
-                            file_rotate::compression::Compression::None,
-                            None,
-                        );
-                        let file_writer_arc =
-                            std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
-                        let make_writer = move || MutexWriter(file_writer_arc.clone());
-                        let file_layer = tracing_subscriber::fmt::layer()
-                            .with_ansi(false)
-                            .with_target(false)
-                            .with_writer(make_writer);
-                        let _ = $reg.with(file_layer).try_init();
-                    } else {
-                        let _ = $reg.try_init();
-                    }
-                };
-            }
-
-            if silent {
-                try_with_file!(tracing_subscriber::registry().with(filter));
-            } else {
-                let console_layer = tracing_subscriber::fmt::layer().with_target(false);
-                try_with_file!(
-                    tracing_subscriber::registry()
-                        .with(filter)
-                        .with(console_layer)
-                );
-            }
-        }
-
-        let cmd_name = crate::config::paths::get_cmd_name();
         tracing::info!(
             "Starting {} v{} (elevated: {})",
             cmd_name,
@@ -295,16 +236,83 @@ impl SupervisorDaemon {
             tracing::error!("Error shutting down manager: {}", e);
         }
 
-        // OI-8: remove pidfile on clean shutdown.
-        if let Some(ref pidfile) = pidfile_path
-            && let Err(e) = std::fs::remove_file(pidfile)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!("Failed to remove pidfile {:?}: {}", pidfile, e);
-        }
+        // `pidfile_guard` drops here and removes the pidfile (clean or error path).
+        drop(pidfile_guard);
 
         tracing::info!("{} shutdown cleanly", cmd_name);
         Ok(())
+    }
+}
+
+/// Initializes the tracing subscriber from daemon args + config (OI-4 silent/file).
+fn init_tracing(args: &DaemonArgs, config: &SupervisorConfig) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let is_logging_disabled = !config.logging.enabled
+        || args.loglevel.to_lowercase() == "off"
+        || config.logging.level.to_lowercase() == "off";
+
+    if is_logging_disabled {
+        let filter = tracing_subscriber::EnvFilter::new("off");
+        let _ = tracing_subscriber::registry().with(filter).try_init();
+        return;
+    }
+
+    let log_level = if args.loglevel != "info" {
+        &args.loglevel
+    } else {
+        &config.logging.level
+    };
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+    // OI-4: `silent` suppresses the console layer; file layer still applies.
+    // Build the file layer inside each branch so `Layer<S>` types match
+    // the subscriber stack (filter-only vs filter+console).
+    let silent = config.logging.silent;
+    let log_file = config.logging.file.clone();
+
+    macro_rules! try_with_file {
+        ($reg:expr) => {
+            if let Some(ref path) = log_file {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let max_bytes = config
+                    .logging
+                    .max_bytes
+                    .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
+                let file_rotator = file_rotate::FileRotate::new(
+                    path,
+                    file_rotate::suffix::AppendCount::new(config.logging.backups),
+                    file_rotate::ContentLimit::Bytes(max_bytes),
+                    file_rotate::compression::Compression::None,
+                    None,
+                );
+                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(file_rotator));
+                let make_writer = move || MutexWriter(file_writer_arc.clone());
+                let file_layer = tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_writer(make_writer);
+                let _ = $reg.with(file_layer).try_init();
+            } else {
+                let _ = $reg.try_init();
+            }
+        };
+    }
+
+    if silent {
+        try_with_file!(tracing_subscriber::registry().with(filter));
+    } else {
+        let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+        try_with_file!(
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(console_layer)
+        );
     }
 }
 

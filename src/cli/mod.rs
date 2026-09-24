@@ -58,8 +58,18 @@ pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates>
         .clone()
         .or_else(|| crate::config::paths::find_default_config_path(&cmd_name));
 
+    let explicit_config = args.config.is_some();
     let cfg = match cfg_path {
-        Some(ref path) => crate::config::SupervisorConfig::from_file(path).ok(),
+        Some(ref path) => match crate::config::SupervisorConfig::from_file(path) {
+            Ok(c) => Some(c),
+            Err(e) if explicit_config => {
+                // Explicit `-c` must fail hard: silent fallback would connect
+                // to the default local endpoint and issue commands against
+                // the wrong instance.
+                anyhow::bail!("Failed to load config {:?}: {}", path, e);
+            }
+            Err(_) => None,
+        },
         None => None,
     };
 

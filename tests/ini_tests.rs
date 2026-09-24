@@ -697,6 +697,85 @@ password = ctlpass
     );
 }
 
+/// Explicit `-c` pointing at an invalid config must hard-error (no silent fallback).
+#[test]
+fn test_cli_explicit_bad_config_is_hard_error() {
+    use clap::Parser;
+    use rsupervisord::cli::{CliArgs, resolve_endpoint_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("broken.conf");
+    // Invalid chmod is a hard parse error (not a missing section).
+    std::fs::write(
+        &conf_path,
+        "[unix_http_server]\nfile = /tmp/supervisor.sock\nchmod = not-an-octal\n",
+    )
+    .unwrap();
+
+    let args = CliArgs::parse_from(["supervisorctl", "-c", conf_path.to_str().unwrap(), "status"]);
+    let err = resolve_endpoint_candidates(&args)
+        .expect_err("explicit invalid -c must return Err, not fall back");
+    assert!(
+        err.to_string().contains("Failed to load config"),
+        "error must mention config load failure, got: {}",
+        err
+    );
+}
+
+/// OI-9: event listeners reject stop_as_group=true && kill_as_group=false.
+#[test]
+fn test_eventlistener_stop_kill_group_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let conf_path = dir.path().join("supervisord.conf");
+    std::fs::write(
+        &conf_path,
+        r#"
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[eventlistener:bad]
+command = /usr/bin/true
+events = PROCESS_STATE
+stopasgroup = true
+killasgroup = false
+"#,
+    )
+    .unwrap();
+
+    let config = SupervisorConfig::from_file(&conf_path).expect("INI load must succeed");
+    let err = config
+        .resolve_programs()
+        .expect_err("EL stop_as_group=true + kill_as_group=false must fail");
+    assert!(
+        err.to_string().contains("stop_as_group") && err.to_string().contains("Event listener"),
+        "error must mention event listener stop_as_group, got: {}",
+        err
+    );
+
+    // Matching flags (both true) must succeed.
+    std::fs::write(
+        &conf_path,
+        r#"
+[unix_http_server]
+file = /tmp/supervisor.sock
+
+[eventlistener:ok]
+command = /usr/bin/true
+events = PROCESS_STATE
+stopasgroup = true
+killasgroup = true
+"#,
+    )
+    .unwrap();
+    let config = SupervisorConfig::from_file(&conf_path).expect("INI load must succeed");
+    let resolved = config
+        .resolve_programs()
+        .expect("matching stop/kill group flags must resolve");
+    let el = resolved.get("ok").expect("event listener instance");
+    assert!(el.stop_as_group);
+    assert!(el.kill_as_group);
+}
+
 /// OI-2: missing env files are skipped with warn (go parity), spawn still works.
 #[test]
 fn test_ini_env_files_missing_is_skipped() {

@@ -1195,6 +1195,15 @@ impl SupervisorConfig {
                     raw.result_handler.clone(),
                 ));
 
+                let stop_as_group = raw.stop_as_group.unwrap_or(false);
+                let kill_as_group = raw.kill_as_group.unwrap_or(stop_as_group);
+                if stop_as_group && !kill_as_group {
+                    return Err(ProgramError::ConfigError(format!(
+                        "Event listener '{}' cannot set stop_as_group=true and kill_as_group=false",
+                        listener_name
+                    )));
+                }
+
                 let prog = ProgramConfig {
                     name: instance_name.clone(),
                     command,
@@ -1232,10 +1241,8 @@ impl SupervisorConfig {
                     restart_debounce_secs: DEFAULT_RESTART_DEBOUNCE,
                     env_files: raw.env_files.clone().unwrap_or_default(),
                     kill_wait_secs: DEFAULT_KILL_WAIT,
-                    stop_as_group: raw.stop_as_group.unwrap_or(false),
-                    kill_as_group: raw
-                        .kill_as_group
-                        .unwrap_or(raw.stop_as_group.unwrap_or(false)),
+                    stop_as_group,
+                    kill_as_group,
                     event_listener,
                 };
 
