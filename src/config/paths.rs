@@ -191,8 +191,7 @@ impl<'a> PathResolver<'a> {
 /// (or an explicit path override). Replaces trailing "ctl" (case-insensitive)
 /// with "d".
 pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
-    let explicit = argv0.map(Path::new).map(Path::to_path_buf);
-    let path = match explicit {
+    let path = match argv0.map(Path::new) {
         Some(p) => p,
         None => exe_path(),
     };
@@ -269,13 +268,14 @@ pub fn get_user_config_dir() -> Option<PathBuf> {
 }
 
 /// Returns the directory containing the executable binary.
-pub fn get_executable_dir() -> PathBuf {
+pub fn get_executable_dir() -> &'static Path {
     if let Some(parent) = exe_path().parent()
         && !parent.as_os_str().is_empty()
     {
-        return parent.to_path_buf();
+        parent
+    } else {
+        Path::new(".")
     }
-    PathBuf::from(".")
 }
 
 /// Returns the absolute path of the running executable derived from `argv[0]`.
@@ -285,26 +285,24 @@ pub fn get_executable_dir() -> PathBuf {
 /// [`crate::platform::abs_path`] (never resolves symbolic links). On Windows,
 /// an `.exe` suffix is appended when the file name does not already end with
 /// `.exe` (case-insensitive).
-pub fn exe_path() -> PathBuf {
+pub fn exe_path() -> &'static Path {
     static EXE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
         let argv0 = std::env::args_os().next().unwrap_or_default();
-        let mut path = crate::platform::abs_path(Path::new(&argv0));
-        #[cfg(windows)]
-        {
-            let ends_with_exe = path
+        let path = crate::platform::abs_path(Path::new(&argv0));
+        if cfg!(windows)
+            && path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("exe"))
-                .unwrap_or(false);
-            if !ends_with_exe {
-                let mut os = path.into_os_string();
-                os.push(".exe");
-                path = PathBuf::from(os);
-            }
+                .is_none_or(|e| !e.eq_ignore_ascii_case("exe"))
+        {
+            let mut os = path.into_os_string();
+            os.push(".exe");
+            os.into()
+        } else {
+            path
         }
-        path
     });
-    EXE_PATH.clone()
+    &EXE_PATH
 }
 
 /// Resolves the effective configuration path for the daemon:
@@ -336,7 +334,7 @@ pub fn find_daemon_exe(cmd_name: &str) -> PathBuf {
     if is_ctl == Some(true) {
         exe.with_file_name(format!("{}{}", cmd_name, std::env::consts::EXE_SUFFIX))
     } else {
-        exe
+        exe.to_owned()
     }
 }
 
