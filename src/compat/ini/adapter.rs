@@ -42,9 +42,8 @@ pub enum Transform {
 
 macro_rules! transform_value {
     ($context:ident, $key:ident, $value:expr) => {{
-        let jsn = $value.map_err(|e| {
-            ProgramError::ConfigError(format!("{}: invalid {}: {}", $context, $key, e))
-        })?;
+        let jsn = $value
+            .map_err(|e| ProgramError::ConfigError(format!("{} {}: {}", $context, $key, e)))?;
         Ok(Some(serde_json::json!(jsn)))
     }};
 }
@@ -195,17 +194,21 @@ fn map_section(
 }
 
 /// Warns about keys in `sec` that are not consumed by any mapping or extra known list (OI-11).
+/// `extra_prefixes` silences keys with those prefixes (e.g. `liveness_check` on programs).
 fn warn_unconsumed_keys_multi(
     section: &str,
     sec: &HashMap<String, String>,
     mapping_groups: &[&[FieldMapping]],
     extra_known: &[&str],
+    extra_prefixes: &[&str],
 ) {
     for key in sec.keys() {
         let is_mapped = mapping_groups
             .iter()
             .any(|mappings| mappings.iter().any(|m| m.src_keys.contains(&key.as_str())));
-        if !is_mapped && !extra_known.contains(&key.as_str()) {
+        let is_known = extra_known.contains(&key.as_str())
+            || extra_prefixes.iter().any(|p| key.starts_with(p));
+        if !is_mapped && !is_known {
             tracing::warn!(
                 section = section,
                 key = %key,
@@ -506,15 +509,15 @@ const EVENT_LISTENER_MAPPINGS: &[FieldMapping] = &[
     map_field!(&["killasgroup", "kill_as_group"], "kill_as_group", Bool),
 ];
 
-const LIVENESS_CHECK_KEYS: &[&str] = &[
-    "liveness_check_script",
-    "liveness_check_period",
-    "liveness_check_timeout",
-    "liveness_check_initial_delay",
-    "liveness_check_failure_threshold",
-    "liveness_check_failure_action",
-    "liveness_check_success_threshold",
-    "liveness_check_success_action",
+/// Python supervisor keys accepted under `[program:*]` / `[program-default]`
+/// but not yet mapped (OI-11; silent, matching the pre-table allowlist).
+const PYTHON_UNMAPPED_PROGRAM_KEYS: &[&str] = &[
+    "environment_set",
+    "serverurl",
+    "stdout_logfile_bytes",
+    "stderr_logfile_bytes",
+    "stdout_syslog",
+    "stderr_syslog",
 ];
 
 // ---------------------------------------------------------------------------
@@ -548,7 +551,7 @@ pub fn adapt_ini_to_config(
             "[unix_http_server]",
             config_dir,
         )?;
-        warn_unconsumed_keys_multi("unix_http_server", sec, &[SERVER_UNIX_MAPPINGS], &[]);
+        warn_unconsumed_keys_multi("unix_http_server", sec, &[SERVER_UNIX_MAPPINGS], &[], &[]);
     }
 
     // 2. Process [inet_http_server]
@@ -560,7 +563,7 @@ pub fn adapt_ini_to_config(
             "[inet_http_server]",
             config_dir,
         )?;
-        warn_unconsumed_keys_multi("inet_http_server", sec, &[SERVER_INET_MAPPINGS], &[]);
+        warn_unconsumed_keys_multi("inet_http_server", sec, &[SERVER_INET_MAPPINGS], &[], &[]);
     }
 
     // 3. Process [supervisord]
@@ -586,6 +589,7 @@ pub fn adapt_ini_to_config(
             sec,
             &[SUPERVISORD_MAPPINGS],
             &["logfile", "umask", "directory", "childlogdir"],
+            &[],
         );
     }
 
@@ -599,15 +603,17 @@ pub fn adapt_ini_to_config(
             sec,
             &[CTL_MAPPINGS],
             &["prompt", "history_file"],
+            &[],
         );
     }
 
     // 4. Process [program-default]
     if let Some(sec) = ini.sections.get("program-default") {
+        // Error context matches legacy `Invalid default <key>` messages.
         let mut defs = map_section(
             sec,
             &[PROGRAM_SHARED_MAPPINGS],
-            "[program-default]",
+            "Invalid default",
             config_dir,
         )?;
         attach_liveness_check(sec, &mut defs, "[program-default]")?;
@@ -616,7 +622,8 @@ pub fn adapt_ini_to_config(
             "program-default",
             sec,
             &[PROGRAM_SHARED_MAPPINGS],
-            LIVENESS_CHECK_KEYS,
+            PYTHON_UNMAPPED_PROGRAM_KEYS,
+            &["liveness_check"],
         );
     }
 
@@ -625,34 +632,41 @@ pub fn adapt_ini_to_config(
         if let Some(prog_name) = section_name.strip_prefix("program:") {
             if let Some(sec) = ini.sections.get(section_name) {
                 require_key(sec, "command", "Program", prog_name)?;
-                let context = format!("Program '{}'", prog_name);
+                let context = format!("Program '{}' invalid", prog_name);
                 let mut prog = map_section(
                     sec,
                     &[PROGRAM_SHARED_MAPPINGS, PROGRAM_ONLY_MAPPINGS],
                     &context,
                     config_dir,
                 )?;
-                attach_liveness_check(sec, &mut prog, &format!("[program:{}]", prog_name))?;
+                attach_liveness_check(sec, &mut prog, &format!("Program '{}'", prog_name))?;
                 root["programs"][prog_name] = prog;
                 warn_unconsumed_keys_multi(
                     &format!("program:{}", prog_name),
                     sec,
                     &[PROGRAM_SHARED_MAPPINGS, PROGRAM_ONLY_MAPPINGS],
-                    LIVENESS_CHECK_KEYS,
+                    PYTHON_UNMAPPED_PROGRAM_KEYS,
+                    &["liveness_check"],
                 );
             }
         } else if let Some(group_name) = section_name.strip_prefix("group:") {
             if let Some(sec) = ini.sections.get(section_name) {
-                let context = format!("group:{}", group_name);
+                // Error context matches legacy `Invalid group priority` message.
                 root["groups"][group_name] =
-                    map_section(sec, &[GROUP_MAPPINGS], &context, config_dir)?;
-                warn_unconsumed_keys_multi(&context, sec, &[GROUP_MAPPINGS], &[]);
+                    map_section(sec, &[GROUP_MAPPINGS], "Invalid group", config_dir)?;
+                warn_unconsumed_keys_multi(
+                    &format!("group:{}", group_name),
+                    sec,
+                    &[GROUP_MAPPINGS],
+                    &[],
+                    &[],
+                );
             }
         } else if let Some(pool_name) = section_name.strip_prefix("eventlistener:") {
             if let Some(sec) = ini.sections.get(section_name) {
                 require_key(sec, "command", "EventListener", pool_name)?;
                 require_key(sec, "events", "EventListener", pool_name)?;
-                let context = format!("EventListener '{}'", pool_name);
+                let context = format!("EventListener '{}' invalid", pool_name);
                 let el = map_section(sec, &[EVENT_LISTENER_MAPPINGS], &context, config_dir)?;
 
                 if let Some(redirect_stderr) = el.get("redirect_stderr").and_then(|v| v.as_bool())
@@ -677,6 +691,7 @@ pub fn adapt_ini_to_config(
                     &format!("eventlistener:{}", pool_name),
                     sec,
                     &[EVENT_LISTENER_MAPPINGS],
+                    &[],
                     &[],
                 );
             }
