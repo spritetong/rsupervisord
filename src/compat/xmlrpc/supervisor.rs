@@ -7,7 +7,6 @@
 use crate::compat::xmlrpc::fault::{Fault, FaultCode};
 use crate::compat::xmlrpc::types::{make_process_status_struct, program_status_to_process_info};
 use crate::compat::xmlrpc::wire::Value;
-use crate::config::SupervisorConfig;
 use crate::manager::ManagerHandle;
 use crate::program::config::StopSignal;
 use crate::program::state::ProgramState;
@@ -278,7 +277,7 @@ pub async fn handle_supervisor_method(
             let config_path = ctx.config_path.as_ref().ok_or_else(|| {
                 Fault::cant_reread("No configuration file path specified for reload")
             })?;
-            let new_config = crate::config::SupervisorConfig::from_file(config_path)
+            let new_config = crate::daemon::load_config(config_path, crate::daemon::daemon_args())
                 .map_err(|e| Fault::cant_reread(format!("Invalid configuration: {}", e)))?;
             ctx.manager
                 .restart_daemon(new_config)
@@ -865,8 +864,8 @@ async fn reload_config(ctx: &SupervisorRpcContext) -> Result<Value, Fault> {
         .as_ref()
         .ok_or_else(|| Fault::cant_reread("No configuration file path specified for reload"))?;
 
-    let new_cfg =
-        SupervisorConfig::from_file(config_path).map_err(|e| Fault::cant_reread(e.to_string()))?;
+    let new_cfg = crate::daemon::load_config(config_path, crate::daemon::daemon_args())
+        .map_err(|e| Fault::cant_reread(e.to_string()))?;
 
     let summary = ctx
         .manager

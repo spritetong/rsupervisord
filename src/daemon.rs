@@ -5,12 +5,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::SupervisorConfig;
+use crate::error::ProgramError;
 use crate::manager::SupervisorManager;
 use crate::server::ServerEngine;
 use crate::service::ServiceOp;
 use clap::{Parser, Subcommand};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
 
 /// Command-line arguments for the rsupervisord daemon.
@@ -30,8 +32,8 @@ pub struct DaemonArgs {
     pub nodaemon: bool,
 
     /// Log level filter (trace, debug, info, warn, error, off)
-    #[arg(short = 'l', long = "loglevel", default_value_t = crate::consts::DEFAULT_LOG_LEVEL.to_string())]
-    pub loglevel: String,
+    #[arg(short = 'l', long = "loglevel")]
+    pub loglevel: Option<String>,
 
     /// Number of worker threads for Tokio runtime (1 = single-threaded current_thread)
     #[arg(long = "worker-threads")]
@@ -58,6 +60,56 @@ pub enum DaemonAction {
         #[command(subcommand)]
         op: ServiceOp,
     },
+}
+
+static DAEMON_ARGS: OnceLock<DaemonArgs> = OnceLock::new();
+
+/// Stores the parsed daemon args so config reload paths can re-apply CLI overrides.
+/// Subsequent calls are no-ops (first write wins).
+pub fn set_daemon_args(args: &DaemonArgs) {
+    let _ = DAEMON_ARGS.set(args.clone());
+}
+
+/// Returns the globally stored daemon args, if [`set_daemon_args`] has run.
+pub fn daemon_args() -> Option<&'static DaemonArgs> {
+    DAEMON_ARGS.get()
+}
+
+impl DaemonArgs {
+    /// Applies explicit CLI overrides onto a freshly loaded config.
+    ///
+    /// This is the only place command-line flags write into [`SupervisorConfig`].
+    /// Absent options leave the config value untouched. Idempotent; safe to call
+    /// on every load and reload.
+    pub fn apply(&self, config: &mut SupervisorConfig) {
+        if self.nodaemon {
+            config.nodaemon = true;
+        }
+        if self.allow_unelevated {
+            config.server.allow_unelevated = true;
+        }
+        if let Some(threads) = self.worker_threads {
+            config.worker_threads = Some(threads);
+        }
+        if let Some(level) = &self.loglevel {
+            config.logging.level = level.clone();
+        }
+    }
+}
+
+/// Loads config from `path` and applies CLI overrides from `args`.
+///
+/// Pass `Some(&args)` when args are in scope (initial load, runtime peek);
+/// pass [`daemon_args`] on reload paths where only the global is available.
+pub fn load_config<P: AsRef<Path>>(
+    path: P,
+    args: Option<&DaemonArgs>,
+) -> Result<SupervisorConfig, ProgramError> {
+    let mut config = SupervisorConfig::from_file(path)?;
+    if let Some(a) = args {
+        a.apply(&mut config);
+    }
+    Ok(config)
 }
 
 /// Orchestrator for the rsupervisord daemon process lifecycle.
@@ -98,7 +150,7 @@ impl SupervisorDaemon {
             );
         }
 
-        let mut config = match SupervisorConfig::from_file(&config_path) {
+        let config = match load_config(&config_path, Some(&args)) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to load configuration from {:?}: {}", config_path, e);
@@ -106,20 +158,10 @@ impl SupervisorDaemon {
             }
         };
 
-        if args.allow_unelevated {
-            config.server.allow_unelevated = true;
-        }
-        // CLI -n/--nodaemon forces foreground. Daemonize for the false case is
-        // not yet implemented (Python parity double-fork).
-        // TODO: Python parity double-fork daemonize when nodaemon is false.
-        if args.nodaemon {
-            config.nodaemon = true;
-        }
-
         // Initialize tracing before any early startup logs so environment
         // application, rlimit, and pidfile messages are not lost to the
         // default no-op subscriber.
-        init_tracing(&args, &config);
+        init_tracing(&config);
 
         let cmd_name = crate::config::paths::get_cmd_name();
 
@@ -244,14 +286,16 @@ impl SupervisorDaemon {
     }
 }
 
-/// Initializes the tracing subscriber from daemon args + config (OI-4 silent/file).
-fn init_tracing(args: &DaemonArgs, config: &SupervisorConfig) {
+/// Initializes the tracing subscriber from config (OI-4 silent/file).
+///
+/// CLI `-l/--loglevel` is folded into `config.logging.level` by
+/// [`DaemonArgs::apply`] before this runs; `RUST_LOG` still wins when set.
+fn init_tracing(config: &SupervisorConfig) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let is_logging_disabled = !config.logging.enabled
-        || args.loglevel.to_lowercase() == "off"
-        || config.logging.level.to_lowercase() == "off";
+    let is_logging_disabled =
+        !config.logging.enabled || config.logging.level.to_lowercase() == "off";
 
     if is_logging_disabled {
         let filter = tracing_subscriber::EnvFilter::new("off");
@@ -259,11 +303,7 @@ fn init_tracing(args: &DaemonArgs, config: &SupervisorConfig) {
         return;
     }
 
-    let log_level = if args.loglevel != "info" {
-        &args.loglevel
-    } else {
-        &config.logging.level
-    };
+    let log_level = &config.logging.level;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
@@ -382,5 +422,100 @@ impl Write for MutexWriter {
             .lock()
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_daemon_args_loglevel_none_by_default() {
+        let args = DaemonArgs::try_parse_from(["supervisord"]).unwrap();
+        assert!(args.loglevel.is_none());
+    }
+
+    #[test]
+    fn test_daemon_args_explicit_loglevel_parsed() {
+        let args = DaemonArgs::try_parse_from(["supervisord", "-l", "debug"]).unwrap();
+        assert_eq!(args.loglevel.as_deref(), Some("debug"));
+
+        let args = DaemonArgs::try_parse_from(["supervisord", "--loglevel", "warn"]).unwrap();
+        assert_eq!(args.loglevel.as_deref(), Some("warn"));
+    }
+
+    #[test]
+    fn test_apply_overrides_config_fields() {
+        let args = DaemonArgs::try_parse_from([
+            "supervisord",
+            "-n",
+            "--allow-unelevated",
+            "--worker-threads",
+            "4",
+            "-l",
+            "debug",
+        ])
+        .unwrap();
+
+        let mut config = SupervisorConfig {
+            nodaemon: false,
+            worker_threads: Some(1),
+            ..Default::default()
+        };
+        config.server.allow_unelevated = false;
+        config.logging.level = "info".into();
+
+        args.apply(&mut config);
+
+        assert!(config.nodaemon);
+        assert!(config.server.allow_unelevated);
+        assert_eq!(config.worker_threads, Some(4));
+        assert_eq!(config.logging.level, "debug");
+    }
+
+    #[test]
+    fn test_apply_absent_flags_leave_config_untouched() {
+        let args = DaemonArgs::try_parse_from(["supervisord"]).unwrap();
+
+        let mut config = SupervisorConfig {
+            nodaemon: false,
+            worker_threads: Some(2),
+            ..Default::default()
+        };
+        config.server.allow_unelevated = false;
+        config.logging.level = "warn".into();
+
+        args.apply(&mut config);
+
+        assert!(!config.nodaemon);
+        assert!(!config.server.allow_unelevated);
+        assert_eq!(config.worker_threads, Some(2));
+        assert_eq!(config.logging.level, "warn");
+    }
+
+    #[test]
+    fn test_apply_is_idempotent() {
+        let args = DaemonArgs::try_parse_from([
+            "supervisord",
+            "-n",
+            "--worker-threads",
+            "8",
+            "-l",
+            "error",
+        ])
+        .unwrap();
+
+        let mut config = SupervisorConfig::default();
+        args.apply(&mut config);
+        let first_nodaemon = config.nodaemon;
+        let first_threads = config.worker_threads;
+        let first_level = config.logging.level.clone();
+
+        args.apply(&mut config);
+
+        assert_eq!(config.nodaemon, first_nodaemon);
+        assert_eq!(config.worker_threads, first_threads);
+        assert_eq!(config.logging.level, first_level);
     }
 }

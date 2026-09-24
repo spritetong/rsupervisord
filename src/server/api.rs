@@ -823,7 +823,7 @@ async fn reload_config(
 
     // Dispatch on the file extension so `.conf`/`.ini` reloads go through the
     // compatibility INI pipeline (mirrors the initial load in main.rs).
-    let new_config = match SupervisorConfig::from_file(&config_path) {
+    let new_config = match crate::daemon::load_config(&config_path, crate::daemon::daemon_args()) {
         Ok(c) => c,
         Err(e) => {
             return Ok((
@@ -866,7 +866,7 @@ async fn restart_daemon(
         }
     };
 
-    let new_config = match SupervisorConfig::from_file(&config_path) {
+    let new_config = match crate::daemon::load_config(&config_path, crate::daemon::daemon_args()) {
         Ok(c) => c,
         Err(e) => {
             return Ok((

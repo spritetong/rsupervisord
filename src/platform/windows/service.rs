@@ -4,7 +4,6 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::config::SupervisorConfig;
 use crate::daemon::DaemonArgs;
 use crate::platform::traits::PlatformService;
 use heck::ToPascalCase;
@@ -30,7 +29,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 pub struct WindowsService;
 
-static SERVICE_CONTEXT: OnceLock<(DaemonArgs, PathBuf, String)> = OnceLock::new();
+static SERVICE_CONTEXT: OnceLock<(PathBuf, String)> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Windows Service Control Manager (SCM) timing
@@ -97,10 +96,13 @@ fn my_service_main(_arguments: Vec<OsString>) {
 }
 
 fn run_service_loop() -> anyhow::Result<()> {
-    let (daemon_args, config_path, service_name) = SERVICE_CONTEXT
+    let (config_path, service_name) = SERVICE_CONTEXT
         .get()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Windows service execution context is not initialized"))?;
+    let daemon_args = crate::daemon::daemon_args()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Daemon args not initialized"))?;
 
     let shutdown_token = CancellationToken::new();
     let shutdown_token_clone = shutdown_token.clone();
@@ -173,18 +175,11 @@ fn run_service_loop() -> anyhow::Result<()> {
 
     let res = (|| -> anyhow::Result<()> {
         // Step 2: Determine Tokio worker threads and build runtime
-        let file_threads = if config_path.exists() {
-            SupervisorConfig::from_file(&config_path)
-                .ok()
-                .and_then(|c| c.worker_threads.map(|w| w as u32))
-        } else {
-            None
-        };
-
-        let worker_threads = daemon_args
-            .worker_threads
-            .map(|w| w as u32)
-            .or(file_threads);
+        let worker_threads = crate::daemon::load_config(&config_path, Some(&daemon_args))
+            .ok()
+            .and_then(|c| c.worker_threads)
+            .or(daemon_args.worker_threads)
+            .map(|w| w as u32);
 
         let rt = crate::build_tokio_runtime(worker_threads)?;
 
@@ -284,8 +279,9 @@ pub fn run_as_service(
     config_path: PathBuf,
     cmd_name: String,
 ) -> anyhow::Result<()> {
+    crate::daemon::set_daemon_args(&args);
     SERVICE_CONTEXT
-        .set((args, config_path, cmd_name.clone()))
+        .set((config_path, cmd_name.clone()))
         .map_err(|_| anyhow::anyhow!("Service execution context has already been initialized"))?;
 
     service_dispatcher::start(&cmd_name, ffi_service_main).map_err(|e| {

@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use clap::Parser;
-use rsupervisord::config::SupervisorConfig;
+use rsupervisord::daemon::{load_config, set_daemon_args};
 use rsupervisord::{DaemonArgs, build_tokio_runtime, run_daemon};
 
 fn main() -> anyhow::Result<()> {
@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let daemon_args = DaemonArgs::parse_from(args);
+    set_daemon_args(&daemon_args);
 
     // Service lifecycle: `supervisord service <install|uninstall|start|stop|restart>`
     if let Some(rsupervisord::daemon::DaemonAction::Service { op }) = &daemon_args.action {
@@ -50,18 +51,11 @@ fn main() -> anyhow::Result<()> {
         return rsupervisord::service::run_service(daemon_args, config_path, cmd_name);
     }
 
-    let file_threads = if config_path.exists() {
-        SupervisorConfig::from_file(&config_path)
-            .ok()
-            .and_then(|c| c.worker_threads.map(|w| w as u32))
-    } else {
-        None
-    };
-
-    let worker_threads = daemon_args
-        .worker_threads
-        .map(|w| w as u32)
-        .or(file_threads);
+    let worker_threads = load_config(&config_path, Some(&daemon_args))
+        .ok()
+        .and_then(|c| c.worker_threads)
+        .or(daemon_args.worker_threads)
+        .map(|w| w as u32);
 
     let rt = build_tokio_runtime(worker_threads)?;
     rt.block_on(run_daemon(daemon_args, config_path, None))

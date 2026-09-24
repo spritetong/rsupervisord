@@ -47,7 +47,7 @@ macro_rules! default_fn {
     };
 }
 
-/// Default log level for CLI/daemon (`-l/--loglevel`).
+/// Default log level for `LoggingConfig.level` (config file / serde default).
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 /// Default historical byte count for `tail`/`maintail` (Python `-B` default).
 pub const DEFAULT_TAIL_BYTES: usize = 1600;
