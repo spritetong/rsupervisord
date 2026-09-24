@@ -349,7 +349,8 @@ impl SupervisorConfig {
     /// - `.yaml` or `.yml` files are parsed via the YAML pipeline
     /// - all other files (e.g. `.conf`, `.ini`, or extensionless) are parsed via the compatibility INI pipeline
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ProgramError> {
-        let path_ref = path.as_ref();
+        let path_buf = crate::platform::abs_path(path.as_ref());
+        let path_ref = path_buf.as_path();
         let is_yaml = match path_ref.extension().and_then(|ext| ext.to_str()) {
             Some(ext) => ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"),
             None => false,

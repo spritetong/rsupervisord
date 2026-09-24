@@ -132,22 +132,27 @@ pub trait PlatformBackend: Send + Sync {
     /// Splits a command line string into arguments according to platform rules.
     fn split_command_line(&self, cmd: &str) -> Result<Vec<String>, String>;
 
-    /// Lexically normalizes a path (collapsing redundant separators, '.' and '..'),
-    /// equivalent to Python's os.path.normpath. Does NOT touch the filesystem or require
-    /// the path to exist.
-    fn norm_path(&self, path: &Path) -> PathBuf {
-        lexical_norm_path(path)
-    }
-
-    /// Canonicalizes/normalizes a path to its real path according to platform rules,
-    /// equivalent to Python's os.path.realpath (e.g. resolving symlinks and stripping \\?\ on Windows).
-    fn real_path(&self, path: &Path) -> PathBuf;
-
     /// Builds an executable process command, wrapping scripts (e.g. .bat/.cmd on Windows) when necessary.
     fn build_command(&self, program: &Path, args: &[String]) -> tokio::process::Command;
 
     /// Returns the platform system service manager.
     fn service(&self) -> &dyn PlatformService;
+}
+
+/// Lexically normalizes a path (collapsing redundant separators, '.' and '..'),
+/// equivalent to Python's `os.path.normpath`. Does NOT touch the filesystem or
+/// require the path to exist. Never resolves symbolic links.
+pub fn norm_path(path: &Path) -> PathBuf {
+    lexical_norm_path(path)
+}
+
+/// Returns an absolute, lexically normalized path without resolving symbolic links.
+///
+/// Uses `std::path::absolute` (cross-platform; for relative paths reads CWD only)
+/// followed by [`norm_path`]. Never calls `fs::canonicalize` / `realpath`.
+pub fn abs_path(path: &Path) -> PathBuf {
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    lexical_norm_path(&abs)
 }
 
 /// Purely lexical normalization of a path, collapsing redundant separators,

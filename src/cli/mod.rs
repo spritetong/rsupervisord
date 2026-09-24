@@ -16,7 +16,6 @@ pub use transport::{Endpoint, StreamTransport};
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsString;
-use std::path::Path;
 
 /// Builds an HTTP Basic credential pair from optional username/password fields,
 /// returning `None` when both are absent or empty (open access).
@@ -114,13 +113,13 @@ fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates> {
 
 /// Entry point for the standalone `supervisorctl` binary.
 ///
-/// The usage/help name is derived from `argv[0]`, mirroring clap's default.
+/// The usage/help name is derived from `exe_path()`, mirroring clap's default.
 pub fn run() -> Result<()> {
+    // Capture exe_path from argv[0] before clap argument parsing.
+    let exe = crate::config::paths::exe_path();
+
     let argv: Vec<OsString> = std::env::args_os().collect();
-    let bin_name = argv
-        .first()
-        .and_then(|a| Path::new(a).file_name())
-        .map(|f| f.to_string_lossy().into_owned());
+    let bin_name = exe.file_name().map(|f| f.to_string_lossy().into_owned());
     run_from(argv, bin_name.as_deref())
 }
 
@@ -134,6 +133,9 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    // Capture exe_path before clap argument parsing.
+    let _ = crate::config::paths::exe_path();
+
     let mut cmd = CliArgs::command();
     if let Some(b) = bin_name {
         cmd = cmd.bin_name(b);

@@ -370,11 +370,11 @@ impl WatchService {
                         .unwrap_or_else(|_| dir.clone())
                 };
 
-                let canonical_dir = platform.real_path(&abs_dir);
+                let watch_dir = crate::platform::abs_path(&abs_dir);
 
                 rules.push(WatchRule::Directory {
                     program_name: name.clone(),
-                    dir_path: canonical_dir,
+                    dir_path: watch_dir,
                     pattern: cfg.restart_file_pattern.clone(),
                     directory: cfg.directory.clone(),
                     debounce_duration: debounce,

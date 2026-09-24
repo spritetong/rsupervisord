@@ -10,6 +10,7 @@ pub use service::UnixService;
 use crate::error::ProgramError;
 use crate::platform::traits::{
     AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
+    abs_path,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -285,7 +286,7 @@ impl PlatformBackend for UnixPlatformBackend {
 
         if base_path.is_absolute() {
             if base_path.is_file() {
-                return Some(self.real_path(base_path));
+                return Some(abs_path(base_path));
             }
             return None;
         }
@@ -294,7 +295,7 @@ impl PlatformBackend for UnixPlatformBackend {
             let wd = working_dir.unwrap_or_else(|| Path::new("."));
             let candidate = wd.join(base_path);
             if candidate.is_file() {
-                return Some(self.real_path(&candidate));
+                return Some(abs_path(&candidate));
             }
             return None;
         }
@@ -302,7 +303,7 @@ impl PlatformBackend for UnixPlatformBackend {
         if let Some(wd) = working_dir {
             let candidate = wd.join(base_path);
             if candidate.is_file() {
-                return Some(self.real_path(&candidate));
+                return Some(abs_path(&candidate));
             }
         }
 
@@ -310,7 +311,7 @@ impl PlatformBackend for UnixPlatformBackend {
             for dir in std::env::split_paths(&paths) {
                 let candidate = dir.join(base_path);
                 if candidate.is_file() {
-                    return Some(self.real_path(&candidate));
+                    return Some(abs_path(&candidate));
                 }
             }
         }
@@ -320,10 +321,6 @@ impl PlatformBackend for UnixPlatformBackend {
 
     fn split_command_line(&self, cmd: &str) -> Result<Vec<String>, String> {
         shell_words::split(cmd).map_err(|e| e.to_string())
-    }
-
-    fn real_path(&self, path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| self.norm_path(path))
     }
 
     fn build_command(&self, program: &Path, args: &[String]) -> TokioCommand {

@@ -827,12 +827,12 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 ### 15.12 Dynamic Command Naming & Default Path Conventions
 
 - **Dynamic `cmd_name` Derivation**:
-  Derives `cmd_name = <argv[0] basename without ext> replaces tailing "ctl" with "d"`.
+  Derives `cmd_name = <exe_path() basename without ext> replaces tailing "ctl" with "d"`, where `exe_path()` is the absolute `argv[0]`-derived path (Windows: `.exe` ensured).
   When executed directly or via symlink (e.g. `myctl -> supervisord`), the process automatically detects whether it was invoked as a control tool (`stem.ends_with("ctl")`), routing to CLI execution with `cmd_name = "myd"`.
 - **Multi-Tier Configuration Search Order**:
   When `-c / --config` is not explicitly provided, the supervisor searches for configuration files in priority order:
   1. Environment variable `<UPPERCASE_CMD_NAME>_CONFIG`
-  2. `<executable path>/<cmd_name>.yaml` (and symlink parent directory)
+  2. `<executable path>/<cmd_name>.yaml`
   3. `<executable path>/<cmd_name>/config.yaml`
   4. OS-specific system path: Unix `/etc/<cmd_name>/config.yaml`, Windows None.
 - **Default Log Paths**:
@@ -846,7 +846,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 
 - **First-Class Windows Service Control Manager (SCM) Integration**:
   - Implemented using the `windows-service` crate, supporting the `service install/uninstall/start/stop/restart` subcommand (shared by `supervisord` and `supervisorctl`), and internal `--service`.
-  - Dynamically registers the service under the canonical `cmd_name` (derived from `argv[0]`), ensuring custom-named binaries (e.g. `myd`) install and run under matching service identities.
+  - Dynamically registers the service under the canonical `cmd_name` (derived from `exe_path()` / `argv[0]`), ensuring custom-named binaries (e.g. `myd`) install and run under matching service identities.
   - SCM control events (`ServiceControl::Stop`, `ServiceControl::Shutdown`) are handled by reporting `ServiceState::StopPending` with a 30-second bounded timeout, followed by cooperative broadcast cancellation via `tokio_util::sync::CancellationToken`.
   - Supervised child processes are gracefully terminated inside Win32 Job Objects before the service transitions to `ServiceState::Stopped`.
 - **Native Linux Systemd Service Automation**:
@@ -1025,7 +1025,7 @@ Directly watching an executable binary file via OS filesystem notifications (ino
 `supervisord` solves this by:
 1. Resolving the true binary location using `PlatformBackend::resolve_executable` (evaluating relative directories, executable extensions, and PATH).
 2. Registering the **parent directory** with `notify::RecommendedWatcher`.
-3. Filtering raw filesystem events strictly by canonicalized path comparison or wildcard filename matching.
+3. Filtering raw filesystem events by `abs_path` comparison (lexical absolute, never resolving symlinks) or wildcard filename matching.
 
 ### 18.3 Stability-First Multi-Chunk Write Debouncing Engine
 Compilers and package managers write large binaries in chunks over several seconds. Premature restarts during mid-write result in corrupted executions, `ETXTBSY` (Linux), or file-sharing lock violations (`ERROR_SHARING_VIOLATION` on Windows).
@@ -1109,15 +1109,15 @@ Field categorization is strictly table-driven by schema position, avoiding error
 | **`Default` (Plain)** | All other string fields (e.g. `environment.*`, `pre_start`, `pre_stop`, `restart_cmd_*`, `health_check.url`, glob patterns) | Expand macros only; never alter path strings. |
 
 ### 20.3 Cross-Platform Execution Hardening & Platform Abstraction (`PlatformBackend`)
-To eliminate cross-platform behavioral discrepancies between Windows Win32 APIs and POSIX syscalls, three core capabilities are unified behind the `PlatformBackend` trait:
+To eliminate cross-platform behavioral discrepancies between Windows Win32 APIs and POSIX syscalls, core execution capabilities are unified behind the `PlatformBackend` trait; path handling uses free functions `norm_path` / `abs_path` (never resolve symbolic links).
 
 1. **Platform Command Line Splitting (`split_command_line`)**:
    - *Problem*: POSIX `shell_words::split` treats `\` as an escape character, corrupting Windows paths (e.g. `C:\tools\app.exe` becomes `C:toolsapp.exe`).
    - *Solution*: Windows implements a standard `CommandLineToArgvW` parser that preserves `\` as literal path separators, splits on whitespace, and respects double-quoted tokens containing spaces. Unix uses `shell_words::split`.
    - *AST Decoupling*: Completely eliminates fragile `is_file()` checks during parsing; tokenization is 100% grammar-driven.
-2. **Real Path Canonicalization (`real_path`)**:
-   - *Problem*: Rust's `std::fs::canonicalize()` on Windows prepends the extended-length UNC prefix `\\?\` (e.g. `\\?\C:\app.exe`), which causes Windows `cmd.exe` to fail with `CMD does not support UNC paths`.
-   - *Solution*: Aligned with Python's `os.path.realpath`, `PlatformBackend::real_path` resolves symlinks while stripping the `\\?\` prefix for standard drive paths and normalizing UNC shares.
+2. **Path Standardization Without Symlink Resolution (`norm_path` / `abs_path`)**:
+   - *Problem*: `fs::canonicalize()` resolves symlinks and on Windows prepends the extended-length UNC prefix `\\?\`, which causes `cmd.exe` to fail with `CMD does not support UNC paths`; symlink resolution also breaks re-pointed deployments (watch/spawn follow the target path).
+   - *Solution*: Free functions only (not on `PlatformBackend`): `norm_path` is purely lexical (parse/transform, zero I/O); `abs_path` = `std::path::absolute` + `norm_path` (config-file path production and other absolute-path needs). Symbolic links are never resolved.
 3. **Executable Wrapping & Script Dispatch (`build_command`)**:
    - *Problem*: On Windows, `.bat` and `.cmd` files are not PE executables and cannot be invoked directly by `CreateProcessW` with arguments under modern Rust without triggering CVE-2024-24576 security rejections.
    - *Solution*: `PlatformBackend::build_command` inspects file extensions: `.bat` and `.cmd` are automatically wrapped with `cmd.exe /C "<script>" <args>`, while native PE and ELF binaries are executed directly.

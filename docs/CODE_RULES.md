@@ -216,17 +216,22 @@ use crate::serde_util::{duration_secs, option_byte_size};
 
 ---
 
-## 12. Lexical-only path normalization at parse time
+## 12. Path rules: never resolve symbolic links
 
-**Commit:** `d8a958b`
+**Commit:** `d8a958b`, follow-up `abs_path` unification
 
-- Config parse/transform must not touch the filesystem (`realpath`, existence checks).
-- Use pure lexical normalization (`norm_path` / `lexical_norm_path`) on `PlatformBackend`.
-- Disk canonicalization belongs in runtime fallback paths only.
+- Paths are **never** `canonicalize`d / `realpath`ed / symlink-resolved. Forbidden: `fs::canonicalize`, `PlatformBackend::real_path` (removed).
+- Free functions only (not on `PlatformBackend`):
+  - **`norm_path` / `lexical_norm_path`**: pure lexical (no filesystem, no CWD). Use in config parse/transform only.
+  - **`abs_path`**: `std::path::absolute` + `norm_path`. For relative paths may read CWD; never resolves symlinks. Use for config-file path production and all other absolute-path needs (spawn/watch/include identity).
+- Config file paths are standardized with `abs_path` once produced (`resolve_config_path`, `from_file`).
 
 ```rust
-// transform.rs — during config parse
-let abs = norm_path(&base, &relative); // no std::fs calls
+// transform.rs — during config parse (lexical only, zero I/O)
+let abs = norm_path(&base.join(&relative));
+
+// paths / watch / resolve_executable / include visited
+let p = abs_path(&candidate);
 ```
 
 ---

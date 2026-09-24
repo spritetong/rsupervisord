@@ -9,13 +9,12 @@ use rsupervisord::config::SupervisorConfig;
 use rsupervisord::{DaemonArgs, build_tokio_runtime, run_daemon};
 
 fn main() -> anyhow::Result<()> {
-    let mut args: Vec<String> = std::env::args().collect();
-    let bin_name = args.first().cloned().unwrap_or_default();
+    // Capture exe_path from argv[0] before any CLI argument parsing.
+    let exe = rsupervisord::config::paths::exe_path();
 
-    let stem = std::path::Path::new(&bin_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
+    let mut args: Vec<String> = std::env::args().collect();
+
+    let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
 
     if stem.to_ascii_lowercase().ends_with("ctl") {
         // Binary renamed/symlinked as *ctl: dispatch to the shared CLI entry.
@@ -27,8 +26,7 @@ fn main() -> anyhow::Result<()> {
         // and render usage/help as "<bin> ctl".
         let bin_name = format!(
             "{} ctl",
-            std::path::Path::new(&args[0])
-                .file_name()
+            exe.file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "supervisord".to_string())
         );

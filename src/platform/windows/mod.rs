@@ -11,6 +11,7 @@ pub use service::WindowsService;
 use crate::error::ProgramError;
 use crate::platform::traits::{
     AsyncStream, PlatformBackend, PlatformIpcListener, PlatformProcessGuard, PlatformService,
+    abs_path,
 };
 use crate::program::config::StopSignal;
 use async_trait::async_trait;
@@ -437,7 +438,7 @@ impl PlatformBackend for WindowsPlatformBackend {
                     dir.join(format!("{}{}", command, ext))
                 };
                 if candidate.is_file() {
-                    return Some(self.real_path(&candidate));
+                    return Some(abs_path(&candidate));
                 }
             }
             None
@@ -451,7 +452,7 @@ impl PlatformBackend for WindowsPlatformBackend {
                     PathBuf::from(format!("{}{}", command, ext))
                 };
                 if candidate.is_file() {
-                    return Some(self.real_path(&candidate));
+                    return Some(abs_path(&candidate));
                 }
             }
             return None;
@@ -532,22 +533,6 @@ impl PlatformBackend for WindowsPlatformBackend {
         }
 
         Ok(args)
-    }
-
-    fn real_path(&self, path: &Path) -> PathBuf {
-        if let Ok(canon) = path.canonicalize() {
-            let s = canon.to_string_lossy();
-            if let Some(stripped) = s.strip_prefix(r"\\?\") {
-                if stripped.len() >= 2 && stripped.as_bytes()[1] == b':' {
-                    return PathBuf::from(stripped);
-                }
-                if let Some(unc) = stripped.strip_prefix(r"UNC\") {
-                    return PathBuf::from(format!(r"\\{}", unc));
-                }
-            }
-            return canon;
-        }
-        self.norm_path(path)
     }
 
     fn build_command(&self, program: &Path, args: &[String]) -> TokioCommand {
@@ -1093,15 +1078,6 @@ mod tests {
                 "hello world"
             ]
         );
-    }
-
-    #[test]
-    fn test_windows_real_path_strips_unc_verbatim_prefix() {
-        let backend = WindowsPlatformBackend;
-        let p = Path::new(r"C:\Windows");
-        let real = backend.real_path(p);
-        assert!(!real.to_string_lossy().starts_with(r"\\?\"));
-        assert!(real.to_string_lossy().starts_with("C:"));
     }
 
     #[test]

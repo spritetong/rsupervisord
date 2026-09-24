@@ -7,6 +7,7 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 /// Path resolution engine for supervisor configurations, logs, and IPC sockets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,22 +112,6 @@ impl<'a> PathResolver<'a> {
             }
         }
 
-        // Also check symlink parent if argv[0] directory differs from exe_dir
-        if let Some(argv0) = std::env::args_os().next() {
-            let p = Path::new(&argv0);
-            if let Some(parent) = p.parent()
-                && !parent.as_os_str().is_empty()
-                && parent != exe_dir
-            {
-                for ext in &extensions {
-                    let p_sym = parent.join(format!("{}{}", self.cmd_name, ext));
-                    if p_sym.is_file() {
-                        return Some(p_sym);
-                    }
-                }
-            }
-        }
-
         // Relative etc from executable directory
         if let Some(parent) = exe_dir.parent() {
             let exe_etc = parent.join("etc");
@@ -202,22 +187,17 @@ impl<'a> PathResolver<'a> {
     }
 }
 
-/// Derives the canonical daemon command name (`cmd_name`) from `argv[0]`.
-/// Replaces trailing "ctl" (case-insensitive) with "d".
+/// Derives the canonical daemon command name (`cmd_name`) from `exe_path()`
+/// (or an explicit path override). Replaces trailing "ctl" (case-insensitive)
+/// with "d".
 pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
-    let raw = match argv0 {
-        Some(s) => s.to_string_lossy(),
-        None => match std::env::args_os().next() {
-            Some(s) => s.to_string_lossy().into_owned().into(),
-            None => return "supervisord".to_string(),
-        },
+    let explicit = argv0.map(Path::new).map(Path::to_path_buf);
+    let path = match explicit {
+        Some(p) => p,
+        None => exe_path(),
     };
-
-    let raw_str = raw.as_ref();
-    let basename = raw_str.rsplit(['/', '\\']).next().unwrap_or(raw_str);
-    let stem = match Path::new(basename).file_stem() {
-        Some(s) => s.to_string_lossy(),
-        None => return "supervisord".to_string(),
+    let Some(stem) = path.file_stem().map(|s| s.to_string_lossy()) else {
+        return "supervisord".to_string();
     };
 
     // Normalize Cargo test runner artifacts (e.g. `rsupervisord-097ddb1e4b724e0a`)
@@ -290,53 +270,74 @@ pub fn get_user_config_dir() -> Option<PathBuf> {
 
 /// Returns the directory containing the executable binary.
 pub fn get_executable_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
+    if let Some(parent) = exe_path().parent()
+        && !parent.as_os_str().is_empty()
     {
         return parent.to_path_buf();
     }
-
-    if let Some(argv0) = std::env::args_os().next() {
-        let p = Path::new(&argv0);
-        if let Some(parent) = p.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            return parent.to_path_buf();
-        }
-    }
-
     PathBuf::from(".")
 }
 
-/// Resolves the effective configuration path for the daemon:
-/// explicit `-c` value (normalized to an absolute path) → default search → fallback.
-pub fn resolve_config_path(cmd_name: &str, explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
-    if let Some(p) = explicit {
-        if p.is_absolute() {
-            return Ok(p.to_path_buf());
+/// Returns the absolute path of the running executable derived from `argv[0]`.
+///
+/// Intended to be read before CLI argument parsing. Computed once and cached in
+/// a function-local `static LazyLock`. The path is standardized with
+/// [`crate::platform::abs_path`] (never resolves symbolic links). On Windows,
+/// an `.exe` suffix is appended when the file name does not already end with
+/// `.exe` (case-insensitive).
+pub fn exe_path() -> PathBuf {
+    static EXE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+        let argv0 = std::env::args_os().next().unwrap_or_default();
+        let mut path = crate::platform::abs_path(Path::new(&argv0));
+        #[cfg(windows)]
+        {
+            let ends_with_exe = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("exe"))
+                .unwrap_or(false);
+            if !ends_with_exe {
+                let mut os = path.into_os_string();
+                os.push(".exe");
+                path = PathBuf::from(os);
+            }
         }
-        return Ok(std::env::current_dir()?.join(p));
-    }
-    Ok(find_default_config_path(cmd_name)
-        .unwrap_or_else(|| get_default_config_path_fallback(cmd_name)))
+        path
+    });
+    EXE_PATH.clone()
+}
+
+/// Resolves the effective configuration path for the daemon:
+/// explicit `-c` value → default search → fallback; result is always
+/// standardized with [`crate::platform::abs_path`] (absolute + lexical norm,
+/// never resolving symbolic links).
+pub fn resolve_config_path(cmd_name: &str, explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let resolved = if let Some(p) = explicit {
+        p.to_path_buf()
+    } else {
+        find_default_config_path(cmd_name)
+            .unwrap_or_else(|| get_default_config_path_fallback(cmd_name))
+    };
+    Ok(crate::platform::abs_path(&resolved))
 }
 
 /// Resolves the daemon executable path for service installation.
 ///
-/// The companion `*ctl` binary resolves the sibling `<cmd_name>[.exe]` next to
-/// itself (reusing `derive_cmd_name_from_stem`'s ctl detection); the daemon
-/// returns its own executable path.
+/// Uses [`exe_path`] (derived from `argv[0]`). The companion `*ctl` binary
+/// resolves the sibling `<cmd_name>[.exe]` next to itself (reusing
+/// `derive_cmd_name_from_stem`'s ctl detection); the daemon returns its own
+/// executable path.
 pub fn find_daemon_exe(cmd_name: &str) -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        let is_ctl = exe.file_stem().map(|s| {
-            let s = s.to_string_lossy();
-            derive_cmd_name_from_stem(&s) != s.as_ref()
-        });
-        if is_ctl != Some(true) {
-            return exe;
-        }
+    let exe = exe_path();
+    let is_ctl = exe.file_stem().map(|s| {
+        let s = s.to_string_lossy();
+        derive_cmd_name_from_stem(&s) != s.as_ref()
+    });
+    if is_ctl == Some(true) {
+        exe.with_file_name(format!("{}{}", cmd_name, std::env::consts::EXE_SUFFIX))
+    } else {
+        exe
     }
-    get_executable_dir().join(format!("{}{}", cmd_name, std::env::consts::EXE_SUFFIX))
 }
 
 /// Searches for the default configuration file location in strict priority order.
@@ -496,9 +497,10 @@ mod tests {
 
     #[test]
     fn test_find_daemon_exe_resolves_current_executable() {
-        // Integration-test harness stems never end in "ctl", so the current
-        // executable is returned (the ctl sibling branch needs a ctl-named binary).
+        // Integration-test harness stems never end in "ctl", so exe_path()
+        // (argv[0]-derived) is returned (the ctl sibling branch needs a
+        // ctl-named binary).
         let exe = find_daemon_exe("supervisord");
-        assert_eq!(exe, std::env::current_exe().unwrap());
+        assert_eq!(exe, exe_path());
     }
 }

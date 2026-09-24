@@ -268,15 +268,7 @@ pub fn load_ini_file_with_includes(
     visited_files: &mut HashSet<PathBuf>,
     allow_includes: bool,
 ) -> Result<ParsedIni, ProgramError> {
-    let canonical = file_path.canonicalize().unwrap_or_else(|_| {
-        if file_path.is_relative() {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(file_path))
-                .unwrap_or_else(|_| file_path.to_path_buf())
-        } else {
-            file_path.to_path_buf()
-        }
-    });
+    let canonical = crate::platform::abs_path(file_path);
 
     if visited_files.contains(&canonical) {
         return Err(ProgramError::ConfigError(format!(
