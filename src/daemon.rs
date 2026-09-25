@@ -375,43 +375,26 @@ fn init_tracing(
                     crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
                     crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),
                     crate::logging::LogDestination::File(ref file_path) => {
-                        if let Some(parent) = file_path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
                         let max_bytes = config
                             .logging
                             .max_bytes
                             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-                        if max_bytes == 0 {
-                            std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(file_path)
-                                .ok()
-                                .map(|f| Box::new(f) as Box<dyn std::io::Write + Send>)
-                        } else if config.logging.timestamp_suffix {
-                            let scheme = file_rotate::suffix::AppendTimestamp::with_format(
-                                "%Y-%m-%dT%H-%M-%S",
-                                file_rotate::suffix::FileLimit::MaxFiles(config.logging.backups),
-                                file_rotate::suffix::DateFrom::Now,
-                            );
-                            let rotator = file_rotate::FileRotate::new(
-                                file_path.clone(),
-                                scheme,
-                                file_rotate::ContentLimit::Bytes(max_bytes),
-                                file_rotate::compression::Compression::None,
-                                None,
-                            );
-                            Some(Box::new(rotator))
-                        } else {
-                            let rotator = file_rotate::FileRotate::new(
-                                file_path.clone(),
-                                file_rotate::suffix::AppendCount::new(config.logging.backups),
-                                file_rotate::ContentLimit::Bytes(max_bytes),
-                                file_rotate::compression::Compression::None,
-                                None,
-                            );
-                            Some(Box::new(rotator))
+                        let backups = config.logging.backups;
+                        let timestamp_suffix = config.logging.timestamp_suffix;
+                        match crate::logging::LogRotator::with_options(
+                            file_path,
+                            max_bytes,
+                            backups,
+                            timestamp_suffix,
+                        ) {
+                            Ok(rot) => Some(Box::new(rot) as Box<dyn std::io::Write + Send>),
+                            Err(e) => {
+                                eprintln!(
+                                    "Failed to initialize daemon log rotator for {:?}: {}",
+                                    file_path, e
+                                );
+                                None
+                            }
                         }
                     }
                     _ => None,

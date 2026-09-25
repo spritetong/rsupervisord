@@ -157,6 +157,8 @@ pub_const!(DEFAULT_LOG_LINES: usize = 100);
 pub const DEFAULT_LOG_MAX_BYTES: usize = 50 * 1024 * 1024;
 /// Human-readable form of [`DEFAULT_LOG_MAX_BYTES`] for string-typed fields.
 pub const DEFAULT_LOG_MAX_BYTES_HUMAN: &str = "50MB";
+/// Default in-memory log buffer size (1MB per stream, Python/Go memory mode parity).
+pub const DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE: usize = 1024 * 1024;
 // Default number of rotated log backups (Python parity).
 pub_const!(DEFAULT_LOG_BACKUPS: usize = 10);
 // Maximum bytes buffered for an incomplete live-broadcast line before force-flush.

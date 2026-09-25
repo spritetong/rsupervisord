@@ -1986,11 +1986,21 @@ impl ManagerActor {
     }
 
     fn sync_logging_config(&mut self, new_logging: crate::config::schema::LoggingConfig) {
-        if new_logging.enabled.is_in_memory_only() && self.main_log_rotator.is_none() {
-            self.main_log_rotator = new_logging.build_main_rotator();
-        } else if !new_logging.enabled.is_in_memory_only() {
-            self.main_log_rotator = None;
+        let active_in_mem = self.config_logging.enabled.is_in_memory_only();
+        let target_in_mem = new_logging.enabled.is_in_memory_only();
+
+        if active_in_mem != target_in_mem {
+            tracing::warn!(
+                "Daemon logging mode switch (active: {:?}, target: {:?}) requires restarting the daemon to rebind tracing subscriber sinks; retaining active mode",
+                self.config_logging.enabled,
+                new_logging.enabled
+            );
+            let mut preserved = new_logging;
+            preserved.enabled = self.config_logging.enabled;
+            self.config_logging = preserved;
+            return;
         }
+
         self.config_logging = new_logging;
     }
 

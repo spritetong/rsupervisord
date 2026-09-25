@@ -20,30 +20,46 @@ enum RotatorInner {
     Count(FileRotate<AppendCount>),
     Timestamp(FileRotate<AppendTimestamp>),
     Append(File),
+    Fallback(File),
 }
 
 impl Write for RotatorInner {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self {
             Self::Count(w) => w.write(buf),
             Self::Timestamp(w) => w.write(buf),
             Self::Append(w) => w.write(buf),
+            Self::Fallback(w) => w.write(buf),
+        }));
+
+        match res {
+            Ok(io_res) => io_res,
+            Err(_) => Err(std::io::Error::other("file_rotate panicked during write")),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        match self {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self {
             Self::Count(w) => w.flush(),
             Self::Timestamp(w) => w.flush(),
             Self::Append(w) => w.flush(),
+            Self::Fallback(w) => w.flush(),
+        }));
+
+        match res {
+            Ok(io_res) => io_res,
+            Err(_) => Err(std::io::Error::other("file_rotate panicked during flush")),
         }
     }
 }
 
-/// Thread-safe file rotator wrapping `file_rotate::FileRotate` or append-only `File`.
+/// Thread-safe resilient file rotator wrapping `file_rotate::FileRotate` or append-only `File`.
 #[derive(Clone)]
 pub struct LogRotator {
     path: PathBuf,
+    max_bytes: usize,
+    backups: usize,
+    timestamp_suffix: bool,
     inner: Arc<Mutex<RotatorInner>>,
 }
 
@@ -56,6 +72,54 @@ impl LogRotator {
         backups: usize,
     ) -> Result<Self, ProgramError> {
         Self::with_options(path, max_bytes, backups, false)
+    }
+
+    fn build_inner(
+        path: &Path,
+        max_bytes: usize,
+        backups: usize,
+        timestamp_suffix: bool,
+    ) -> Result<RotatorInner, ProgramError> {
+        let initial_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| {
+                ProgramError::ConfigError(format!(
+                    "Failed to open/create log file '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        let inner = if max_bytes == 0 {
+            // max_bytes == 0 means never rotate (Python and Go compatibility contract)
+            RotatorInner::Append(initial_file)
+        } else if timestamp_suffix {
+            let scheme = AppendTimestamp::with_format(
+                "%Y-%m-%dT%H-%M-%S",
+                FileLimit::MaxFiles(backups),
+                DateFrom::Now,
+            );
+            let rotator = FileRotate::new(
+                path,
+                scheme,
+                ContentLimit::Bytes(max_bytes),
+                Compression::None,
+                None,
+            );
+            RotatorInner::Timestamp(rotator)
+        } else {
+            let rotator = FileRotate::new(
+                path,
+                AppendCount::new(backups),
+                ContentLimit::Bytes(max_bytes),
+                Compression::None,
+                None,
+            );
+            RotatorInner::Count(rotator)
+        };
+        Ok(inner)
     }
 
     /// Creates a LogRotator with explicit timestamp_suffix selection.
@@ -83,69 +147,78 @@ impl LogRotator {
             })?;
         }
 
-        // Probe target path to ensure write permissions upfront
-        let initial_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path_buf)
-            .map_err(|e| {
-                ProgramError::ConfigError(format!(
-                    "Failed to open/create log file '{}': {}",
-                    path_buf.display(),
-                    e
-                ))
-            })?;
-
-        let inner = if max_bytes == 0 {
-            // max_bytes == 0 means never rotate (Python and Go compatibility contract)
-            RotatorInner::Append(initial_file)
-        } else if timestamp_suffix {
-            let scheme = AppendTimestamp::with_format(
-                "%Y-%m-%dT%H-%M-%S",
-                FileLimit::MaxFiles(backups),
-                DateFrom::Now,
-            );
-            let rotator = FileRotate::new(
-                path_buf.clone(),
-                scheme,
-                ContentLimit::Bytes(max_bytes),
-                Compression::None,
-                None,
-            );
-            RotatorInner::Timestamp(rotator)
-        } else {
-            let rotator = FileRotate::new(
-                path_buf.clone(),
-                AppendCount::new(backups),
-                ContentLimit::Bytes(max_bytes),
-                Compression::None,
-                None,
-            );
-            RotatorInner::Count(rotator)
-        };
+        let inner = Self::build_inner(&path_buf, max_bytes, backups, timestamp_suffix)?;
 
         Ok(Self {
             path: path_buf,
+            max_bytes,
+            backups,
+            timestamp_suffix,
             inner: Arc::new(Mutex::new(inner)),
         })
     }
 
     /// Writes a line of text to the rotating log file.
     pub fn write_line(&self, line: &str) -> std::io::Result<()> {
-        let mut guard = self.inner.lock();
-        writeln!(guard, "{}", line)
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        self.write_all(&buf)
     }
 
-    /// Writes a raw byte buffer to the rotating log file.
+    /// Writes a raw byte buffer to the rotating log file with automatic recovery.
     pub fn write_all(&self, data: &[u8]) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        guard.write_all(data)
+        if let Err(err) = guard.write_all(data) {
+            eprintln!(
+                "[rsupervisord] Warning: log write failed for '{}': {}; falling back to append-only mode",
+                self.path.display(),
+                err
+            );
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                Ok(mut file) => {
+                    let _ = file.write_all(data);
+                    *guard = RotatorInner::Fallback(file);
+                }
+                Err(fallback_err) => {
+                    return Err(fallback_err);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Flushes any buffered content to disk.
     pub fn flush(&self) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        guard.flush()
+        let _ = guard.flush();
+        Ok(())
+    }
+
+    /// Truncates the log file and resets rotation state without count desync.
+    pub fn clear(&self) -> std::io::Result<()> {
+        let mut guard = self.inner.lock();
+        let _ = std::fs::write(&self.path, "");
+        *guard = match Self::build_inner(
+            &self.path,
+            self.max_bytes,
+            self.backups,
+            self.timestamp_suffix,
+        ) {
+            Ok(inner) => inner,
+            Err(_) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?;
+                RotatorInner::Fallback(file)
+            }
+        };
+        Ok(())
     }
 
     /// Returns the primary log file path.
@@ -157,6 +230,17 @@ impl LogRotator {
     /// Returns the current size of the active log file on disk.
     pub fn file_size(&self) -> std::io::Result<u64> {
         std::fs::metadata(&self.path).map(|m| m.len())
+    }
+}
+
+impl std::io::Write for LogRotator {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        LogRotator::flush(self)
     }
 }
 
@@ -275,5 +359,44 @@ mod tests {
 
         let content = std::fs::read_to_string(&log_file).unwrap();
         assert_eq!(content, "hello chunk\n");
+    }
+
+    #[test]
+    fn test_log_rotator_clear_resets_file_and_state() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("clear_test.log");
+        let rotator = LogRotator::new(&log_file, 1000, 2).unwrap();
+
+        rotator.write_line("line before clear").unwrap();
+        assert!(log_file.exists());
+        assert!(rotator.file_size().unwrap() > 0);
+
+        rotator.clear().unwrap();
+        assert_eq!(rotator.file_size().unwrap(), 0);
+
+        rotator.write_line("line after clear").unwrap();
+        let content = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(content, "line after clear\n");
+    }
+
+    #[test]
+    fn test_log_rotator_write_resilience() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("resilient.log");
+        let rotator = LogRotator::new(&log_file, 100, 2).unwrap();
+
+        // Write normal data
+        rotator.write_line("initial normal line").unwrap();
+        assert!(log_file.exists());
+
+        // Subsequent writes succeed
+        let write_res = rotator.write_line("second line");
+        assert!(write_res.is_ok());
+
+        // Clear resets the file and rotator state cleanly
+        rotator.clear().unwrap();
+        rotator.write_line("post-clear line").unwrap();
+        let content = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(content, "post-clear line\n");
     }
 }

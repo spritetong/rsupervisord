@@ -73,8 +73,27 @@ pub struct InMemoryChannelRotator {
     cumulative_bytes: AtomicU64,
 }
 
+/// Copies a slice of bytes `[start..start + length]` from consecutive slices into a new `Vec<u8>`.
+fn extract_window(slices: &[&[u8]], mut start: usize, mut length: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(length);
+    for slice in slices {
+        if length == 0 {
+            break;
+        }
+        if start < slice.len() {
+            let take = (slice.len() - start).min(length);
+            out.extend_from_slice(&slice[start..start + take]);
+            length -= take;
+            start = 0;
+        } else {
+            start -= slice.len();
+        }
+    }
+    out
+}
+
 impl InMemoryChannelRotator {
-    /// Creates a new in-memory channel rotator with rotation threshold and retained backups.
+    /// Creates a new in-memory channel rotator with segment size threshold and retained backups.
     pub fn new(max_bytes: usize, backups: usize) -> Self {
         let (broadcast_tx, _) = broadcast::channel(1024);
         Self {
@@ -86,6 +105,22 @@ impl InMemoryChannelRotator {
             pending_line: Mutex::new(BytesMut::new()),
             cumulative_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Creates a new in-memory channel rotator bounded by total stream retention capacity.
+    pub fn with_total_capacity(total_capacity: usize, backups: usize) -> Self {
+        let segment_bytes = if backups > 0 {
+            (total_capacity / (backups + 1)).max(1)
+        } else {
+            total_capacity.max(1)
+        };
+        Self::new(segment_bytes, backups)
+    }
+
+    /// Returns the maximum byte size of an individual segment.
+    #[inline]
+    pub fn segment_size(&self) -> usize {
+        self.max_bytes
     }
 
     /// Assembles `data` into complete newline-delimited lines and broadcasts them.
@@ -143,7 +178,8 @@ impl InMemoryChannelRotator {
         pending.clear();
     }
 
-    /// Appends a raw chunk of bytes, rotating the segment if `max_bytes` is reached.
+    /// Appends a raw chunk of bytes, rotating segments when `max_bytes` is reached.
+    /// Oversize chunks larger than `max_bytes` are split across segments.
     pub fn append_bytes(&self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -151,39 +187,45 @@ impl InMemoryChannelRotator {
 
         self.broadcast_chunk(data);
 
-        // Lock order: active before backups_queue.
-        let mut active = self.active.write();
+        let mut rem = data;
+        while !rem.is_empty() {
+            // Lock order: active before backups_queue.
+            let mut active = self.active.write();
 
-        // Check if current active segment needs rotation
-        if active.len() + data.len() > self.max_bytes && !active.is_empty() {
-            let mut backups = self.backups_queue.write();
-            if self.backups > 0 {
-                if backups.len() >= self.backups {
-                    backups.pop_front();
+            if active.len() >= self.max_bytes && !active.is_empty() {
+                let mut backups = self.backups_queue.write();
+                if self.backups > 0 {
+                    if backups.len() >= self.backups {
+                        backups.pop_front();
+                    }
+                    let old_active = std::mem::replace(
+                        &mut *active,
+                        MemorySegment::with_capacity(self.max_bytes.min(64 * 1024)),
+                    );
+                    backups.push_back(old_active);
+                } else {
+                    active.data.clear();
+                    active.line_offsets.clear();
                 }
-                let old_active = std::mem::replace(
-                    &mut *active,
-                    MemorySegment::with_capacity(self.max_bytes.min(64 * 1024)),
-                );
-                backups.push_back(old_active);
-            } else {
-                active.data.clear();
-                active.line_offsets.clear();
             }
-        }
 
-        let prev_len = active.data.len();
-        active.data.extend_from_slice(data);
+            let space = self.max_bytes.saturating_sub(active.len()).max(1);
+            let chunk_len = rem.len().min(space);
+            let chunk = &rem[..chunk_len];
 
-        // Record newline byte offsets
-        for (i, &b) in data.iter().enumerate() {
-            if b == b'\n' {
-                active.line_offsets.push(prev_len + i + 1);
+            let prev_len = active.data.len();
+            active.data.extend_from_slice(chunk);
+
+            for (i, &b) in chunk.iter().enumerate() {
+                if b == b'\n' {
+                    active.line_offsets.push(prev_len + i + 1);
+                }
             }
-        }
 
-        self.cumulative_bytes
-            .fetch_add(data.len() as u64, Ordering::Relaxed);
+            self.cumulative_bytes
+                .fetch_add(chunk_len as u64, Ordering::Relaxed);
+            rem = &rem[chunk_len..];
+        }
     }
 
     /// Returns the total cumulative bytes written to this channel since inception/seeding.
@@ -196,7 +238,8 @@ impl InMemoryChannelRotator {
     /// sets the initial cumulative byte offset to the disk file size, and rotates
     /// the on-disk file (renaming to `<path>.1`) to prevent subsequent disk writes.
     pub fn seed_from_file(&self, path: &Path, max_seed_bytes: usize) -> std::io::Result<u64> {
-        match LogFileReader::seed_and_archive(path, max_seed_bytes, Some("1"))? {
+        let bounded_seed = max_seed_bytes.min(self.max_bytes);
+        match LogFileReader::seed_and_archive(path, bounded_seed, Some("1"))? {
             Some((bytes, file_size)) => {
                 if !bytes.is_empty() {
                     let mut active = self.active.write();
@@ -243,11 +286,14 @@ impl InMemoryChannelRotator {
     }
 
     /// Reads bytes starting from monotonic offset with length, returning `(content, total_size, overflow)`.
+    /// Slices directly across segment windows to eliminate O(N) buffer clones and data/offset races.
     pub fn read_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
-        let full = self.snapshot_bytes();
+        let active = self.active.read();
+        let backups = self.backups_queue.read();
         let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
-        let retained_sz = full.len() as i64;
-        let oldest_available_offset = total_sz.saturating_sub(retained_sz);
+
+        let retained_sz: usize = backups.iter().map(|s| s.len()).sum::<usize>() + active.len();
+        let oldest_available_offset = total_sz.saturating_sub(retained_sz as i64);
 
         let mut overflow = false;
         let mut len = length;
@@ -274,10 +320,7 @@ impl InMemoryChannelRotator {
         } else {
             if offset < oldest_available_offset {
                 overflow = true;
-                (
-                    oldest_available_offset,
-                    (len as usize).min(retained_sz as usize),
-                )
+                (oldest_available_offset, (len as usize).min(retained_sz))
             } else if offset >= total_sz {
                 return (String::new(), total_sz, false);
             } else {
@@ -292,43 +335,55 @@ impl InMemoryChannelRotator {
         };
 
         let local_start = (start_off - oldest_available_offset) as usize;
-        let local_end = (local_start + to_read).min(full.len());
-        let slice = if local_start < local_end {
-            &full[local_start..local_end]
-        } else {
-            &[]
-        };
+        let local_end = (local_start + to_read).min(retained_sz);
+        let slice_len = local_end.saturating_sub(local_start);
+
+        let slices: Vec<&[u8]> = backups
+            .iter()
+            .map(|s| s.data.as_slice())
+            .chain(std::iter::once(active.data.as_slice()))
+            .collect();
+        let window = extract_window(&slices, local_start, slice_len);
 
         (
-            String::from_utf8_lossy(slice).to_string(),
+            String::from_utf8_lossy(&window).to_string(),
             total_sz,
             overflow,
         )
     }
 
     /// Tails bytes backwards from buffer end or monotonic offset, matching supervisor XML-RPC semantics.
+    /// Slices directly across segment windows to eliminate O(N) buffer clones and data/offset races.
     pub fn tail_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
-        let full = self.snapshot_bytes();
+        let active = self.active.read();
+        let backups = self.backups_queue.read();
         let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
-        let retained_sz = full.len() as i64;
-        let oldest_available_offset = total_sz.saturating_sub(retained_sz);
+
+        let retained_sz: usize = backups.iter().map(|s| s.len()).sum::<usize>() + active.len();
+        let oldest_available_offset = total_sz.saturating_sub(retained_sz as i64);
 
         let mut len = length;
         if len < 0 {
             len = 0;
         }
 
+        let slices: Vec<&[u8]> = backups
+            .iter()
+            .map(|s| s.data.as_slice())
+            .chain(std::iter::once(active.data.as_slice()))
+            .collect();
+
         if offset == 0 {
             let actual_len = if len == 0 {
-                retained_sz as usize
+                retained_sz
             } else {
-                (len as usize).min(full.len())
+                (len as usize).min(retained_sz)
             };
-            let start = full.len().saturating_sub(actual_len);
-            let slice = &full[start..];
+            let start = retained_sz.saturating_sub(actual_len);
+            let window = extract_window(&slices, start, actual_len);
             let has_overflow = total_sz > actual_len as i64;
             return (
-                String::from_utf8_lossy(slice).to_string(),
+                String::from_utf8_lossy(&window).to_string(),
                 total_sz,
                 has_overflow,
             );
@@ -348,20 +403,17 @@ impl InMemoryChannelRotator {
 
         let local_start = (off - oldest_available_offset) as usize;
         let to_read = if len == 0 {
-            full.len() - local_start
+            retained_sz - local_start
         } else {
-            (len as usize).min(full.len() - local_start)
+            (len as usize).min(retained_sz - local_start)
         };
         let local_end = local_start + to_read;
-        let slice = if local_start < local_end {
-            &full[local_start..local_end]
-        } else {
-            &[]
-        };
+        let slice_len = local_end.saturating_sub(local_start);
+        let window = extract_window(&slices, local_start, slice_len);
 
-        let new_offset = off + slice.len() as i64;
+        let new_offset = off + slice_len as i64;
         (
-            String::from_utf8_lossy(slice).to_string(),
+            String::from_utf8_lossy(&window).to_string(),
             new_offset,
             overflow,
         )
@@ -369,13 +421,40 @@ impl InMemoryChannelRotator {
 
     /// Returns the most recent `max_lines` lines.
     pub fn read_lines(&self, max_lines: Option<usize>) -> Vec<String> {
-        let bytes = self.snapshot_bytes();
-        let text = String::from_utf8_lossy(&bytes);
-        let all_lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+        let active = self.active.read();
+        let backups = self.backups_queue.read();
+
+        let slices: Vec<&[u8]> = backups
+            .iter()
+            .map(|s| s.data.as_slice())
+            .chain(std::iter::once(active.data.as_slice()))
+            .collect();
+
+        let mut lines = Vec::new();
+        let mut cur = String::new();
+        for slice in slices {
+            let text = String::from_utf8_lossy(slice);
+            for ch in text.chars() {
+                if ch == '\n' {
+                    if cur.ends_with('\r') {
+                        cur.pop();
+                    }
+                    lines.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(ch);
+                }
+            }
+        }
+        if !cur.is_empty() {
+            if cur.ends_with('\r') {
+                cur.pop();
+            }
+            lines.push(cur);
+        }
 
         match max_lines {
-            Some(n) if n < all_lines.len() => all_lines[all_lines.len() - n..].to_vec(),
-            _ => all_lines,
+            Some(n) if n < lines.len() => lines[lines.len() - n..].to_vec(),
+            _ => lines,
         }
     }
 
@@ -445,6 +524,20 @@ impl InMemoryLogRotator {
         }
     }
 
+    /// Creates a new in-memory rotator bounded by total retained buffer capacity for each channel.
+    pub fn with_total_capacity(total_capacity: usize, backups: usize) -> Self {
+        Self {
+            stdout: Arc::new(InMemoryChannelRotator::with_total_capacity(
+                total_capacity,
+                backups,
+            )),
+            stderr: Arc::new(InMemoryChannelRotator::with_total_capacity(
+                total_capacity,
+                backups,
+            )),
+        }
+    }
+
     /// Creates a new in-memory rotator wrapping existing channel rotators.
     pub fn new_with_channels(
         stdout: Arc<InMemoryChannelRotator>,
@@ -483,7 +576,10 @@ impl InMemoryLogRotator {
 
 impl Default for InMemoryLogRotator {
     fn default() -> Self {
-        Self::new(50 * 1024 * 1024, 10)
+        Self::with_total_capacity(
+            crate::consts::DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE,
+            crate::consts::DEFAULT_LOG_BACKUPS,
+        )
     }
 }
 
@@ -704,5 +800,62 @@ mod tests {
         });
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("deadlock detected: concurrent append/snapshot did not complete");
+    }
+
+    #[test]
+    fn test_oversize_chunk_splits_across_segments() {
+        // max 20 bytes per segment, 3 backups
+        let rotator = InMemoryChannelRotator::new(20, 3);
+
+        // Append a 50-byte chunk in one call (2.5x the segment limit)
+        let large_payload = b"0123456789abcdefghij0123456789abcdefghij0123456789";
+        assert_eq!(large_payload.len(), 50);
+
+        rotator.append_bytes(large_payload);
+
+        let active = rotator.active.read();
+        let backups = rotator.backups_queue.read();
+
+        // Active segment must never exceed max_bytes (20)
+        assert!(active.len() <= 20, "active.len() {} > 20", active.len());
+        // All backup segments must never exceed max_bytes (20)
+        for (idx, seg) in backups.iter().enumerate() {
+            assert!(seg.len() <= 20, "backup[{}] len {} > 20", idx, seg.len());
+        }
+
+        // Total retained bytes across active and backups must equal full 50 bytes (20 + 20 + 10)
+        let total: usize = active.len() + backups.iter().map(|s| s.len()).sum::<usize>();
+        assert_eq!(total, 50);
+
+        // Cumulative monotonic bytes must be exactly 50
+        assert_eq!(rotator.cumulative_bytes(), 50);
+
+        // Window read should be completely intact
+        let (data, tot, overflow) = rotator.read_bytes(0, 50);
+        assert_eq!(tot, 50);
+        assert!(!overflow);
+        assert_eq!(data, std::str::from_utf8(large_payload).unwrap());
+    }
+
+    #[test]
+    fn test_with_total_capacity_retention_bound() {
+        // Total capacity 100 bytes, 4 backups -> 5 segments of 20 bytes each
+        let rotator = InMemoryChannelRotator::with_total_capacity(100, 4);
+        assert_eq!(rotator.segment_size(), 20);
+
+        // Append 200 bytes
+        for _ in 0..10 {
+            rotator.append_bytes(b"0123456789abcdefghij"); // 20 bytes each
+        }
+
+        // Cumulative bytes must be 200
+        assert_eq!(rotator.cumulative_bytes(), 200);
+
+        // Retained bytes must not exceed total_capacity (100)
+        assert!(
+            rotator.byte_size() <= 100,
+            "retained {} exceeds total capacity 100",
+            rotator.byte_size()
+        );
     }
 }

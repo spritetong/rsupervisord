@@ -91,14 +91,30 @@ impl ProcessProgram {
         )));
         let ring_buffer = Arc::new(RingBuffer::default());
         let in_memory_buffer_size = config.logs.effective_buffer_size();
-        let seg_size = (in_memory_buffer_size / 2).max(1024);
-        let in_memory_rotator = Arc::new(crate::logging::InMemoryLogRotator::new(seg_size, 1));
+        let stdout_backups = config.logs.effective_stdout_backups();
+        let stderr_backups = config.logs.effective_stderr_backups();
+
+        let stdout_rotator = Arc::new(crate::logging::InMemoryChannelRotator::with_total_capacity(
+            in_memory_buffer_size,
+            stdout_backups,
+        ));
+        let stderr_rotator = Arc::new(crate::logging::InMemoryChannelRotator::with_total_capacity(
+            in_memory_buffer_size,
+            stderr_backups,
+        ));
+
+        let in_memory_rotator = Arc::new(crate::logging::InMemoryLogRotator::new_with_channels(
+            stdout_rotator.clone(),
+            stderr_rotator.clone(),
+        ));
 
         if config.logs.is_in_memory_only() {
             in_memory_rotator.seed_from_files(
                 config.logs.stdout.as_deref(),
                 config.logs.stderr.as_deref(),
-                seg_size,
+                stdout_rotator
+                    .segment_size()
+                    .max(stderr_rotator.segment_size()),
             );
         }
 
@@ -428,28 +444,18 @@ impl Program for ProcessProgram {
                         name: self.config.name.clone(),
                         error: e.to_string(),
                     })
+            } else if configured_path.is_some() {
+                Err(ProgramError::ReadLogFailed {
+                    name: self.config.name.clone(),
+                    error: "no log file".to_string(),
+                })
             } else if channel == crate::logging::LogChannel::Stdout {
-                let lines = self.ring_buffer.get_lines(None);
-                if lines.is_empty() && configured_path.is_some() {
-                    return Err(ProgramError::ReadLogFailed {
-                        name: self.config.name.clone(),
-                        error: "no log file".to_string(),
-                    });
-                }
-                let mut full_text = lines.join("\n");
-                if !full_text.is_empty() {
-                    full_text.push('\n');
-                }
-                crate::logging::LogFileReader::read_bytes_from_slice(
-                    full_text.as_bytes(),
+                Ok(crate::logging::InstantLogReader::read_bytes(
+                    &*self.in_memory_rotator,
+                    channel,
                     offset,
                     length,
-                )
-                .map(|s| (s, 0, false))
-                .map_err(|e| ProgramError::ReadLogFailed {
-                    name: self.config.name.clone(),
-                    error: e.to_string(),
-                })
+                ))
             } else {
                 Err(ProgramError::ReadLogFailed {
                     name: self.config.name.clone(),
@@ -482,27 +488,15 @@ impl Program for ProcessProgram {
                 Ok(crate::logging::LogFileReader::tail_bytes(
                     path, offset, length,
                 ))
+            } else if configured_path.is_some() {
+                Ok((String::new(), offset, false))
             } else if channel == crate::logging::LogChannel::Stdout {
-                let (data, new_off, overflow) = crate::logging::InstantLogReader::tail_bytes(
+                Ok(crate::logging::InstantLogReader::tail_bytes(
                     &*self.in_memory_rotator,
                     channel,
                     offset,
                     length,
-                );
-                if data.is_empty() {
-                    let lines = self.ring_buffer.get_lines(None);
-                    let mut full_text = lines.join("\n");
-                    if !full_text.is_empty() {
-                        full_text.push('\n');
-                    }
-                    Ok(crate::logging::LogFileReader::tail_bytes_from_slice(
-                        full_text.as_bytes(),
-                        offset,
-                        length,
-                    ))
-                } else {
-                    Ok((data, new_off, overflow))
-                }
+                ))
             } else {
                 Ok((String::new(), offset, false))
             }

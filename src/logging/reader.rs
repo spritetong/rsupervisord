@@ -246,7 +246,11 @@ impl LogFileReader {
         // Archive disk file if requested (e.g. app.log -> app.log.1)
         if let Some(suffix) = archive_suffix {
             let rotated_path = format!("{}.{}", path.to_string_lossy(), suffix);
-            let _ = std::fs::rename(path, &rotated_path);
+            let dest = Path::new(&rotated_path);
+            if dest.exists() {
+                let _ = std::fs::remove_file(dest);
+            }
+            let _ = std::fs::rename(path, dest);
         }
 
         Ok(Some((seeded_bytes, file_size)))

@@ -955,3 +955,46 @@ async fn test_daemon_main_log_in_memory_and_maintail() {
     let cleared_val = handle.read_main_log(0, 0).await.unwrap();
     assert_eq!(cleared_val, "");
 }
+
+#[test]
+fn test_program_logs_effective_sizing_decoupled() {
+    let logs_cfg = ProgramLogsConfig {
+        buffer_size: Some(2 * 1024 * 1024),       // 2MB memory buffer
+        stdout_max_bytes: Some(10 * 1024 * 1024), // 10MB file limit
+        stderr_max_bytes: None,
+        max_bytes: Some(20 * 1024 * 1024), // 20MB fallback file limit
+        ..Default::default()
+    };
+
+    // In-memory buffer size must honor buffer_size
+    assert_eq!(logs_cfg.effective_buffer_size(), 2 * 1024 * 1024);
+
+    // File max bytes must NEVER be polluted by buffer_size
+    assert_eq!(logs_cfg.effective_stdout_max_bytes(), 10 * 1024 * 1024);
+    assert_eq!(logs_cfg.effective_stderr_max_bytes(), 20 * 1024 * 1024);
+}
+
+#[test]
+fn test_seed_archive_collision_safe() {
+    let dir = tempdir().unwrap();
+    let log_file = dir.path().join("preseed.log");
+    let archive_file = dir.path().join("preseed.log.1");
+
+    // Pre-create both original log file and collision target .1
+    std::fs::write(&log_file, "original unrotated content\n").unwrap();
+    std::fs::write(&archive_file, "stale existing backup\n").unwrap();
+
+    let res = rsupervisord::logging::LogFileReader::seed_and_archive(&log_file, 1024, Some("1"));
+    assert!(
+        res.is_ok(),
+        "seed_and_archive must succeed despite existing .1 file"
+    );
+
+    let (seeded, file_size) = res.unwrap().expect("seeded data");
+    assert_eq!(file_size, "original unrotated content\n".len() as u64);
+    assert_eq!(seeded, b"original unrotated content\n");
+
+    // The collision file .1 should now contain the seeded log content
+    let archive_content = std::fs::read_to_string(&archive_file).unwrap();
+    assert_eq!(archive_content, "original unrotated content\n");
+}

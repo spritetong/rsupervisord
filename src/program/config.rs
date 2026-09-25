@@ -260,8 +260,7 @@ impl ProgramLogsConfig {
 
     pub fn effective_buffer_size(&self) -> usize {
         self.buffer_size
-            .or(self.max_bytes)
-            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+            .unwrap_or(crate::consts::DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE)
     }
 
     pub fn is_stdout_disabled(&self) -> bool {
@@ -291,15 +290,13 @@ impl ProgramLogsConfig {
     }
 
     pub fn effective_stdout_max_bytes(&self) -> usize {
-        self.buffer_size
-            .or(self.stdout_max_bytes)
+        self.stdout_max_bytes
             .or(self.max_bytes)
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
     }
 
     pub fn effective_stderr_max_bytes(&self) -> usize {
-        self.buffer_size
-            .or(self.stderr_max_bytes)
+        self.stderr_max_bytes
             .or(self.max_bytes)
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
     }

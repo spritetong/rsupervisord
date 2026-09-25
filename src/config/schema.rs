@@ -136,8 +136,7 @@ pub struct LoggingConfig {
 impl LoggingConfig {
     pub fn effective_buffer_size(&self) -> usize {
         self.buffer_size
-            .or(self.max_bytes)
-            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+            .unwrap_or(crate::consts::DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE)
     }
 
     /// Resolves the effective daemon log file path (either explicitly configured or default).
@@ -155,12 +154,11 @@ impl LoggingConfig {
         if self.enabled.is_in_memory_only() {
             let buffer_size = self.effective_buffer_size();
             let backups = self.backups;
-            let rot = std::sync::Arc::new(crate::logging::InMemoryChannelRotator::new(
-                buffer_size,
-                backups,
-            ));
+            let rot = std::sync::Arc::new(
+                crate::logging::InMemoryChannelRotator::with_total_capacity(buffer_size, backups),
+            );
             if let Some(ref path) = self.file {
-                let _ = rot.seed_from_file(path, buffer_size);
+                let _ = rot.seed_from_file(path, rot.segment_size());
             }
             Some(rot)
         } else {
