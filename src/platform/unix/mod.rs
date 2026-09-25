@@ -212,6 +212,12 @@ impl PlatformBackend for UnixPlatformBackend {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
                     .map_err(std::io::Error::other)?;
 
+                // 1b. Anchor child process to parent daemon lifetime on Linux (kernel sends SIGTERM if parent dies)
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = nix::sys::prctl::set_pdeathsig(Some(nix::sys::signal::Signal::SIGTERM));
+                }
+
                 // 2. Apply umask if configured
                 if let Some(mask) = umask {
                     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask));

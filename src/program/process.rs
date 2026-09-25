@@ -764,6 +764,8 @@ impl RunningChild {
 impl Drop for RunningChild {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+        let _ = self.platform_guard.force_kill();
+        let _ = self.child.start_kill();
         if let Some(w) = self.stdin_writer.take() {
             w.abort();
         }
