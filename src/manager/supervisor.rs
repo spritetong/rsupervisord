@@ -256,6 +256,10 @@ impl ManagerHandle {
 
         let timeout_dur = grace_period
             .unwrap_or(DEFAULT_STOP_WAIT)
+            .checked_add(DEFAULT_HOOK_TIMEOUT)
+            .unwrap_or(MAX_TIMEOUT)
+            .checked_add(DRAIN_TIMEOUT)
+            .unwrap_or(MAX_TIMEOUT)
             .checked_add(STOP_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -288,6 +292,10 @@ impl ManagerHandle {
 
         let timeout_dur = grace_period
             .unwrap_or(DEFAULT_STOP_WAIT)
+            .checked_add(DEFAULT_HOOK_TIMEOUT * 2)
+            .unwrap_or(MAX_TIMEOUT)
+            .checked_add(DRAIN_TIMEOUT)
+            .unwrap_or(MAX_TIMEOUT)
             .checked_add(RESTART_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -1148,8 +1156,11 @@ impl SupervisorManager {
 
     pub async fn shutdown(&mut self) -> Result<(), ProgramError> {
         let _ = self.handle.shutdown().await;
-        if let Some(handle) = self.actor_handle.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
+        if let Some(mut handle) = self.actor_handle.take() {
+            if tokio::time::timeout(Duration::from_secs(30), &mut handle).await.is_err() {
+                tracing::warn!("ManagerActor shutdown timed out after 30s; aborting handle");
+                handle.abort();
+            }
         }
         Ok(())
     }

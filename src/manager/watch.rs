@@ -458,6 +458,7 @@ impl WatchService {
                 "Executing custom restart command"
             );
             let mut shell_cmd = crate::platform::native_platform().build_shell_command(cmd);
+            shell_cmd.kill_on_drop(true);
             if let Some(ref dir) = trigger.directory {
                 shell_cmd.current_dir(dir);
             }

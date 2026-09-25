@@ -306,7 +306,10 @@ impl EventListenerActor {
                     }
                 } => {
                     // Child exited
-                    let exit_code = status.ok().and_then(|s| s.code());
+                    let exit_code = status
+                        .ok()
+                        .as_ref()
+                        .and_then(crate::platform::traits::normalize_exit_status);
                     if let Some(c) = child_process.take() {
                         c.cancel_token.cancel();
                     }
@@ -488,7 +491,11 @@ impl EventListenerActor {
                                             if let Ok(expected_len) = len_str.trim().parse::<usize>() {
                                                 if expected_len > 1_048_576 {
                                                     tracing::error!(program = %name, expected_len, "RESULT payload length exceeds 1MB limit");
-                                                    return None;
+                                                    state = ListenerState::Unknown;
+                                                    if let Some(env) = current_envelope.take() {
+                                                        pool.inner().requeue_rejected(env);
+                                                    }
+                                                    return Some(());
                                                 }
                                                 let mut body_buf = vec![0u8; expected_len];
                                                 if reader.read_exact(&mut body_buf).await.is_ok() {

@@ -354,7 +354,15 @@ impl Program for ProcessProgram {
             .await
             .is_ok()
         {
-            let timeout_dur = self.config.stop_wait_secs + std::time::Duration::from_secs(2);
+            let timeout_dur = self
+                .config
+                .stop_wait_secs
+                .checked_add(self.config.hook_timeout_secs)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(self.config.kill_wait_secs)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(PROCESS_STOP_GRACE_EXTRA)
+                .unwrap_or(MAX_TIMEOUT);
             let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
         }
         self.cancel_token.cancel();
@@ -1612,6 +1620,7 @@ impl ProgramActor {
     /// Executes an external lifecycle hook script with bounded timeout.
     async fn run_hook(&self, hook_cmd: &str, timeout_dur: Duration) -> Result<(), String> {
         let mut cmd = crate::platform::native_platform().build_shell_command(hook_cmd);
+        cmd.kill_on_drop(true);
         if let Some(ref dir) = self.config.directory {
             cmd.current_dir(dir);
         }
