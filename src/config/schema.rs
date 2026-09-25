@@ -136,6 +136,7 @@ pub struct LoggingConfig {
 impl LoggingConfig {
     pub fn effective_buffer_size(&self) -> usize {
         self.buffer_size
+            .filter(|&sz| sz > 0)
             .unwrap_or(crate::consts::DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE)
     }
 

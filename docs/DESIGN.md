@@ -646,9 +646,10 @@ flowchart TD
 3. **Collision Detection**: Emits a `tracing::warn!` during config resolution if multiple streams target the same rotating file with `max_bytes > 0`.
 4. **Lifecycle Persistence**: Rotators are created once per program actor and shared across child process generations, preserving sequential log rotation and avoiding file handle thrashing across restarts.
 5. **Panic Resilience & Auto-Recovery**:
-   - `FileRotate` invocations are guarded by `catch_unwind` with temporarily silenced panic hooks to avoid polluting stderr with internal panics (e.g. from concurrent Windows file locks).
-   - Partial write tracking advances `&data[n..]` in a loop so unwritten remaining bytes transfer cleanly to append-only `Fallback` without duplicating already written bytes.
-   - Rotator in fallback state attempts automatic recovery back to `FileRotate` every 50 writes once transient locks or errors clear.
+   - `FileRotate` invocations are guarded by `catch_unwind` with a thread-isolated panic silence flag (`SILENCE_PANIC_HOOK`) wrapped by a one-time installed hook (`PANIC_HOOK_INSTALLED.call_once`), completely eliminating global hook manipulation during I/O.
+   - Partial write tracking advances `&data[n..]` in a loop so unwritten remaining bytes transfer cleanly to append-only `Fallback`. (Note: because `std::io::Write::write_all` cannot report partial byte counts on failure/panic, any unreturned slice is retried in full upon entering fallback, resulting in at most ≤ max_bytes duplicates for that single event).
+   - Rotator in fallback state attempts automatic recovery back to `FileRotate` every 50 writes once transient locks or errors clear, guarded by panic catch.
+   - Warning messages to stderr on fallback transition or persistent file open errors are rate-limited to at most once per 5 seconds.
 6. **Synchronized Clear Operations**:
    - Implements `LogBackend::clear()`, which truncates the active file and resets `FileRotate`'s internal byte counters under lock.
    - Wired directly into `ProcessProgram::clear_logs` and `SupervisorManager::clear_main_log`.
@@ -670,22 +671,22 @@ flowchart TD
    - `InMemoryOnly` (`"in_memory_only"`, `"memory"`): Captures stdout/stderr via async zero-thread pipes exclusively into in-memory rotators; completely disables all disk log writers.
 2. **Segmented Memory & Sizing Architecture**:
    - Organized into an `active` segment and a bounded `VecDeque<MemorySegment>` of backup segments.
-   - Memory sizing configured via `with_total_capacity(buffer_size, backups)` where `segment_size = total / (backups + 1)`. Clamped to a minimum safe capacity (1024 bytes) to prevent single-byte segment thrashing.
+   - Memory sizing configured via `with_total_capacity(buffer_size, backups)` where `segment_size = total / (backups + 1)`. Clamped to a minimum safe capacity (at least 1024 bytes per segment) to prevent micro-segment thrashing.
    - Oversize write chunks exceeding segment capacity are sliced and rotated across sequential segments without exceeding byte limits.
 3. **Multi-byte UTF-8 Boundary Preservation**:
    - `read_lines` accumulates complete line raw bytes across generational segment boundaries before decoding via `String::from_utf8_lossy`, eliminating `\u{FFFD}` seam corruption for multi-byte UTF-8 sequences.
 4. **Startup Pre-Reading & Rotation (Seeding)**:
    - On cold start in `in_memory_only` mode, if a previous disk log file exists, `seed_from_file(path, max_bytes)`:
-     - Pre-reads the tail chunk (up to capacity) into memory, discarding any incomplete leading line fragment.
+     - Pre-reads the tail chunk (up to segment size, capped by max bytes) into memory, discarding any incomplete leading line fragment.
      - Anchors the starting monotonic offset counter `cumulative_bytes` to the on-disk `file_size`.
-     - Rotates and archives the disk file (`app.log -> app.log.1`), pre-removing destination on Windows to guarantee atomic replace.
+     - Rotates and archives the disk file (`app.log -> app.log.1`), pre-removing destination on Windows where filesystem renames cannot overwrite existing files.
 5. **Monotonic Cumulative Logical Offset (`global_bytes_written`)**:
    - Tracks a 64-bit monotonic offset that never resets across circular segment evictions.
    - Satisfies supervisor XML-RPC `(content, new_offset, overflow)` contract:
      - When client offset is within retained memory window: returns data slice and increments `new_offset`.
      - When client offset falls behind evicted memory: returns `overflow = true` and updates `new_offset` to current end of stream, prompting the client to resynchronize without disruption.
-6. **Graceful Disk-to-Memory Fallback**:
-   - When a configured disk log file does not exist on disk, `read_log` and `tail_log` gracefully fall back to the in-memory channel rotator if it has captured data.
+6. **Defensive In-Memory Fallback**:
+   - When a configured disk log file does not exist on disk, `read_log` and `tail_log` gracefully fall back to the in-memory channel rotator if it has captured data (e.g. memory/hybrid configurations and test injection).
 7. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
 
 ### 8.7 Stream-Independent Configuration & INI Mapping (OI-10)

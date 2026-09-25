@@ -26,15 +26,45 @@ enum RotatorInner {
     },
 }
 
+static PANIC_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+thread_local! {
+    static SILENCE_PANIC_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn ensure_panic_hook_installed() {
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if SILENCE_PANIC_HOOK.with(|s| s.get()) {
+                return;
+            }
+            prev_hook(info);
+        }));
+    });
+}
+
+struct ScopedSilenceGuard;
+impl Drop for ScopedSilenceGuard {
+    fn drop(&mut self) {
+        SILENCE_PANIC_HOOK.with(|s| s.set(false));
+    }
+}
+
+fn with_silenced_panic<F, R>(f: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    ensure_panic_hook_installed();
+    SILENCE_PANIC_HOOK.with(|s| s.set(true));
+    let _guard = ScopedSilenceGuard;
+    std::panic::catch_unwind(f)
+}
+
 fn catch_file_rotate_panic<F: FnOnce() -> std::io::Result<usize> + std::panic::UnwindSafe>(
     f: F,
 ) -> std::io::Result<usize> {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let res = std::panic::catch_unwind(f);
-    std::panic::set_hook(prev_hook);
-
-    match res {
+    match with_silenced_panic(f) {
         Ok(io_res) => io_res,
         Err(_) => Err(std::io::Error::other("file_rotate panicked during write")),
     }
@@ -43,12 +73,7 @@ fn catch_file_rotate_panic<F: FnOnce() -> std::io::Result<usize> + std::panic::U
 fn catch_file_rotate_flush<F: FnOnce() -> std::io::Result<()> + std::panic::UnwindSafe>(
     f: F,
 ) -> std::io::Result<()> {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let res = std::panic::catch_unwind(f);
-    std::panic::set_hook(prev_hook);
-
-    match res {
+    match with_silenced_panic(f) {
         Ok(io_res) => io_res,
         Err(_) => Err(std::io::Error::other("file_rotate panicked during flush")),
     }
@@ -56,21 +81,27 @@ fn catch_file_rotate_flush<F: FnOnce() -> std::io::Result<()> + std::panic::Unwi
 
 impl Write for RotatorInner {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| match self {
-            Self::Count(w) => w.write(buf),
-            Self::Timestamp(w) => w.write(buf),
+        match self {
+            Self::Count(w) => {
+                catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| w.write(buf)))
+            }
+            Self::Timestamp(w) => {
+                catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| w.write(buf)))
+            }
             Self::Append(w) => w.write(buf),
             Self::Fallback { file, .. } => file.write(buf),
-        }))
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| match self {
-            Self::Count(w) => w.flush(),
-            Self::Timestamp(w) => w.flush(),
+        match self {
+            Self::Count(w) => catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| w.flush())),
+            Self::Timestamp(w) => {
+                catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| w.flush()))
+            }
             Self::Append(w) => w.flush(),
             Self::Fallback { file, .. } => file.flush(),
-        }))
+        }
     }
 }
 
@@ -82,6 +113,7 @@ pub struct LogRotator {
     backups: usize,
     timestamp_suffix: bool,
     inner: Arc<Mutex<RotatorInner>>,
+    last_fallback_warn_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl LogRotator {
@@ -176,6 +208,7 @@ impl LogRotator {
             backups,
             timestamp_suffix,
             inner: Arc::new(Mutex::new(inner)),
+            last_fallback_warn_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -199,15 +232,21 @@ impl LogRotator {
         {
             *writes_since_fallback += 1;
             if *writes_since_fallback >= 50 {
-                if let Ok(recovered) = Self::build_inner(
-                    &self.path,
-                    self.max_bytes,
-                    self.backups,
-                    self.timestamp_suffix,
-                ) {
-                    *guard = recovered;
-                } else {
-                    *writes_since_fallback = 0;
+                let recovered_res = with_silenced_panic(std::panic::AssertUnwindSafe(|| {
+                    Self::build_inner(
+                        &self.path,
+                        self.max_bytes,
+                        self.backups,
+                        self.timestamp_suffix,
+                    )
+                }));
+                match recovered_res {
+                    Ok(Ok(recovered)) => {
+                        *guard = recovered;
+                    }
+                    _ => {
+                        *writes_since_fallback = 0;
+                    }
                 }
             }
         }
@@ -224,8 +263,17 @@ impl LogRotator {
                     data = &data[n..];
                 }
                 Err(err) => {
-                    // Log once when entering Fallback mode to prevent spamming stderr
-                    if !matches!(*guard, RotatorInner::Fallback { .. }) {
+                    // Rate-limit warnings to stderr (at most once every 5 seconds)
+                    let now_epoch = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let last = self
+                        .last_fallback_warn_epoch
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if now_epoch.saturating_sub(last) >= 5 {
+                        self.last_fallback_warn_epoch
+                            .store(now_epoch, std::sync::atomic::Ordering::Relaxed);
                         eprintln!(
                             "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
                             self.path.display(),
@@ -474,5 +522,74 @@ mod tests {
         rotator.write_line("post-clear line").unwrap();
         let content = std::fs::read_to_string(&log_file).unwrap();
         assert_eq!(content, "post-clear line\n");
+    }
+
+    #[test]
+    fn test_log_rotator_fallback_auto_recovery() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("recovery.log");
+        let rotator = LogRotator::with_options(&log_file, 50, 2, false).unwrap();
+
+        // 1. Manually transition to Fallback state
+        {
+            let mut guard = rotator.inner.lock();
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_file)
+                .unwrap();
+            *guard = RotatorInner::Fallback {
+                file,
+                writes_since_fallback: 0,
+            };
+        }
+
+        // Verify it is currently Fallback
+        {
+            let guard = rotator.inner.lock();
+            assert!(matches!(*guard, RotatorInner::Fallback { .. }));
+        }
+
+        // 2. Perform 50 writes to trigger auto-recovery
+        for i in 0..50 {
+            rotator
+                .write_all(format!("fallback-line-{}\n", i).as_bytes())
+                .unwrap();
+        }
+
+        // 3. Verify inner state has recovered back to RotatorInner::Count
+        {
+            let guard = rotator.inner.lock();
+            assert!(
+                matches!(*guard, RotatorInner::Count(_)),
+                "Expected rotator to recover back to Count variant"
+            );
+        }
+
+        // 4. Subsequent writes should rotate files normally
+        rotator
+            .write_all(b"large line that exceeds segment max bytes after recovery 1234567890\n")
+            .unwrap();
+        rotator
+            .write_all(b"another line that pushes past limit into rotation\n")
+            .unwrap();
+
+        let backup1 = dir.path().join("recovery.log.1");
+        assert!(
+            backup1.exists(),
+            "Backup recovery.log.1 should be created after recovery to FileRotate"
+        );
+    }
+
+    #[test]
+    fn test_thread_isolated_panic_silencing() {
+        // Test that with_silenced_panic catches a panic without propagating
+        let res = with_silenced_panic(std::panic::AssertUnwindSafe(|| {
+            panic!("test panic that should be caught and silenced");
+        }));
+        assert!(res.is_err());
+
+        // Verify that SILENCE_PANIC_HOOK is false afterwards
+        assert!(!SILENCE_PANIC_HOOK.with(|s| s.get()));
     }
 }

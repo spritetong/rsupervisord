@@ -108,13 +108,12 @@ impl InMemoryChannelRotator {
     }
 
     /// Creates a new in-memory channel rotator bounded by total stream retention capacity.
+    /// Each segment is clamped to at least 1024 bytes to prevent micro-segment thrashing.
     pub fn with_total_capacity(total_capacity: usize, backups: usize) -> Self {
-        let safe_capacity = total_capacity.max(1024);
-        let segment_bytes = if backups > 0 {
-            (safe_capacity / (backups + 1)).max(1)
-        } else {
-            safe_capacity
-        };
+        let segment_count = backups.saturating_add(1).max(1);
+        let min_total = segment_count.saturating_mul(1024);
+        let safe_capacity = total_capacity.max(min_total);
+        let segment_bytes = (safe_capacity / segment_count).max(1024);
         Self::new(segment_bytes, backups)
     }
 
@@ -863,28 +862,28 @@ mod tests {
 
     #[test]
     fn test_with_total_capacity_retention_bound() {
-        // Total capacity 2000 bytes, 4 backups -> 5 segments of 400 bytes each
-        let rotator = InMemoryChannelRotator::with_total_capacity(2000, 4);
-        assert_eq!(rotator.segment_size(), 400);
+        // Total capacity 10000 bytes, 4 backups -> 5 segments of 2000 bytes each
+        let rotator = InMemoryChannelRotator::with_total_capacity(10000, 4);
+        assert_eq!(rotator.segment_size(), 2000);
 
-        // Append 4000 bytes
+        // Append 20000 bytes
         for _ in 0..10 {
-            rotator.append_bytes(&[b'x'; 400]); // 400 bytes each
+            rotator.append_bytes(&[b'x'; 2000]); // 2000 bytes each
         }
 
-        // Cumulative bytes must be 4000
-        assert_eq!(rotator.cumulative_bytes(), 4000);
+        // Cumulative bytes must be 20000
+        assert_eq!(rotator.cumulative_bytes(), 20000);
 
-        // Retained bytes must not exceed total_capacity (2000)
+        // Retained bytes must not exceed total_capacity (10000)
         assert!(
-            rotator.byte_size() <= 2000,
-            "retained {} exceeds total capacity 2000",
+            rotator.byte_size() <= 10000,
+            "retained {} exceeds total capacity 10000",
             rotator.byte_size()
         );
 
-        // Also verify min safe capacity clamping (1024 bytes)
+        // Verify min safe segment clamping (at least 1024 bytes per segment)
         let clamped = InMemoryChannelRotator::with_total_capacity(100, 3);
-        // 1024 clamped / 4 segments = 256
-        assert_eq!(clamped.segment_size(), 256);
+        // 4 segments * 1024 = 4096 min capacity -> 1024 per segment
+        assert_eq!(clamped.segment_size(), 1024);
     }
 }

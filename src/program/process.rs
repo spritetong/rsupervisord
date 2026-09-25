@@ -453,6 +453,8 @@ impl Program for ProcessProgram {
                         error: e.to_string(),
                     })
             } else if configured_path.is_some() {
+                // Defensive fallback: when configured file is absent on disk but logs were captured
+                // in memory (e.g. hybrid configurations or test injection), gracefully serve from memory.
                 let channel_rotator = match channel {
                     crate::logging::LogChannel::Stdout => self.in_memory_rotator.stdout(),
                     crate::logging::LogChannel::Stderr => self.in_memory_rotator.stderr(),
@@ -510,6 +512,7 @@ impl Program for ProcessProgram {
                     path, offset, length,
                 ))
             } else if configured_path.is_some() {
+                // Defensive fallback: gracefully serve from in-memory if memory channel has data
                 let channel_rotator = match channel {
                     crate::logging::LogChannel::Stdout => self.in_memory_rotator.stdout(),
                     crate::logging::LogChannel::Stderr => self.in_memory_rotator.stderr(),
