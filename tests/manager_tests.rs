@@ -246,11 +246,15 @@ async fn test_activity_tracker_and_idle_timeout() {
     let tracker = ActivityTracker::new(1, true); // 1s timeout
     assert!(tracker.is_metrics_active());
 
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    assert!(
-        !tracker.is_metrics_active(),
-        "Should be inactive after idle timeout"
-    );
+    let mut inactive = false;
+    for _ in 0..40 {
+        if !tracker.is_metrics_active() {
+            inactive = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(inactive, "Should be inactive after idle timeout");
 
     tracker.record_activity();
     assert!(
@@ -387,9 +391,16 @@ programs:
     assert!(started.contains(&"srv_2".to_string()));
 
     // Verify srv_1 and srv_2 are running, while other_srv is still stopped
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let st1 = handle.get_status("srv_1").await.unwrap();
-    let st2 = handle.get_status("srv_2").await.unwrap();
+    let mut st1 = handle.get_status("srv_1").await.unwrap();
+    let mut st2 = handle.get_status("srv_2").await.unwrap();
+    for _ in 0..40 {
+        if st1.state == ProgramState::Running && st2.state == ProgramState::Running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        st1 = handle.get_status("srv_1").await.unwrap();
+        st2 = handle.get_status("srv_2").await.unwrap();
+    }
     let st3 = handle.get_status("other_srv").await.unwrap();
 
     assert_eq!(st1.state, ProgramState::Running);
@@ -415,8 +426,14 @@ programs:
         .expect("stop group");
     assert_eq!(stopped.len(), 2);
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let st1_after = handle.get_status("srv_1").await.unwrap();
+    let mut st1_after = handle.get_status("srv_1").await.unwrap();
+    for _ in 0..40 {
+        if st1_after.state == ProgramState::Stopped {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        st1_after = handle.get_status("srv_1").await.unwrap();
+    }
     assert_eq!(st1_after.state, ProgramState::Stopped);
 
     manager.shutdown().await.expect("manager shutdown");

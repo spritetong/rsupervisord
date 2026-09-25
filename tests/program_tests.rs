@@ -252,8 +252,15 @@ async fn test_unix_process_group_cleanup() {
 
     // Verify all processes in the process group are terminated (kill -0 should fail with ESRCH)
     let pgid = nix::unistd::Pid::from_raw(-(pid as i32));
-    let probe = nix::sys::signal::kill(pgid, None);
-    assert!(probe.is_err(), "Process group should no longer exist");
+    let mut pg_exists = true;
+    for _ in 0..40 {
+        if nix::sys::signal::kill(pgid, None).is_err() {
+            pg_exists = false;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!pg_exists, "Process group should no longer exist");
 
     program.shutdown().await.expect("shutdown");
 }

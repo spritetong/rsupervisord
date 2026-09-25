@@ -7,6 +7,7 @@
 use rsupervisord::logging::{InMemoryChannelRotator, LogChannel, LogRotator, RingBuffer};
 use rsupervisord::program::ProcessProgram;
 use rsupervisord::program::config::{AutoRestartPolicy, LogMode, ProgramConfig, ProgramLogsConfig};
+use rsupervisord::program::state::ProgramState;
 use rsupervisord::program::traits::Program;
 use rsupervisord::serde_util::string_to_bytes;
 use std::time::Duration;
@@ -253,8 +254,10 @@ async fn test_process_logs_disabled_uses_null_stdio() {
     let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
 
-    // Give the child time to write output that must be discarded via Stdio::null().
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for the short-lived process to exit after discarding output via Stdio::null().
+    let _ = program
+        .wait_for_state(ProgramState::Exited, Duration::from_secs(5))
+        .await;
     let _ = program.stop(Duration::from_secs(1)).await;
 
     let logs = program.read_logs(None);

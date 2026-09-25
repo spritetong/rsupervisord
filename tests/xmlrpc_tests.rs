@@ -9,6 +9,7 @@ use axum::http::{Request, StatusCode};
 use rsupervisord::compat::xmlrpc::fault::FaultCode;
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
+use rsupervisord::program::state::ProgramState;
 use rsupervisord::server::api::{AppState, build_router};
 use rsupervisord::server::auth::BasicAuthConfig;
 use std::time::Duration;
@@ -258,7 +259,15 @@ programs:
     let state = AppState::new(manager.handle(), None, None, None);
     let app = build_router(state);
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait until services:ticker is RUNNING via bounded polling
+    for _ in 0..50 {
+        if let Ok(st) = manager.handle().get_status("ticker").await
+            && st.state == ProgramState::Running
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // 1. getAllProcessInfo
     let req = "<methodCall><methodName>supervisor.getAllProcessInfo</methodName></methodCall>";
@@ -478,7 +487,15 @@ programs:
     let state = AppState::new(manager.handle(), None, None, None);
     let app = build_router(state);
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait until services:srv1 is RUNNING via bounded polling
+    for _ in 0..50 {
+        if let Ok(st) = manager.handle().get_status("srv1").await
+            && st.state == ProgramState::Running
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // 1. stopProcessGroup
     let req = "<methodCall><methodName>supervisor.stopProcessGroup</methodName><params><param><value><string>services</string></value></param></params></methodCall>";

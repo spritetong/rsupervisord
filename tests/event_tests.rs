@@ -189,12 +189,11 @@ programs:
         .expect("start sse_worker");
 
     // Wait for event to propagate
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    {
-        let list = received_events.lock();
-        assert!(
-            list.iter().any(|e| match e {
+    let mut started_found = false;
+    for _ in 0..60 {
+        {
+            let list = received_events.lock();
+            if list.iter().any(|e| match e {
                 SystemEvent::StateChanged {
                     name, new_state, ..
                 } => {
@@ -203,34 +202,46 @@ programs:
                             || *new_state == ProgramState::Starting)
                 }
                 _ => false,
-            }),
-            "Expected StateChanged event for sse_worker, got: {:?}",
-            *list
-        );
+            }) {
+                started_found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        started_found,
+        "Expected StateChanged event for sse_worker, got: {:?}",
+        *received_events.lock()
+    );
 
     // Stop program
     let _ = client
         .stop("sse_worker", true, 5)
         .await
         .expect("stop sse_worker");
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    {
-        let list = received_events.lock();
-        assert!(
-            list.iter().any(|e| match e {
+    let mut stopped_found = false;
+    for _ in 0..60 {
+        {
+            let list = received_events.lock();
+            if list.iter().any(|e| match e {
                 SystemEvent::StateChanged {
                     name, new_state, ..
-                } => {
-                    name == "sse_worker" && *new_state == ProgramState::Stopped
-                }
+                } => name == "sse_worker" && *new_state == ProgramState::Stopped,
                 _ => false,
-            }),
-            "Expected StateChanged Stopped event for sse_worker, got: {:?}",
-            *list
-        );
+            }) {
+                stopped_found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        stopped_found,
+        "Expected StateChanged Stopped event for sse_worker, got: {:?}",
+        *received_events.lock()
+    );
 
     listener_task.abort();
     server_cancel.cancel();
@@ -313,17 +324,25 @@ programs:
         .expect("start logger_a");
 
     // Allow logs to flush and pump to central hub
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    {
-        let list = received_logs.lock();
-        assert!(
-            list.iter()
-                .any(|l| l.program == "logger_a" && l.line.contains("agg_log_line_alpha")),
-            "Expected aggregated log entry from logger_a, got: {:?}",
-            *list
-        );
+    let mut log_found = false;
+    for _ in 0..100 {
+        {
+            let list = received_logs.lock();
+            if list
+                .iter()
+                .any(|l| l.program == "logger_a" && l.line.contains("agg_log_line_alpha"))
+            {
+                log_found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        log_found,
+        "Expected aggregated log entry from logger_a, got: {:?}",
+        *received_logs.lock()
+    );
 
     listener_task.abort();
     server_cancel.cancel();
@@ -377,13 +396,21 @@ programs:
         let _ = server.run(server_token).await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let connect_stream = || async {
+        for _ in 0..40 {
+            if let Ok(s) = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+                return Ok(s);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await
+    };
 
     // 1. Connect without token -> should receive 401 Unauthorized
     {
-        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-            .await
-            .expect("connect tcp");
+        let mut stream = connect_stream().await.expect("connect tcp");
         stream
             .write_all(b"GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
@@ -403,9 +430,7 @@ programs:
 
     // 2. Connect with query param token -> should receive 200 OK
     {
-        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-            .await
-            .expect("connect tcp");
+        let mut stream = connect_stream().await.expect("connect tcp");
         stream
             .write_all(
                 b"GET /api/v1/events?token=secret_bus_token HTTP/1.1\r\nHost: localhost\r\n\r\n",

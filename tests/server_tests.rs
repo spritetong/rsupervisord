@@ -962,9 +962,21 @@ programs:
         .expect("start group:*");
     assert_eq!(start_resp.len(), 2);
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let st1 = client.get_program("node1").await.unwrap();
-    let st2 = client.get_program("node2").await.unwrap();
+    let mut st1 = client.get_program("node1").await.unwrap();
+    let mut st2 = client.get_program("node2").await.unwrap();
+    for _ in 0..40 {
+        if st1.state == ProgramState::Running && st2.state == ProgramState::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let (Ok(s1), Ok(s2)) = (
+            client.get_program("node1").await,
+            client.get_program("node2").await,
+        ) {
+            st1 = s1;
+            st2 = s2;
+        }
+    }
     let st3 = client.get_program("single_worker").await.unwrap();
     assert_eq!(st1.state, ProgramState::Running);
     assert_eq!(st1.group, "cluster_group");
@@ -979,8 +991,16 @@ programs:
         .expect("stop group:*");
     assert_eq!(stop_resp.len(), 2);
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let st1_after = client.get_program("node1").await.unwrap();
+    let mut st1_after = client.get_program("node1").await.unwrap();
+    for _ in 0..40 {
+        if st1_after.state == ProgramState::Stopped {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Ok(s1) = client.get_program("node1").await {
+            st1_after = s1;
+        }
+    }
     assert_eq!(st1_after.state, ProgramState::Stopped);
 
     server_cancel.cancel();

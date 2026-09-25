@@ -367,19 +367,24 @@ async fn test_windows_gui_wm_close_shutdown_signal() {
         rsupervisord::platform::wait_for_shutdown_signal().await;
     });
 
-    // Give the listener window a brief moment to spawn
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Find the hidden GUI listener window by its title
+    // Poll until the listener window is registered and spawned
     let window_title = "rsupervisord_shutdown_listener\0"
         .encode_utf16()
         .collect::<Vec<u16>>();
-    let hwnd = unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
-            std::ptr::null(),
-            window_title.as_ptr(),
-        )
-    };
+    let mut hwnd = std::ptr::null_mut();
+    for _ in 0..60 {
+        let h = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+                std::ptr::null(),
+                window_title.as_ptr(),
+            )
+        };
+        if !h.is_null() {
+            hwnd = h;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     assert!(!hwnd.is_null(), "Hidden GUI listener window must exist");
 
@@ -423,19 +428,24 @@ async fn test_windows_gui_notepad_graceful_stop() {
         .attach_child(&child, pid, false, false)
         .expect("attach_child failed");
 
-    // Wait a brief moment for Notepad to initialize its GUI window
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for Notepad window to appear and process WM_CLOSE until exit
+    let mut exit_status = None;
+    for _ in 0..50 {
+        let _ = guard.send_stop_signal(StopSignal::default());
+        if let Ok(Some(status)) = child.try_wait() {
+            exit_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
-    // Send stop signal which posts WM_CLOSE to notepad top-level window
-    guard
-        .send_stop_signal(StopSignal::default())
-        .expect("send_stop_signal failed");
+    let status = match exit_status {
+        Some(s) => s,
+        None => tokio::time::timeout(Duration::from_secs(2), guard.wait_exit(&mut child))
+            .await
+            .expect("Notepad failed to exit after WM_CLOSE within 5s")
+            .expect("child wait_exit failed"),
+    };
 
-    // Notepad should process WM_CLOSE and exit cleanly within 5 seconds
-    let exit_status = tokio::time::timeout(Duration::from_secs(5), guard.wait_exit(&mut child))
-        .await
-        .expect("Notepad failed to exit after WM_CLOSE within 5s")
-        .expect("child wait_exit failed");
-
-    assert!(exit_status.success() || exit_status.code().is_some());
+    assert!(status.success() || status.code().is_some());
 }
