@@ -918,6 +918,7 @@ pub struct SupervisorManagerBuilder {
     event_hub: Option<crate::manager::EventHub>,
     cancel_token: Option<CancellationToken>,
     main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
+    main_file_rotator: Option<Arc<crate::logging::LogRotator>>,
 }
 
 impl SupervisorManagerBuilder {
@@ -928,6 +929,7 @@ impl SupervisorManagerBuilder {
             event_hub: None,
             cancel_token: None,
             main_log_rotator: None,
+            main_file_rotator: None,
         }
     }
 
@@ -948,6 +950,14 @@ impl SupervisorManagerBuilder {
 
     pub fn with_main_log_rotator(mut self, rotator: Option<Arc<InMemoryChannelRotator>>) -> Self {
         self.main_log_rotator = rotator;
+        self
+    }
+
+    pub fn with_main_file_rotator(
+        mut self,
+        rotator: Option<Arc<crate::logging::LogRotator>>,
+    ) -> Self {
+        self.main_file_rotator = rotator;
         self
     }
 
@@ -1061,6 +1071,7 @@ impl SupervisorManagerBuilder {
         let main_log_rotator = self
             .main_log_rotator
             .or_else(|| self.config.logging.build_main_rotator());
+        let main_file_rotator = self.main_file_rotator;
 
         let actor = ManagerActor {
             programs,
@@ -1077,6 +1088,7 @@ impl SupervisorManagerBuilder {
             event_pools,
             server_identifier,
             main_log_rotator: main_log_rotator.clone(),
+            main_file_rotator: main_file_rotator.clone(),
             config_logging: self.config.logging.clone(),
         };
 
@@ -1087,6 +1099,7 @@ impl SupervisorManagerBuilder {
             handle,
             actor_handle: Some(actor_handle),
             main_log_rotator,
+            main_file_rotator,
             _cancel_guard: cancel_guard,
         })
     }
@@ -1096,6 +1109,7 @@ pub struct SupervisorManager {
     handle: ManagerHandle,
     actor_handle: Option<JoinHandle<()>>,
     main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
+    main_file_rotator: Option<Arc<crate::logging::LogRotator>>,
     _cancel_guard: tokio_util::sync::DropGuard,
 }
 
@@ -1115,6 +1129,10 @@ impl SupervisorManager {
 
     pub fn main_log_rotator(&self) -> Option<Arc<InMemoryChannelRotator>> {
         self.main_log_rotator.clone()
+    }
+
+    pub fn main_file_rotator(&self) -> Option<Arc<crate::logging::LogRotator>> {
+        self.main_file_rotator.clone()
     }
 
     pub async fn reload_config(
@@ -1152,6 +1170,7 @@ struct ManagerActor {
     event_pools: HashMap<String, EventListenerPool>,
     server_identifier: String,
     main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
+    main_file_rotator: Option<Arc<crate::logging::LogRotator>>,
     config_logging: crate::config::schema::LoggingConfig,
 }
 
@@ -2045,6 +2064,9 @@ impl ManagerActor {
     fn execute_clear_main_log(&self) -> Result<(), ProgramError> {
         if let Some(ref rotator) = self.main_log_rotator {
             rotator.clear();
+        }
+        if let Some(ref rotator) = self.main_file_rotator {
+            let _ = crate::logging::LogBackend::clear(rotator.as_ref());
         }
         let path = self.config_logging.resolved_file_path();
         if path.exists() {

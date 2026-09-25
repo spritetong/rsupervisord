@@ -21,4 +21,9 @@ pub trait LogBackend: Send + Sync + 'static {
     async fn close(&self) -> Result<(), ProgramError> {
         self.flush().await
     }
+
+    /// Clears any cached or underlying log storage and resets rotation states.
+    fn clear(&self) -> Result<(), ProgramError> {
+        Ok(())
+    }
 }

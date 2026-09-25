@@ -247,6 +247,7 @@ impl LogFileReader {
         if let Some(suffix) = archive_suffix {
             let rotated_path = format!("{}.{}", path.to_string_lossy(), suffix);
             let dest = Path::new(&rotated_path);
+            #[cfg(windows)]
             if dest.exists() {
                 let _ = std::fs::remove_file(dest);
             }

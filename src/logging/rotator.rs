@@ -20,36 +20,57 @@ enum RotatorInner {
     Count(FileRotate<AppendCount>),
     Timestamp(FileRotate<AppendTimestamp>),
     Append(File),
-    Fallback(File),
+    Fallback {
+        file: File,
+        writes_since_fallback: usize,
+    },
+}
+
+fn catch_file_rotate_panic<F: FnOnce() -> std::io::Result<usize> + std::panic::UnwindSafe>(
+    f: F,
+) -> std::io::Result<usize> {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let res = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+
+    match res {
+        Ok(io_res) => io_res,
+        Err(_) => Err(std::io::Error::other("file_rotate panicked during write")),
+    }
+}
+
+fn catch_file_rotate_flush<F: FnOnce() -> std::io::Result<()> + std::panic::UnwindSafe>(
+    f: F,
+) -> std::io::Result<()> {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let res = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+
+    match res {
+        Ok(io_res) => io_res,
+        Err(_) => Err(std::io::Error::other("file_rotate panicked during flush")),
+    }
 }
 
 impl Write for RotatorInner {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self {
+        catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| match self {
             Self::Count(w) => w.write(buf),
             Self::Timestamp(w) => w.write(buf),
             Self::Append(w) => w.write(buf),
-            Self::Fallback(w) => w.write(buf),
-        }));
-
-        match res {
-            Ok(io_res) => io_res,
-            Err(_) => Err(std::io::Error::other("file_rotate panicked during write")),
-        }
+            Self::Fallback { file, .. } => file.write(buf),
+        }))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self {
+        catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| match self {
             Self::Count(w) => w.flush(),
             Self::Timestamp(w) => w.flush(),
             Self::Append(w) => w.flush(),
-            Self::Fallback(w) => w.flush(),
-        }));
-
-        match res {
-            Ok(io_res) => io_res,
-            Err(_) => Err(std::io::Error::other("file_rotate panicked during flush")),
-        }
+            Self::Fallback { file, .. } => file.flush(),
+        }))
     }
 }
 
@@ -167,25 +188,67 @@ impl LogRotator {
     }
 
     /// Writes a raw byte buffer to the rotating log file with automatic recovery.
-    pub fn write_all(&self, data: &[u8]) -> std::io::Result<()> {
+    pub fn write_all(&self, mut data: &[u8]) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        if let Err(err) = guard.write_all(data) {
-            eprintln!(
-                "[rsupervisord] Warning: log write failed for '{}': {}; falling back to append-only mode",
-                self.path.display(),
-                err
-            );
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-            {
-                Ok(mut file) => {
-                    let _ = file.write_all(data);
-                    *guard = RotatorInner::Fallback(file);
+
+        // Check if we can recover from Fallback back to standard FileRotate
+        if let RotatorInner::Fallback {
+            ref mut writes_since_fallback,
+            ..
+        } = *guard
+        {
+            *writes_since_fallback += 1;
+            if *writes_since_fallback >= 50 {
+                if let Ok(recovered) = Self::build_inner(
+                    &self.path,
+                    self.max_bytes,
+                    self.backups,
+                    self.timestamp_suffix,
+                ) {
+                    *guard = recovered;
+                } else {
+                    *writes_since_fallback = 0;
                 }
-                Err(fallback_err) => {
-                    return Err(fallback_err);
+            }
+        }
+
+        while !data.is_empty() {
+            match guard.write(data) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer to log rotator",
+                    ));
+                }
+                Ok(n) => {
+                    data = &data[n..];
+                }
+                Err(err) => {
+                    // Log once when entering Fallback mode to prevent spamming stderr
+                    if !matches!(*guard, RotatorInner::Fallback { .. }) {
+                        eprintln!(
+                            "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
+                            self.path.display(),
+                            err
+                        );
+                    }
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&self.path)
+                    {
+                        Ok(mut file) => {
+                            file.write_all(data)?;
+                            *guard = RotatorInner::Fallback {
+                                file,
+                                writes_since_fallback: 0,
+                            };
+                            return Ok(());
+                        }
+                        Err(fallback_err) => {
+                            return Err(fallback_err);
+                        }
+                    }
                 }
             }
         }
@@ -215,7 +278,10 @@ impl LogRotator {
                     .create(true)
                     .append(true)
                     .open(&self.path)?;
-                RotatorInner::Fallback(file)
+                RotatorInner::Fallback {
+                    file,
+                    writes_since_fallback: 0,
+                }
             }
         };
         Ok(())
@@ -260,6 +326,16 @@ impl LogBackend for LogRotator {
         self.flush().map_err(|e| {
             ProgramError::PlatformError(format!(
                 "Failed to flush log file '{}': {}",
+                self.path.display(),
+                e
+            ))
+        })
+    }
+
+    fn clear(&self) -> Result<(), ProgramError> {
+        LogRotator::clear(self).map_err(|e| {
+            ProgramError::PlatformError(format!(
+                "Failed to clear log file '{}': {}",
                 self.path.display(),
                 e
             ))

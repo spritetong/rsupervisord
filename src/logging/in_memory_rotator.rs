@@ -109,10 +109,11 @@ impl InMemoryChannelRotator {
 
     /// Creates a new in-memory channel rotator bounded by total stream retention capacity.
     pub fn with_total_capacity(total_capacity: usize, backups: usize) -> Self {
+        let safe_capacity = total_capacity.max(1024);
         let segment_bytes = if backups > 0 {
-            (total_capacity / (backups + 1)).max(1)
+            (safe_capacity / (backups + 1)).max(1)
         } else {
-            total_capacity.max(1)
+            safe_capacity
         };
         Self::new(segment_bytes, backups)
     }
@@ -431,25 +432,25 @@ impl InMemoryChannelRotator {
             .collect();
 
         let mut lines = Vec::new();
-        let mut cur = String::new();
+        let mut cur_line_bytes = Vec::new();
         for slice in slices {
-            let text = String::from_utf8_lossy(slice);
-            for ch in text.chars() {
-                if ch == '\n' {
-                    if cur.ends_with('\r') {
-                        cur.pop();
+            for &b in slice {
+                if b == b'\n' {
+                    if cur_line_bytes.last() == Some(&b'\r') {
+                        cur_line_bytes.pop();
                     }
-                    lines.push(std::mem::take(&mut cur));
+                    lines.push(String::from_utf8_lossy(&cur_line_bytes).into_owned());
+                    cur_line_bytes.clear();
                 } else {
-                    cur.push(ch);
+                    cur_line_bytes.push(b);
                 }
             }
         }
-        if !cur.is_empty() {
-            if cur.ends_with('\r') {
-                cur.pop();
+        if !cur_line_bytes.is_empty() {
+            if cur_line_bytes.last() == Some(&b'\r') {
+                cur_line_bytes.pop();
             }
-            lines.push(cur);
+            lines.push(String::from_utf8_lossy(&cur_line_bytes).into_owned());
         }
 
         match max_lines {
@@ -503,6 +504,11 @@ impl LogBackend for InMemoryChannelRotator {
 
     async fn flush(&self) -> Result<(), ProgramError> {
         self.flush_broadcast();
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), ProgramError> {
+        InMemoryChannelRotator::clear(self);
         Ok(())
     }
 }
@@ -572,6 +578,18 @@ impl InMemoryLogRotator {
             let _ = self.stderr.seed_from_file(p, max_seed_bytes);
         }
     }
+
+    /// Clears logs from one or both channels.
+    pub fn clear(&self, channel: Option<LogChannel>) {
+        match channel {
+            Some(LogChannel::Stdout) => self.stdout.clear(),
+            Some(LogChannel::Stderr) => self.stderr.clear(),
+            None => {
+                self.stdout.clear();
+                self.stderr.clear();
+            }
+        }
+    }
 }
 
 impl Default for InMemoryLogRotator {
@@ -596,6 +614,12 @@ impl LogBackend for InMemoryLogRotator {
     async fn flush(&self) -> Result<(), ProgramError> {
         self.stdout.flush_broadcast();
         self.stderr.flush_broadcast();
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), ProgramError> {
+        self.stdout.clear();
+        self.stderr.clear();
         Ok(())
     }
 }
@@ -839,23 +863,28 @@ mod tests {
 
     #[test]
     fn test_with_total_capacity_retention_bound() {
-        // Total capacity 100 bytes, 4 backups -> 5 segments of 20 bytes each
-        let rotator = InMemoryChannelRotator::with_total_capacity(100, 4);
-        assert_eq!(rotator.segment_size(), 20);
+        // Total capacity 2000 bytes, 4 backups -> 5 segments of 400 bytes each
+        let rotator = InMemoryChannelRotator::with_total_capacity(2000, 4);
+        assert_eq!(rotator.segment_size(), 400);
 
-        // Append 200 bytes
+        // Append 4000 bytes
         for _ in 0..10 {
-            rotator.append_bytes(b"0123456789abcdefghij"); // 20 bytes each
+            rotator.append_bytes(&[b'x'; 400]); // 400 bytes each
         }
 
-        // Cumulative bytes must be 200
-        assert_eq!(rotator.cumulative_bytes(), 200);
+        // Cumulative bytes must be 4000
+        assert_eq!(rotator.cumulative_bytes(), 4000);
 
-        // Retained bytes must not exceed total_capacity (100)
+        // Retained bytes must not exceed total_capacity (2000)
         assert!(
-            rotator.byte_size() <= 100,
-            "retained {} exceeds total capacity 100",
+            rotator.byte_size() <= 2000,
+            "retained {} exceeds total capacity 2000",
             rotator.byte_size()
         );
+
+        // Also verify min safe capacity clamping (1024 bytes)
+        let clamped = InMemoryChannelRotator::with_total_capacity(100, 3);
+        // 1024 clamped / 4 segments = 256
+        assert_eq!(clamped.segment_size(), 256);
     }
 }

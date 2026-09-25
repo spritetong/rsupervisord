@@ -645,6 +645,13 @@ flowchart TD
 2. **Append-Only Mode (`max_bytes: 0`)**: Rotation is disabled; the file is opened directly in append mode (`OpenOptions::append(true)`).
 3. **Collision Detection**: Emits a `tracing::warn!` during config resolution if multiple streams target the same rotating file with `max_bytes > 0`.
 4. **Lifecycle Persistence**: Rotators are created once per program actor and shared across child process generations, preserving sequential log rotation and avoiding file handle thrashing across restarts.
+5. **Panic Resilience & Auto-Recovery**:
+   - `FileRotate` invocations are guarded by `catch_unwind` with temporarily silenced panic hooks to avoid polluting stderr with internal panics (e.g. from concurrent Windows file locks).
+   - Partial write tracking advances `&data[n..]` in a loop so unwritten remaining bytes transfer cleanly to append-only `Fallback` without duplicating already written bytes.
+   - Rotator in fallback state attempts automatic recovery back to `FileRotate` every 50 writes once transient locks or errors clear.
+6. **Synchronized Clear Operations**:
+   - Implements `LogBackend::clear()`, which truncates the active file and resets `FileRotate`'s internal byte counters under lock.
+   - Wired directly into `ProcessProgram::clear_logs` and `SupervisorManager::clear_main_log`.
 
 ### 8.5 RFC 3164 Syslog Backend (`src/logging/syslog/`)
 
@@ -663,18 +670,23 @@ flowchart TD
    - `InMemoryOnly` (`"in_memory_only"`, `"memory"`): Captures stdout/stderr via async zero-thread pipes exclusively into in-memory rotators; completely disables all disk log writers.
 2. **Segmented Memory & Sizing Architecture**:
    - Organized into an `active` segment and a bounded `VecDeque<MemorySegment>` of backup segments.
-   - Configurable per stream via `buffer_size` or `max_bytes` / `backups`. When `backups: 0`, operates as a single contiguous circular buffer.
-3. **Startup Pre-Reading & Rotation (Seeding)**:
+   - Memory sizing configured via `with_total_capacity(buffer_size, backups)` where `segment_size = total / (backups + 1)`. Clamped to a minimum safe capacity (1024 bytes) to prevent single-byte segment thrashing.
+   - Oversize write chunks exceeding segment capacity are sliced and rotated across sequential segments without exceeding byte limits.
+3. **Multi-byte UTF-8 Boundary Preservation**:
+   - `read_lines` accumulates complete line raw bytes across generational segment boundaries before decoding via `String::from_utf8_lossy`, eliminating `\u{FFFD}` seam corruption for multi-byte UTF-8 sequences.
+4. **Startup Pre-Reading & Rotation (Seeding)**:
    - On cold start in `in_memory_only` mode, if a previous disk log file exists, `seed_from_file(path, max_bytes)`:
      - Pre-reads the tail chunk (up to capacity) into memory, discarding any incomplete leading line fragment.
      - Anchors the starting monotonic offset counter `cumulative_bytes` to the on-disk `file_size`.
-     - Rotates and archives the disk file (`app.log -> app.log.1`), ensuring zero subsequent disk writes occur during daemon lifetime.
-4. **Monotonic Cumulative Logical Offset (`global_bytes_written`)**:
+     - Rotates and archives the disk file (`app.log -> app.log.1`), pre-removing destination on Windows to guarantee atomic replace.
+5. **Monotonic Cumulative Logical Offset (`global_bytes_written`)**:
    - Tracks a 64-bit monotonic offset that never resets across circular segment evictions.
    - Satisfies supervisor XML-RPC `(content, new_offset, overflow)` contract:
      - When client offset is within retained memory window: returns data slice and increments `new_offset`.
      - When client offset falls behind evicted memory: returns `overflow = true` and updates `new_offset` to current end of stream, prompting the client to resynchronize without disruption.
-5. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
+6. **Graceful Disk-to-Memory Fallback**:
+   - When a configured disk log file does not exist on disk, `read_log` and `tail_log` gracefully fall back to the in-memory channel rotator if it has captured data.
+7. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
 
 ### 8.7 Stream-Independent Configuration & INI Mapping (OI-10)
 

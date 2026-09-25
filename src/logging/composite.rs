@@ -72,6 +72,20 @@ impl LogBackend for CompositeLogBackend {
         }
         Ok(())
     }
+
+    fn clear(&self) -> Result<(), ProgramError> {
+        let mut first_err = None;
+        for backend in &self.backends {
+            if let Err(e) = backend.clear() {
+                first_err.get_or_insert(e);
+            }
+        }
+        if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Discards all output completely (used for NONE, off, /dev/null).

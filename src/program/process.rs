@@ -50,6 +50,8 @@ pub struct ProcessProgram {
     status_snapshot: Arc<RwLock<ProgramStatus>>,
     ring_buffer: Arc<RingBuffer>,
     in_memory_rotator: Arc<crate::logging::InMemoryLogRotator>,
+    stdout_backend: Option<Arc<dyn crate::logging::LogBackend>>,
+    stderr_backend: Option<Arc<dyn crate::logging::LogBackend>>,
     started_at: Arc<RwLock<Option<Instant>>>,
     stdin_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
     event_hub: crate::manager::EventHub,
@@ -118,6 +120,9 @@ impl ProcessProgram {
             );
         }
 
+        let (stdout_backend, stderr_backend) =
+            build_process_log_backends(&config, &in_memory_rotator);
+
         let started_at = Arc::new(RwLock::new(None));
         let stdin_tx = Arc::new(RwLock::new(None));
         let cancel_token = CancellationToken::new();
@@ -133,7 +138,8 @@ impl ProcessProgram {
             activity_tracker,
             event_hub.clone(),
             cancel_token.clone(),
-            in_memory_rotator.clone(),
+            stdout_backend.clone(),
+            stderr_backend.clone(),
         );
 
         let actor_handle = tokio::spawn(actor.run());
@@ -145,6 +151,8 @@ impl ProcessProgram {
             status_snapshot,
             ring_buffer,
             in_memory_rotator,
+            stdout_backend,
+            stderr_backend,
             started_at,
             stdin_tx,
             event_hub,
@@ -445,10 +453,23 @@ impl Program for ProcessProgram {
                         error: e.to_string(),
                     })
             } else if configured_path.is_some() {
-                Err(ProgramError::ReadLogFailed {
-                    name: self.config.name.clone(),
-                    error: "no log file".to_string(),
-                })
+                let channel_rotator = match channel {
+                    crate::logging::LogChannel::Stdout => self.in_memory_rotator.stdout(),
+                    crate::logging::LogChannel::Stderr => self.in_memory_rotator.stderr(),
+                };
+                if channel_rotator.byte_size() > 0 {
+                    Ok(crate::logging::InstantLogReader::read_bytes(
+                        &*self.in_memory_rotator,
+                        channel,
+                        offset,
+                        length,
+                    ))
+                } else {
+                    Err(ProgramError::ReadLogFailed {
+                        name: self.config.name.clone(),
+                        error: "no log file".to_string(),
+                    })
+                }
             } else if channel == crate::logging::LogChannel::Stdout {
                 Ok(crate::logging::InstantLogReader::read_bytes(
                     &*self.in_memory_rotator,
@@ -489,7 +510,20 @@ impl Program for ProcessProgram {
                     path, offset, length,
                 ))
             } else if configured_path.is_some() {
-                Ok((String::new(), offset, false))
+                let channel_rotator = match channel {
+                    crate::logging::LogChannel::Stdout => self.in_memory_rotator.stdout(),
+                    crate::logging::LogChannel::Stderr => self.in_memory_rotator.stderr(),
+                };
+                if channel_rotator.byte_size() > 0 {
+                    Ok(crate::logging::InstantLogReader::tail_bytes(
+                        &*self.in_memory_rotator,
+                        channel,
+                        offset,
+                        length,
+                    ))
+                } else {
+                    Ok((String::new(), offset, false))
+                }
             } else if channel == crate::logging::LogChannel::Stdout {
                 Ok(crate::logging::InstantLogReader::tail_bytes(
                     &*self.in_memory_rotator,
@@ -507,6 +541,12 @@ impl Program for ProcessProgram {
         self.ring_buffer.clear();
         self.in_memory_rotator.stdout().clear();
         self.in_memory_rotator.stderr().clear();
+        if let Some(ref backend) = self.stdout_backend {
+            let _ = backend.clear();
+        }
+        if let Some(ref backend) = self.stderr_backend {
+            let _ = backend.clear();
+        }
         if let Some(ref path) = self.config.logs.stdout
             && path.exists()
         {
@@ -720,6 +760,202 @@ impl Drop for RunningChild {
     }
 }
 
+type LogBackendPair = (
+    Option<Arc<dyn crate::logging::LogBackend>>,
+    Option<Arc<dyn crate::logging::LogBackend>>,
+);
+
+pub(crate) fn build_process_log_backends(
+    config: &ProgramConfig,
+    in_memory_rotator: &Arc<crate::logging::InMemoryLogRotator>,
+) -> LogBackendPair {
+    let stdout_max_bytes = config.logs.effective_stdout_max_bytes();
+    let stdout_backups = config.logs.effective_stdout_backups();
+    let stderr_max_bytes = config.logs.effective_stderr_max_bytes();
+    let stderr_backups = config.logs.effective_stderr_backups();
+    let stdout_disabled = config.logs.is_stdout_disabled();
+    let stderr_disabled = config.logs.is_stderr_disabled();
+
+    if config.logs.is_in_memory_only() {
+        let mut out_b: Option<Arc<dyn crate::logging::LogBackend>> = if !stdout_disabled {
+            Some(in_memory_rotator.stdout().clone() as Arc<dyn crate::logging::LogBackend>)
+        } else {
+            None
+        };
+        if config.logs.stdout_syslog && !stdout_disabled {
+            out_b = attach_syslog_backend(
+                out_b,
+                &config.logs,
+                config.logs.syslog_stdout_priority.as_deref(),
+                &config.name,
+            );
+        }
+
+        let err_b = if !stderr_disabled {
+            if config.logs.redirect_stderr {
+                let mut b = out_b.clone();
+                if config.logs.stderr_syslog && !config.logs.stdout_syslog {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
+                }
+                b
+            } else {
+                let mut b: Option<Arc<dyn crate::logging::LogBackend>> =
+                    Some(in_memory_rotator.stderr().clone() as Arc<dyn crate::logging::LogBackend>);
+                if config.logs.stderr_syslog {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
+                }
+                b
+            }
+        } else {
+            None
+        };
+
+        (out_b, err_b)
+    } else {
+        let stdout_dest = match config.logs.stdout.as_ref() {
+            Some(p) => {
+                let s = p.to_string_lossy();
+                match crate::logging::LogDestination::parse(&s) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(
+                            "Program '{}' invalid stdout log destination '{}': {}; falling back to AUTO",
+                            config.name,
+                            s,
+                            e
+                        );
+                        crate::logging::LogDestination::Auto
+                    }
+                }
+            }
+            None => crate::logging::LogDestination::Auto,
+        };
+
+        let stdout_opts = crate::logging::BackendBuildOptions {
+            program_name: &config.name,
+            channel: crate::logging::LogChannel::Stdout,
+            max_bytes: stdout_max_bytes,
+            backups: stdout_backups,
+            timestamp_suffix: config.logs.stdout_timestamp_suffix,
+            syslog_facility: config.logs.syslog_facility.as_deref(),
+            syslog_tag: config.logs.syslog_tag.as_deref(),
+            syslog_priority: config.logs.syslog_stdout_priority.as_deref(),
+        };
+
+        let mut stdout_backend = if !stdout_disabled {
+            match stdout_dest.build_backend(&stdout_opts) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize stdout log backend for '{}': {}",
+                        config.name,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Attach flag-based syslog only when the destination does not already include it.
+        if config.logs.stdout_syslog && !stdout_disabled && !stdout_dest.contains_syslog() {
+            stdout_backend = attach_syslog_backend(
+                stdout_backend,
+                &config.logs,
+                config.logs.syslog_stdout_priority.as_deref(),
+                &config.name,
+            );
+        }
+
+        let stderr_backend = if !stderr_disabled {
+            if config.logs.redirect_stderr {
+                let mut b = stdout_backend.clone();
+                // Honor stderr_syslog on the shared (redirected) backend only when
+                // the shared backend does not already include a syslog sink.
+                if config.logs.stderr_syslog
+                    && !config.logs.stdout_syslog
+                    && !stdout_dest.contains_syslog()
+                {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
+                }
+                b
+            } else {
+                let stderr_dest = match config.logs.stderr.as_ref() {
+                    Some(p) => {
+                        let s = p.to_string_lossy();
+                        match crate::logging::LogDestination::parse(&s) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Program '{}' invalid stderr log destination '{}': {}; falling back to AUTO",
+                                    config.name,
+                                    s,
+                                    e
+                                );
+                                crate::logging::LogDestination::Auto
+                            }
+                        }
+                    }
+                    None => crate::logging::LogDestination::Auto,
+                };
+
+                let stderr_opts = crate::logging::BackendBuildOptions {
+                    program_name: &config.name,
+                    channel: crate::logging::LogChannel::Stderr,
+                    max_bytes: stderr_max_bytes,
+                    backups: stderr_backups,
+                    timestamp_suffix: config.logs.stderr_timestamp_suffix,
+                    syslog_facility: config.logs.syslog_facility.as_deref(),
+                    syslog_tag: config.logs.syslog_tag.as_deref(),
+                    syslog_priority: config.logs.syslog_stderr_priority.as_deref(),
+                };
+
+                let mut b = match stderr_dest.build_backend(&stderr_opts) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to initialize stderr log backend for '{}': {}",
+                            config.name,
+                            e
+                        );
+                        None
+                    }
+                };
+
+                if config.logs.stderr_syslog && !stderr_dest.contains_syslog() {
+                    b = attach_syslog_backend(
+                        b,
+                        &config.logs,
+                        config.logs.syslog_stderr_priority.as_deref(),
+                        &config.name,
+                    );
+                }
+                b
+            }
+        } else {
+            None
+        };
+
+        (stdout_backend, stderr_backend)
+    }
+}
+
 struct ProgramActor {
     config: ProgramConfig,
     command_rx: mpsc::Receiver<ProgramCommand>,
@@ -753,196 +989,10 @@ impl ProgramActor {
         activity_tracker: crate::manager::ActivityTracker,
         event_hub: crate::manager::EventHub,
         cancel_token: CancellationToken,
-        in_memory_rotator: Arc<crate::logging::InMemoryLogRotator>,
+        stdout_backend: Option<Arc<dyn crate::logging::LogBackend>>,
+        stderr_backend: Option<Arc<dyn crate::logging::LogBackend>>,
     ) -> Self {
         let (health_tx, health_rx) = mpsc::channel(16);
-
-        let stdout_max_bytes = config.logs.effective_stdout_max_bytes();
-        let stdout_backups = config.logs.effective_stdout_backups();
-        let stderr_max_bytes = config.logs.effective_stderr_max_bytes();
-        let stderr_backups = config.logs.effective_stderr_backups();
-        let stdout_disabled = config.logs.is_stdout_disabled();
-        let stderr_disabled = config.logs.is_stderr_disabled();
-
-        let (stdout_backend, stderr_backend) = if config.logs.is_in_memory_only() {
-            let mut out_b: Option<Arc<dyn crate::logging::LogBackend>> = if !stdout_disabled {
-                Some(in_memory_rotator.stdout().clone() as Arc<dyn crate::logging::LogBackend>)
-            } else {
-                None
-            };
-            if config.logs.stdout_syslog && !stdout_disabled {
-                out_b = attach_syslog_backend(
-                    out_b,
-                    &config.logs,
-                    config.logs.syslog_stdout_priority.as_deref(),
-                    &config.name,
-                );
-            }
-
-            let err_b = if !stderr_disabled {
-                if config.logs.redirect_stderr {
-                    let mut b = out_b.clone();
-                    if config.logs.stderr_syslog && !config.logs.stdout_syslog {
-                        b = attach_syslog_backend(
-                            b,
-                            &config.logs,
-                            config.logs.syslog_stderr_priority.as_deref(),
-                            &config.name,
-                        );
-                    }
-                    b
-                } else {
-                    let mut b: Option<Arc<dyn crate::logging::LogBackend>> =
-                        Some(in_memory_rotator.stderr().clone()
-                            as Arc<dyn crate::logging::LogBackend>);
-                    if config.logs.stderr_syslog {
-                        b = attach_syslog_backend(
-                            b,
-                            &config.logs,
-                            config.logs.syslog_stderr_priority.as_deref(),
-                            &config.name,
-                        );
-                    }
-                    b
-                }
-            } else {
-                None
-            };
-
-            (out_b, err_b)
-        } else {
-            let stdout_dest = match config.logs.stdout.as_ref() {
-                Some(p) => {
-                    let s = p.to_string_lossy();
-                    match crate::logging::LogDestination::parse(&s) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            tracing::error!(
-                                "Program '{}' invalid stdout log destination '{}': {}; falling back to AUTO",
-                                config.name,
-                                s,
-                                e
-                            );
-                            crate::logging::LogDestination::Auto
-                        }
-                    }
-                }
-                None => crate::logging::LogDestination::Auto,
-            };
-
-            let stdout_opts = crate::logging::BackendBuildOptions {
-                program_name: &config.name,
-                channel: crate::logging::LogChannel::Stdout,
-                max_bytes: stdout_max_bytes,
-                backups: stdout_backups,
-                timestamp_suffix: config.logs.stdout_timestamp_suffix,
-                syslog_facility: config.logs.syslog_facility.as_deref(),
-                syslog_tag: config.logs.syslog_tag.as_deref(),
-                syslog_priority: config.logs.syslog_stdout_priority.as_deref(),
-            };
-
-            let mut stdout_backend = if !stdout_disabled {
-                match stdout_dest.build_backend(&stdout_opts) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to initialize stdout log backend for '{}': {}",
-                            config.name,
-                            e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Attach flag-based syslog only when the destination does not already include it.
-            if config.logs.stdout_syslog && !stdout_disabled && !stdout_dest.contains_syslog() {
-                stdout_backend = attach_syslog_backend(
-                    stdout_backend,
-                    &config.logs,
-                    config.logs.syslog_stdout_priority.as_deref(),
-                    &config.name,
-                );
-            }
-
-            let stderr_backend = if !stderr_disabled {
-                if config.logs.redirect_stderr {
-                    let mut b = stdout_backend.clone();
-                    // Honor stderr_syslog on the shared (redirected) backend only when
-                    // the shared backend does not already include a syslog sink.
-                    if config.logs.stderr_syslog
-                        && !config.logs.stdout_syslog
-                        && !stdout_dest.contains_syslog()
-                    {
-                        b = attach_syslog_backend(
-                            b,
-                            &config.logs,
-                            config.logs.syslog_stderr_priority.as_deref(),
-                            &config.name,
-                        );
-                    }
-                    b
-                } else {
-                    let stderr_dest = match config.logs.stderr.as_ref() {
-                        Some(p) => {
-                            let s = p.to_string_lossy();
-                            match crate::logging::LogDestination::parse(&s) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Program '{}' invalid stderr log destination '{}': {}; falling back to AUTO",
-                                        config.name,
-                                        s,
-                                        e
-                                    );
-                                    crate::logging::LogDestination::Auto
-                                }
-                            }
-                        }
-                        None => crate::logging::LogDestination::Auto,
-                    };
-
-                    let stderr_opts = crate::logging::BackendBuildOptions {
-                        program_name: &config.name,
-                        channel: crate::logging::LogChannel::Stderr,
-                        max_bytes: stderr_max_bytes,
-                        backups: stderr_backups,
-                        timestamp_suffix: config.logs.stderr_timestamp_suffix,
-                        syslog_facility: config.logs.syslog_facility.as_deref(),
-                        syslog_tag: config.logs.syslog_tag.as_deref(),
-                        syslog_priority: config.logs.syslog_stderr_priority.as_deref(),
-                    };
-
-                    let mut b = match stderr_dest.build_backend(&stderr_opts) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to initialize stderr log backend for '{}': {}",
-                                config.name,
-                                e
-                            );
-                            None
-                        }
-                    };
-
-                    if config.logs.stderr_syslog && !stderr_dest.contains_syslog() {
-                        b = attach_syslog_backend(
-                            b,
-                            &config.logs,
-                            config.logs.syslog_stderr_priority.as_deref(),
-                            &config.name,
-                        );
-                    }
-                    b
-                }
-            } else {
-                None
-            };
-
-            (stdout_backend, stderr_backend)
-        };
 
         Self {
             config,

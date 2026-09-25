@@ -163,7 +163,7 @@ impl SupervisorDaemon {
         // Initialize tracing before any early startup logs so environment
         // application, rlimit, and pidfile messages are not lost to the
         // default no-op subscriber.
-        init_tracing(&config, main_log_rotator.clone());
+        let main_file_rotator = init_tracing(&config, main_log_rotator.clone());
 
         let cmd_name = crate::config::paths::get_cmd_name();
 
@@ -226,6 +226,7 @@ impl SupervisorDaemon {
         let mut manager = SupervisorManager::builder(config.clone())
             .with_cancel_token(cancel_token.clone())
             .with_main_log_rotator(main_log_rotator)
+            .with_main_file_rotator(main_file_rotator)
             .build()?;
         let manager_handle = manager.handle();
         tracing::info!(
@@ -291,12 +292,28 @@ impl SupervisorDaemon {
 
 /// Initializes the tracing subscriber from config (OI-4 silent/file).
 ///
+struct ArcLogWriter(std::sync::Arc<crate::logging::LogRotator>);
+
+impl std::io::Write for ArcLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// Initializes tracing subscriber with console and optional file layers.
+///
+/// Log level precedence: `RUST_LOG` env var > `config.logging.level`.
 /// CLI `-l/--loglevel` is folded into `config.logging.level` by
 /// [`DaemonArgs::apply`] before this runs; `RUST_LOG` still wins when set.
 fn init_tracing(
     config: &SupervisorConfig,
     main_log_rotator: Option<std::sync::Arc<crate::logging::InMemoryChannelRotator>>,
-) {
+) -> Option<std::sync::Arc<crate::logging::LogRotator>> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -306,7 +323,7 @@ fn init_tracing(
     if is_logging_disabled {
         let filter = tracing_subscriber::EnvFilter::new("off");
         let _ = tracing_subscriber::registry().with(filter).try_init();
-        return;
+        return None;
     }
 
     let log_level = &config.logging.level;
@@ -319,93 +336,102 @@ fn init_tracing(
 
     let log_file = config.logging.file.clone();
 
-    macro_rules! try_with_file {
-        ($reg:expr) => {
-            let writer_box: Option<Box<dyn std::io::Write + Send>> = if let Some(ref rotator) = main_log_rotator {
-                Some(Box::new(crate::logging::InMemoryLogWriter(std::sync::Arc::clone(rotator))))
-            } else if let Some(ref path) = log_file {
-                let path_str = path.to_string_lossy();
-                let dest = crate::logging::LogDestination::parse(&path_str)
-                    .unwrap_or(crate::logging::LogDestination::File(path.clone()));
+    let mut main_file_rotator = None;
+    let writer_box: Option<Box<dyn std::io::Write + Send>> = if let Some(ref rotator) =
+        main_log_rotator
+    {
+        Some(Box::new(crate::logging::InMemoryLogWriter(
+            std::sync::Arc::clone(rotator),
+        )))
+    } else if let Some(ref path) = log_file {
+        let path_str = path.to_string_lossy();
+        let dest = crate::logging::LogDestination::parse(&path_str)
+            .unwrap_or(crate::logging::LogDestination::File(path.clone()));
 
-                // Resolve composite destinations to the primary concrete sink so
-                // `a.log, /dev/stdout` still writes a file layer instead of being dropped.
-                let effective_dest = match dest {
-                    crate::logging::LogDestination::Composite(ref list) => {
-                        let primary = dest
-                            .primary_file_path()
-                            .map(|p| crate::logging::LogDestination::File(p.to_path_buf()))
-                            .or_else(|| {
-                                list.iter().find_map(|d| match d {
-                                    crate::logging::LogDestination::DevStdout => {
-                                        Some(crate::logging::LogDestination::DevStdout)
-                                    }
-                                    crate::logging::LogDestination::DevStderr => {
-                                        Some(crate::logging::LogDestination::DevStderr)
-                                    }
-                                    _ => None,
-                                })
-                            });
-                        match primary {
-                            Some(d) => d,
-                            None => {
-                                tracing::warn!(
-                                    "Daemon log destination '{}' has no writable file/stdio sink; console logging only",
-                                    path_str
-                                );
-                                crate::logging::LogDestination::Null
+        // Resolve composite destinations to the primary concrete sink so
+        // `a.log, /dev/stdout` still writes a file layer instead of being dropped.
+        let effective_dest = match dest {
+            crate::logging::LogDestination::Composite(ref list) => {
+                let primary = dest
+                    .primary_file_path()
+                    .map(|p| crate::logging::LogDestination::File(p.to_path_buf()))
+                    .or_else(|| {
+                        list.iter().find_map(|d| match d {
+                            crate::logging::LogDestination::DevStdout => {
+                                Some(crate::logging::LogDestination::DevStdout)
                             }
-                        }
-                    }
-                    crate::logging::LogDestination::Syslog(_) => {
+                            crate::logging::LogDestination::DevStderr => {
+                                Some(crate::logging::LogDestination::DevStderr)
+                            }
+                            _ => None,
+                        })
+                    });
+                match primary {
+                    Some(d) => d,
+                    None => {
                         tracing::warn!(
-                            "Daemon log destination '{}' uses syslog which is not supported for the daemon file layer; console logging only",
+                            "Daemon log destination '{}' has no writable file/stdio sink; console logging only",
                             path_str
                         );
                         crate::logging::LogDestination::Null
                     }
-                    crate::logging::LogDestination::Auto => {
-                        crate::logging::LogDestination::Null
-                    }
-                    other => other,
-                };
-
-                match effective_dest {
-                    crate::logging::LogDestination::Null => None,
-                    crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
-                    crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),
-                    crate::logging::LogDestination::File(ref file_path) => {
-                        let max_bytes = config
-                            .logging
-                            .max_bytes
-                            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
-                        let backups = config.logging.backups;
-                        let timestamp_suffix = config.logging.timestamp_suffix;
-                        match crate::logging::LogRotator::with_options(
-                            file_path,
-                            max_bytes,
-                            backups,
-                            timestamp_suffix,
-                        ) {
-                            Ok(rot) => Some(Box::new(rot) as Box<dyn std::io::Write + Send>),
-                            Err(e) => {
-                                eprintln!(
-                                    "Failed to initialize daemon log rotator for {:?}: {}",
-                                    file_path, e
-                                );
-                                None
-                            }
-                        }
-                    }
-                    _ => None,
                 }
-            } else {
-                None
-            };
+            }
+            crate::logging::LogDestination::Syslog(_) => {
+                tracing::warn!(
+                    "Daemon log destination '{}' uses syslog which is not supported for the daemon file layer; console logging only",
+                    path_str
+                );
+                crate::logging::LogDestination::Null
+            }
+            crate::logging::LogDestination::Auto => crate::logging::LogDestination::Null,
+            other => other,
+        };
 
-            if let Some(w) = writer_box {
-                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(w));
-                let make_writer = move || MutexWriter(file_writer_arc.clone());
+        match effective_dest {
+            crate::logging::LogDestination::Null => None,
+            crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
+            crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),
+            crate::logging::LogDestination::File(ref file_path) => {
+                let max_bytes = config
+                    .logging
+                    .max_bytes
+                    .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES);
+                let backups = config.logging.backups;
+                let timestamp_suffix = config.logging.timestamp_suffix;
+                match crate::logging::LogRotator::with_options(
+                    file_path,
+                    max_bytes,
+                    backups,
+                    timestamp_suffix,
+                ) {
+                    Ok(rot) => {
+                        let arc_rot = std::sync::Arc::new(rot);
+                        main_file_rotator = Some(arc_rot.clone());
+                        Some(Box::new(ArcLogWriter(arc_rot)) as Box<dyn std::io::Write + Send>)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to initialize daemon log rotator for {:?}: {}",
+                            file_path, e
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let file_writer_arc = writer_box.map(|w| std::sync::Arc::new(std::sync::Mutex::new(w)));
+
+    macro_rules! try_with_file {
+        ($reg:expr) => {
+            if let Some(ref file_writer_arc) = file_writer_arc {
+                let fw = file_writer_arc.clone();
+                let make_writer = move || MutexWriter(fw.clone());
                 let file_layer = tracing_subscriber::fmt::layer()
                     .with_ansi(false)
                     .with_target(false)
@@ -427,6 +453,8 @@ fn init_tracing(
                 .with(console_layer)
         );
     }
+
+    main_file_rotator
 }
 
 /// Best-effort raise of a soft rlimit to at least `min_value` (OI-8).

@@ -998,3 +998,127 @@ fn test_seed_archive_collision_safe() {
     let archive_content = std::fs::read_to_string(&archive_file).unwrap();
     assert_eq!(archive_content, "original unrotated content\n");
 }
+
+#[test]
+fn test_in_memory_read_lines_utf8_split_across_segments() {
+    let rotator = InMemoryChannelRotator::new(10, 5);
+
+    // "你好世界\n" in UTF-8:
+    // 你: [0xe4, 0xbd, 0xa0] (3 bytes)
+    // 好: [0xe5, 0xa5, 0xbd] (3 bytes)
+    // 世: [0xe4, 0xb8, 0x96] (3 bytes)
+    // 界: [0xe7, 0x95, 0x8c] (3 bytes)
+    // \n: [0x0a] (1 byte)
+    // Total 13 bytes.
+    // If we write 7 bytes first: 你 (3) + 好 (3) + 1st byte of 世 (0xe4)
+    // Then second chunk: remaining 2 bytes of 世 + 界 (3) + \n (1) = 6 bytes.
+    let full_str = "你好世界\n";
+    let bytes = full_str.as_bytes();
+    rotator.append_bytes(&bytes[..7]);
+    rotator.append_bytes(&bytes[7..]);
+
+    let lines = rotator.read_lines(None);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], "你好世界");
+}
+
+#[tokio::test]
+async fn test_log_rotator_clear_resets_counter_and_file() {
+    use rsupervisord::logging::LogBackend;
+    let dir = tempdir().unwrap();
+    let log_path = dir.path().join("test_clear.log");
+    let rotator = LogRotator::with_options(&log_path, 100, 2, false).unwrap();
+
+    let chunk = rsupervisord::logging::LogChunk::new(
+        LogChannel::Stdout,
+        "test",
+        None,
+        bytes::Bytes::from_static(b"hello world before clear\n"),
+    );
+    rotator.write_chunk(&chunk).await.unwrap();
+    rotator.flush().unwrap();
+
+    assert!(log_path.exists());
+    let size = std::fs::metadata(&log_path).unwrap().len();
+    assert!(size > 0);
+
+    // Clear via LogBackend::clear
+    rotator.clear().unwrap();
+
+    let size_after = std::fs::metadata(&log_path).unwrap().len();
+    assert_eq!(size_after, 0);
+
+    // Writing again should start from 0 bytes
+    let chunk2 = rsupervisord::logging::LogChunk::new(
+        LogChannel::Stdout,
+        "test",
+        None,
+        bytes::Bytes::from_static(b"new data\n"),
+    );
+    rotator.write_chunk(&chunk2).await.unwrap();
+    rotator.flush().unwrap();
+
+    let content = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(content, "new data\n");
+}
+
+#[tokio::test]
+async fn test_process_program_clear_logs_clears_backends() {
+    let dir = tempdir().unwrap();
+    let stdout_path = dir.path().join("prog_out.log");
+    let config = ProgramConfig {
+        name: "clear_test".to_string(),
+        command: "true".to_string(),
+        logs: ProgramLogsConfig {
+            stdout: Some(stdout_path.clone()),
+            max_bytes: Some(1024),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let prog = ProcessProgram::new(config).unwrap();
+    prog.in_memory_rotator()
+        .stdout()
+        .append_bytes(b"buffered data\n");
+
+    // Pre-create disk file
+    std::fs::write(&stdout_path, "disk log line\n").unwrap();
+
+    assert_eq!(prog.in_memory_rotator().stdout().line_count(), 1);
+    assert!(stdout_path.exists() && std::fs::metadata(&stdout_path).unwrap().len() > 0);
+
+    prog.clear_logs().unwrap();
+
+    assert_eq!(prog.in_memory_rotator().stdout().line_count(), 0);
+    assert_eq!(std::fs::metadata(&stdout_path).unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_process_program_read_log_fallback_to_in_memory() {
+    let dir = tempdir().unwrap();
+    let stdout_path = dir.path().join("absent_file.log");
+    let config = ProgramConfig {
+        name: "fallback_test".to_string(),
+        command: "true".to_string(),
+        logs: ProgramLogsConfig {
+            stdout: Some(stdout_path.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let prog = ProcessProgram::new(config).unwrap();
+    let _ = std::fs::remove_file(&stdout_path);
+
+    // Absent on disk and empty in memory -> fails with ReadLogFailed ("no log file")
+    assert!(prog.read_log(LogChannel::Stdout, 0, 100).is_err());
+
+    // When in-memory rotator has captured logs, it gracefully serves them
+    prog.in_memory_rotator()
+        .stdout()
+        .append_bytes(b"captured before flush\n");
+    let (data, _, _) = prog.read_log(LogChannel::Stdout, 0, 100).unwrap();
+    assert_eq!(data, "captured before flush\n");
+
+    let (tail_data, _, _) = prog.tail_log(LogChannel::Stdout, 0, 100).unwrap();
+    assert_eq!(tail_data, "captured before flush\n");
+}
