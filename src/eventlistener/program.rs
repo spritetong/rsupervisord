@@ -486,6 +486,10 @@ impl EventListenerActor {
                                         let trimmed = line.trim_end_matches(['\r', '\n']);
                                         if let Some(len_str) = trimmed.strip_prefix("RESULT ") {
                                             if let Ok(expected_len) = len_str.trim().parse::<usize>() {
+                                                if expected_len > 1_048_576 {
+                                                    tracing::error!(program = %name, expected_len, "RESULT payload length exceeds 1MB limit");
+                                                    return None;
+                                                }
                                                 let mut body_buf = vec![0u8; expected_len];
                                                 if reader.read_exact(&mut body_buf).await.is_ok() {
                                                     let body_str = String::from_utf8_lossy(&body_buf);

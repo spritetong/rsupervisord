@@ -659,3 +659,30 @@ async fn test_process_send_stdin_fresh_pipe_after_restart() {
     program.stop(Duration::from_secs(1)).await.expect("stop");
     program.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn test_start_secs_unaffected_by_status_queries() {
+    let (cmd, args) = get_sleep_command(10);
+    let mut config = ProgramConfig::new("status_query_startsecs_test", cmd);
+    config.args = args;
+    config.start_secs = Duration::from_secs(1);
+
+    let mut program = ProcessProgram::new(config).expect("create");
+    program.start().await.expect("start");
+    assert_eq!(program.status().state, ProgramState::Starting);
+
+    // Repeatedly query status during start_secs window to ensure deadline is NOT reset
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let st = program.status();
+        assert!(st.state == ProgramState::Starting || st.state == ProgramState::Running);
+    }
+
+    program
+        .wait_for_state(ProgramState::Running, Duration::from_secs(2))
+        .await
+        .expect("Program should reach Running state despite status queries");
+
+    program.stop(Duration::from_secs(1)).await.expect("stop");
+    program.shutdown().await.expect("shutdown");
+}

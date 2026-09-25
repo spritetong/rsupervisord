@@ -1149,7 +1149,7 @@ impl SupervisorManager {
     pub async fn shutdown(&mut self) -> Result<(), ProgramError> {
         let _ = self.handle.shutdown().await;
         if let Some(handle) = self.actor_handle.take() {
-            let _ = handle.await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
         }
         Ok(())
     }

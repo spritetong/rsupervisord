@@ -123,7 +123,10 @@ pub struct WatchServiceHandle {
 impl WatchServiceHandle {
     /// Updates the active watch rules and registered directory watchers.
     pub async fn update_configs(&self, configs: HashMap<String, ProgramConfig>) {
-        let _ = self.reload_tx.send(configs).await;
+        let _ = self
+            .reload_tx
+            .send_timeout(configs, Duration::from_secs(2))
+            .await;
     }
 }
 
@@ -458,19 +461,25 @@ impl WatchService {
             if let Some(ref dir) = trigger.directory {
                 shell_cmd.current_dir(dir);
             }
-            match shell_cmd.status().await {
-                Ok(status) => {
+            match tokio::time::timeout(Duration::from_secs(30), shell_cmd.status()).await {
+                Ok(Ok(status)) => {
                     tracing::info!(
                         program = %trigger.program_name,
                         exit_status = %status,
                         "Custom restart command finished successfully"
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::error!(
                         program = %trigger.program_name,
                         error = %e,
                         "Custom restart command failed"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        program = %trigger.program_name,
+                        "Custom restart command timed out after 30s"
                     );
                 }
             }

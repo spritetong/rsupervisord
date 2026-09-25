@@ -14,6 +14,26 @@ use std::path::{Path, PathBuf};
 pub trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized> AsyncStream for T {}
 
+/// Normalizes an OS `ExitStatus` into a standard exit code.
+/// On Unix, if the process was terminated by a signal, returns `-signal` (e.g. `-9` for SIGKILL).
+pub fn normalize_exit_status(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(code) = status.code() {
+            Some(code)
+        } else if let Some(sig) = status.signal() {
+            Some(-sig)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        status.code()
+    }
+}
+
 /// Trait representing an OS-level IPC listener (Unix Domain Socket or Windows Named Pipe/UDS).
 #[async_trait]
 pub trait PlatformIpcListener: Send + Sync {

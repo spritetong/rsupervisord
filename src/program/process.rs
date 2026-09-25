@@ -274,7 +274,7 @@ impl Program for ProcessProgram {
                 name: self.config.name.clone(),
             })?;
 
-        let timeout_dur = AWAIT_QUERY;
+        let timeout_dur = self.config.hook_timeout_secs + AWAIT_QUERY;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -299,6 +299,10 @@ impl Program for ProcessProgram {
             })?;
 
         let timeout_dur = grace_period
+            .checked_add(self.config.hook_timeout_secs)
+            .unwrap_or(MAX_TIMEOUT)
+            .checked_add(self.config.kill_wait_secs)
+            .unwrap_or(MAX_TIMEOUT)
             .checked_add(PROCESS_STOP_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -325,6 +329,10 @@ impl Program for ProcessProgram {
             })?;
 
         let timeout_dur = grace_period
+            .checked_add(self.config.hook_timeout_secs * 2)
+            .unwrap_or(MAX_TIMEOUT)
+            .checked_add(self.config.kill_wait_secs)
+            .unwrap_or(MAX_TIMEOUT)
             .checked_add(PROCESS_RESTART_GRACE_EXTRA)
             .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
@@ -978,6 +986,7 @@ struct ProgramActor {
     backoff_deadline: Option<tokio::time::Instant>,
     stdout_backend: Option<Arc<dyn crate::logging::LogBackend>>,
     stderr_backend: Option<Arc<dyn crate::logging::LogBackend>>,
+    spawn_seq: u64,
 }
 
 impl ProgramActor {
@@ -1016,6 +1025,7 @@ impl ProgramActor {
             backoff_deadline: None,
             stdout_backend,
             stderr_backend,
+            spawn_seq: 0,
         }
     }
 
@@ -1043,21 +1053,17 @@ impl ProgramActor {
                 }
 
                 Some(cmd) = self.command_rx.recv() => {
+                    let seq_before = self.spawn_seq;
                     self.handle_command(cmd).await;
-                    if self.current_child.is_some() {
-                        let marked_running = self
-                            .current_child
-                            .as_ref()
-                            .map(|c| c.marked_running)
-                            .unwrap_or(false);
-                        if !marked_running && !self.config.start_secs.is_zero() {
+                    if self.spawn_seq != seq_before {
+                        if self.current_child.is_some() && !self.config.start_secs.is_zero() {
                             start_deadline = Some(
                                 tokio::time::Instant::now() + self.config.start_secs,
                             );
                         } else {
                             start_deadline = None;
                         }
-                    } else {
+                    } else if self.current_child.is_none() {
                         start_deadline = None;
                     }
                 }
@@ -1509,6 +1515,8 @@ impl ProgramActor {
             health_task,
         });
 
+        self.spawn_seq = self.spawn_seq.wrapping_add(1);
+
         Ok(())
     }
 
@@ -1560,8 +1568,8 @@ impl ProgramActor {
                 child_info.platform_guard.wait_exit(&mut child_info.child),
             )
             .await;
-            let final_code = match wait_res {
-                Ok(Ok(status)) => status.code(),
+            let (final_code, is_force_killed) = match wait_res {
+                Ok(Ok(status)) => (crate::platform::traits::normalize_exit_status(&status), false),
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
@@ -1571,31 +1579,31 @@ impl ProgramActor {
                         child_info.platform_guard.wait_exit(&mut child_info.child),
                     )
                     .await;
-                    match post_kill_wait {
-                        Ok(Ok(status)) => status.code(),
+                    let code = match post_kill_wait {
+                        Ok(Ok(status)) => crate::platform::traits::normalize_exit_status(&status),
                         _ => None,
-                    }
+                    };
+                    (code, true)
                 }
             };
 
             // Drain stdout & stderr log pipes before marking stopped
             child_info.drain_pumps().await;
 
-            if let Some(code) = final_code {
-                self.update_status(
-                    ProgramState::Stopped,
-                    None,
-                    Some(code),
-                    format!("Stopped with exit code {:?}", code),
-                );
+            let desc = if is_force_killed {
+                "Force killed (SIGKILL)".to_string()
+            } else if let Some(code) = final_code {
+                format!("Stopped with exit code {}", code)
             } else {
-                self.update_status(
-                    ProgramState::Stopped,
-                    None,
-                    None,
-                    "Force killed".to_string(),
-                );
-            }
+                "Stopped".to_string()
+            };
+
+            self.update_status(
+                ProgramState::Stopped,
+                None,
+                final_code,
+                desc,
+            );
         } else {
             self.update_status(ProgramState::Stopped, None, None, "Stopped".to_string());
         }
@@ -1642,14 +1650,14 @@ impl ProgramActor {
         *self.started_at.write() = None;
         *self.stdin_tx.write() = None;
         let mut child_info = self.current_child.take();
-        let pid = child_info.as_ref().map(|c| c.pid);
+        let _pid = child_info.as_ref().map(|c| c.pid);
         let marked_running = child_info
             .as_ref()
             .map(|c| c.marked_running)
             .unwrap_or(false);
 
         let exit_code = match exit_res {
-            Ok(status) => status.code(),
+            Ok(status) => crate::platform::traits::normalize_exit_status(&status),
             Err(e) => {
                 tracing::error!(program = %self.config.name, error = %e, "Error waiting for child exit");
                 None
@@ -1662,11 +1670,15 @@ impl ProgramActor {
 
         if self.is_shutting_down || self.manual_stop {
             self.backoff_deadline = None;
+            let desc = match exit_code {
+                Some(code) => format!("Stopped with code {}", code),
+                None => "Stopped".to_string(),
+            };
             self.update_status(
                 ProgramState::Stopped,
                 None,
                 exit_code,
-                format!("Stopped with code {:?}", exit_code),
+                desc,
             );
             return false;
         }
@@ -1683,7 +1695,7 @@ impl ProgramActor {
             if self.retry_count <= self.config.start_retries {
                 self.update_status(
                     ProgramState::Backoff,
-                    pid,
+                    None,
                     exit_code,
                     format!(
                         "Crashed during startup, retry {}/{}",
@@ -1714,7 +1726,7 @@ impl ProgramActor {
             let should_restart = self
                 .config
                 .autorestart
-                .should_restart(exit_code.unwrap_or(0), &self.config.exit_codes);
+                .should_restart(exit_code.unwrap_or(-1), &self.config.exit_codes);
 
             if should_restart {
                 let desc = match self.config.autorestart {
