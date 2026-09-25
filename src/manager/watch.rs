@@ -123,10 +123,13 @@ pub struct WatchServiceHandle {
 impl WatchServiceHandle {
     /// Updates the active watch rules and registered directory watchers.
     pub async fn update_configs(&self, configs: HashMap<String, ProgramConfig>) {
-        let _ = self
+        if let Err(e) = self
             .reload_tx
-            .send_timeout(configs, Duration::from_secs(2))
-            .await;
+            .send_timeout(configs, Duration::from_millis(500))
+            .await
+        {
+            tracing::warn!("Failed to dispatch updated configs to WatchService: {}", e);
+        }
     }
 }
 
