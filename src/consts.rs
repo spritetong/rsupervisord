@@ -97,6 +97,18 @@ pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub const SHORT_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// SSE keep-alive ping interval.
 pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
+/// Maximum execution timeout for WatchService custom restart shell commands.
+pub const WATCH_CUSTOM_CMD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Channel send timeout when dispatching updated configurations to WatchService.
+pub const WATCH_RELOAD_DISPATCH_TIMEOUT: Duration = Duration::from_millis(500);
+/// Channel capacity for WatchService reload configuration channel.
+pub const WATCH_RELOAD_CHANNEL_CAPACITY: usize = 16;
+/// Maximum payload length allowed for EventListener `RESULT` responses (1MB safety limit).
+pub const EVENT_LISTENER_MAX_RESULT_BYTES: usize = 1_048_576;
+/// Maximum join timeout for ManagerActor during supervisor manager shutdown.
+pub const MANAGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum shutdown timeout for daemon HTTP/IPC server during daemon teardown.
+pub const DAEMON_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Config defaults (values shared by serde defaults and runtime fallbacks)

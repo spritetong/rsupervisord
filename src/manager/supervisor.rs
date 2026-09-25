@@ -1157,7 +1157,10 @@ impl SupervisorManager {
     pub async fn shutdown(&mut self) -> Result<(), ProgramError> {
         let _ = self.handle.shutdown().await;
         if let Some(mut handle) = self.actor_handle.take() {
-            if tokio::time::timeout(Duration::from_secs(30), &mut handle).await.is_err() {
+            if tokio::time::timeout(crate::consts::MANAGER_SHUTDOWN_TIMEOUT, &mut handle)
+                .await
+                .is_err()
+            {
                 tracing::warn!("ManagerActor shutdown timed out after 30s; aborting handle");
                 handle.abort();
             }

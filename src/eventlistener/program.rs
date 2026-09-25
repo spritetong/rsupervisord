@@ -489,7 +489,7 @@ impl EventListenerActor {
                                         let trimmed = line.trim_end_matches(['\r', '\n']);
                                         if let Some(len_str) = trimmed.strip_prefix("RESULT ") {
                                             if let Ok(expected_len) = len_str.trim().parse::<usize>() {
-                                                if expected_len > 1_048_576 {
+                                                if expected_len > crate::consts::EVENT_LISTENER_MAX_RESULT_BYTES {
                                                     tracing::error!(program = %name, expected_len, "RESULT payload length exceeds 1MB limit");
                                                     state = ListenerState::Unknown;
                                                     if let Some(env) = current_envelope.take() {

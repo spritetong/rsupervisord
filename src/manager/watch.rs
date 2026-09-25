@@ -125,7 +125,7 @@ impl WatchServiceHandle {
     pub async fn update_configs(&self, configs: HashMap<String, ProgramConfig>) {
         if let Err(e) = self
             .reload_tx
-            .send_timeout(configs, Duration::from_millis(500))
+            .send_timeout(configs, crate::consts::WATCH_RELOAD_DISPATCH_TIMEOUT)
             .await
         {
             tracing::warn!("Failed to dispatch updated configs to WatchService: {}", e);
@@ -147,7 +147,7 @@ impl WatchService {
         configs: HashMap<String, ProgramConfig>,
         cancel_token: CancellationToken,
     ) -> WatchServiceHandle {
-        let (reload_tx, reload_rx) = mpsc::channel(16);
+        let (reload_tx, reload_rx) = mpsc::channel(crate::consts::WATCH_RELOAD_CHANNEL_CAPACITY);
         let service = Self {
             manager,
             configs,
@@ -465,7 +465,9 @@ impl WatchService {
             if let Some(ref dir) = trigger.directory {
                 shell_cmd.current_dir(dir);
             }
-            match tokio::time::timeout(Duration::from_secs(30), shell_cmd.status()).await {
+            match tokio::time::timeout(crate::consts::WATCH_CUSTOM_CMD_TIMEOUT, shell_cmd.status())
+                .await
+            {
                 Ok(Ok(status)) => {
                     tracing::info!(
                         program = %trigger.program_name,

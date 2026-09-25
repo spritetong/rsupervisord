@@ -1579,7 +1579,10 @@ impl ProgramActor {
             )
             .await;
             let (final_code, is_force_killed) = match wait_res {
-                Ok(Ok(status)) => (crate::platform::traits::normalize_exit_status(&status), false),
+                Ok(Ok(status)) => (
+                    crate::platform::traits::normalize_exit_status(&status),
+                    false,
+                ),
                 _ => {
                     let _ = child_info.platform_guard.force_kill();
                     let _ = child_info.child.kill().await;
@@ -1608,12 +1611,7 @@ impl ProgramActor {
                 "Stopped".to_string()
             };
 
-            self.update_status(
-                ProgramState::Stopped,
-                None,
-                final_code,
-                desc,
-            );
+            self.update_status(ProgramState::Stopped, None, final_code, desc);
         } else {
             self.update_status(ProgramState::Stopped, None, None, "Stopped".to_string());
         }
@@ -1685,12 +1683,7 @@ impl ProgramActor {
                 Some(code) => format!("Stopped with code {}", code),
                 None => "Stopped".to_string(),
             };
-            self.update_status(
-                ProgramState::Stopped,
-                None,
-                exit_code,
-                desc,
-            );
+            self.update_status(ProgramState::Stopped, None, exit_code, desc);
             return false;
         }
 
