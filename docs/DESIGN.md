@@ -92,7 +92,7 @@ The runtime consists of four primary asynchronous task categories:
 
 1. **`ManagerTask`**: Parses global configurations, constructs DAG dependencies, schedules Cron deadlines, processes program groups, computes incremental diffs, processes external CLI/Web commands, and drives global orchestration in response to program lifecycle events.
 2. **`ProgramTask`**: Each managed process runs as an independent Actor task driving its internal state machine (`Stopped -> Starting -> Running -> Backoff -> Stopping -> Exited -> Fatal`), executing lifecycle hooks (`pre_start` / `pre_stop`), interfacing with platform guards, and supervising log pumps.
-3. **`LogPumpTask`**: Dedicated asynchronous readers per process for `stdout` and `stderr`, handling line buffering, feeding `file-rotate`, and broadcasting to `RingBuffer`.
+3. **`LogPumpTask`**: Dedicated asynchronous reader tasks per process stream (`stdout`/`stderr`), reading zero-thread chunks from OS `LogTransport`, line-buffering, fanning out to configured `LogBackend` sinks, and broadcasting to `RingBuffer` and `EventHub`.
 4. **`StdinWriterTask`**: Dedicated non-blocking writer Actor managing child standard input pipes, utilizing internal `BytesMut` memory buffers (up to 64KB), `tokio::select!` if-guard backpressure propagation, and graceful EOF on cancellation.
 5. **`ServerTask`**: Powered by Axum, listening on local UDS, Windows Named Pipe, and optional TCP endpoints, converting external requests into commands delivered to `ManagerTask`.
 
@@ -324,6 +324,7 @@ flowchart TD
 ### 4.1 Task Registry (`ManagedTask`) & Governance Model
 
 To balance pragmatic concurrency with strict leak-prevention:
+
 - **Core Subordinate Tasks**: Core Actors and supervised worker tasks (`ManagerActor`, `ProcessActor`, `StdinWriterTask`, `HealthProbeRunner`, and `LogPumpTask`) are encapsulated with explicit `JoinHandle` and `CancellationToken` tracking:
 - **Non-Subordinate Tasks**: Tasks without a direct subordinate/dependency relationship (such as per-connection IPC handling or fire-and-forget API calls) may spawn without retaining a `JoinHandle`, but **must be strictly bound to the parent object's `CancellationToken`**, guaranteeing prompt termination upon parent cancellation.
 
@@ -534,21 +535,136 @@ flowchart TD
 
 ---
 
-## 8. Logging Pipeline Subsystem
+## 8. Logging Pipeline & Transport Subsystem
 
 ```mermaid
-flowchart LR
-    ChildStdout["Child stdout (Pipe)"] --> AsyncReader["Tokio AsyncLinesReader"]
-    AsyncReader --> Appender["file-rotate Writer (Size/Time Rotated)"]
-    AsyncReader --> RingBuffer["Memory RingBuffer (Recent 2,000 Lines)"]
-    RingBuffer --> SSE["SSE Real-time Stream to Web UI & CLI"]
+flowchart TD
+    subgraph ProcessTransport ["OS Platform Transport (Zero Extra Threads)"]
+        ChildProcess["Child Subprocess"]
+        WinPipe["Windows: Overlapped Named Pipe (IOCP)"]
+        UnixPipe["Unix: O_NONBLOCK Read / Blocking Write Pipe"]
+        ChildProcess -->|stdout / stderr| WinPipe & UnixPipe
+    end
+
+    subgraph LogPumpLayer ["LogPump Line Dispatcher"]
+        Streams["TransportStreams (AsyncRead)"]
+        Pump["LogPump Task (BufReader::lines)"]
+        WinPipe & UnixPipe --> Streams --> Pump
+    end
+
+    subgraph LogSinksLayer ["Extensible Log Backends (LogBackend Trait)"]
+        Composite["CompositeLogBackend (Multi-Sink Fan-Out)"]
+        FileRotator["LogRotator (file-rotate: Numeric / Timestamp)"]
+        Syslog["SyslogLogBackend (RFC 3164: UDS / UDP / TCP)"]
+        StdIo["StdIoLogBackend (Daemon Stdout / Stderr)"]
+        InMemory["InMemoryLogRotator (Generational RAM Segments)"]
+        RingBuf["Memory RingBuffer (Recent 2,000 Lines)"]
+
+        Pump --> Composite
+        Composite --> FileRotator & Syslog & StdIo & InMemory
+        Pump --> RingBuf
+    end
+
+    subgraph Consumers ["Consumers (InstantLogReader & EventHub)"]
+        EventHub["EventHub (LogEntry Bus)"]
+        RPC["XML-RPC & REST APIs (read_bytes / tail_bytes)"]
+        UI["Web UI & CLI (SSE Stream / supervisorctl tail -f)"]
+
+        RingBuf --> UI
+        InMemory --> RPC
+        Pump --> EventHub
+    end
 ```
 
-1. **Zero-Polling I/O**: Reads lines asynchronously via `BufReader::lines()`, sleeping with 0% CPU consumption when no output is produced.
-2. **Rotating Storage (`file-rotate`)**: Automatically rotates based on size (`max_bytes`) or schedule (`rotate: daily`), retaining `backups` historical archives.
-3. **Persistent LogRotators**: Rotator instances are created once per configured program actor and shared across child process generations, preserving sequential log rotation and avoiding reopening files or losing sequence on process restarts.
-4. **High-Throughput Buffering**: Log lines are appended to the rotation writer without synchronous per-line flush calls, maximizing I/O throughput while guaranteeing explicit flushes on stream EOF and process exit.
-5. **RingBuffer**: Bounded circular buffer (`parking_lot::Mutex<VecDeque<String>>`) allowing instant replay upon `supervisorctl tail -f` or Web UI log drawer opening.
+### 8.1 Zero-Thread Subprocess I/O Transport (`src/logging/transport.rs`)
+
+1. **Windows Overlapped Named Pipes (IOCP Integration)**:
+   - **Root Cause of Thread Pinning**: Using standard anonymous pipes (`tokio::process::Command::stdout(Stdio::piped())`) internally creates Win32 synchronous pipes (`CreatePipe`), which cannot bind to IOCP. Tokio wraps them in `Blocking<ArcFile>` and delegates every read to `tokio::task::spawn_blocking`, permanently pinning **2 OS worker threads per running child process**.
+   - **Overlapped Named Pipe Solution**:
+     - Allocates an isolated named pipe per stream: `\\.\pipe\rsupervisord-{pid}-{program_name}-{stdout|stderr}-{seq}`.
+     - **Server End**: Created via `tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true)` with `FILE_FLAG_OVERLAPPED`, registered directly with Tokio's IOCP reactor.
+     - **Client End**: Opened synchronously with `FILE_FLAG_WRITE_THROUGH` and converted to `Stdio::from(client_file)`. The original handle is intentionally created **non-inheritable**; Rust std duplicates `Stdio::Handle` with inheritance under `CREATE_PROCESS_LOCK` during child spawn, preventing handle leakage into concurrent spawns and eliminating pipe EOF deadlocks.
+     - **Thread Cost**: **0 extra OS threads**.
+2. **Unix Asynchronous Pipes & Read/Write Semantic Decoupling**:
+   - **Atomic CLOEXEC Creation**: Pipes are created via `create_cloexec_pipe()`, leveraging atomic `pipe2(O_CLOEXEC)` on modern kernels with fallback to `pipe()` + `F_SETFD(FD_CLOEXEC)`.
+   - **Supervisor Read End**: Marked with `O_NONBLOCK` via `fcntl(&read_fd, F_SETFL(OFlag::O_NONBLOCK))` and integrated directly with Tokio's Epoll/Kqueue reactor using `tokio::io::unix::AsyncFd`.
+   - **Child Write End (Critical)**: **Remains standard blocking**. Standard language runtimes (Python, Node.js, Java, C/C++) expect stdout/stderr to be blocking streams. If `O_NONBLOCK` were set on the write end, burst output exceeding the 64KB kernel buffer would return `EAGAIN` / `EWOULDBLOCK`, causing crashes (such as Python `BlockingIOError: [Errno 11] Resource temporarily unavailable`). A blocking write end guarantees binary compatibility and provides natural kernel-level backpressure.
+   - **Atomic Redirection**: When `redirect_stderr: true`, the stdout write descriptor is duplicated via `fcntl(&write_file, F_DUPFD_CLOEXEC(0))` with atomic `FD_CLOEXEC` to prevent handle leaks.
+   - **Thread Cost**: **0 extra OS threads**.
+
+### 8.2 Core Abstractions & Traits
+
+- **`LogChunk` (`src/logging/types.rs`)**: Zero-copy byte slice container (`bytes::Bytes`) with metadata (`LogChannel`, timestamp, program name, pid).
+- **`LogBackend` Trait (`src/logging/backend.rs`)**:
+  ```rust
+  #[async_trait]
+  pub trait LogBackend: Send + Sync + 'static {
+      async fn write_chunk(&self, chunk: &LogChunk) -> Result<(), ProgramError>;
+      async fn flush(&self) -> Result<(), ProgramError>;
+      async fn close(&self) -> Result<(), ProgramError> { self.flush().await }
+  }
+  ```
+- **`InstantLogReader` Trait (`src/logging/reader.rs`)**:
+  ```rust
+  pub trait InstantLogReader: Send + Sync + 'static {
+      fn read_bytes(&self, channel: LogChannel, offset: i64, length: i64) -> (String, i64, bool);
+      fn tail_bytes(&self, channel: LogChannel, offset: i64, length: i64) -> (String, i64, bool);
+      fn read_lines(&self, channel: LogChannel, max_lines: Option<usize>) -> Vec<String>;
+      fn subscribe(&self, channel: LogChannel) -> tokio::sync::broadcast::Receiver<String>;
+      fn clear(&self, channel: Option<LogChannel>);
+  }
+  ```
+
+### 8.3 Destination Grammar & Composite Sinks (`src/logging/destination.rs`, `composite.rs`)
+
+1. **Unified Destination Grammar**:
+   Both daemon and program streams resolve through `LogDestination`:
+
+   | Value Syntax | Resolved Backend | Semantics & Compatibility |
+   | :--- | :--- | :--- |
+   | `/path/to/app.log` | `LogRotator` | Rotating file on disk with macro expansion and `~` support |
+   | `AUTO` / `auto` | `InMemoryLogRotator` | In-memory generational buffer (Go parity; 0 disk I/O) |
+   | `NONE` / `off` / `/dev/null` | `NullLogBackend` | Child spawned with `Stdio::null()`, bypassing pump tasks |
+   | `/dev/stdout` / `/dev/stderr` | `StdIoLogBackend` | Direct write to parent daemon stdout/stderr |
+   | `syslog` | `SyslogLogBackend::Local` | Unix local domain socket (`/dev/log`, `/var/run/syslog`, `/var/run/log`) |
+   | `syslog@[proto:]host[:port]` | `SyslogLogBackend::Remote` | Remote syslog via UDP (port 514) or TCP (port 6514) |
+   | `dest1, dest2, ...` | `CompositeLogBackend` | Multi-destination fan-out list |
+
+2. **Composite Execution & Primary-Reader Semantics**:
+   - Outgoing chunks are dispatched asynchronously to all child backends in the composite tree.
+   - For read and inspect operations (XML-RPC `readProcessStdoutLog`, `tailProcessStdoutLog`, `clearProcessLogs`), **only the primary (first) destination in the list is queried or cleared**, matching Go `CompositeLogger` behavior.
+   - Python `stdout_syslog` / `stderr_syslog` are mapped to an implicit `CompositeLogBackend([File, Syslog])`.
+
+### 8.4 Rotating File Backend (`src/logging/rotator.rs`)
+
+`LogRotator` wraps `file_rotate::FileRotate` and append-only `File`:
+
+1. **Rotation Modes (`timestamp_suffix`)**:
+   - **Numeric Mode (`timestamp_suffix: false`, Default)**: Rotates files as `app.log.1`, `app.log.2`, ..., `app.log.N` using `AppendCount`, matching Python Supervisor classic behavior.
+   - **Timestamp Mode (`timestamp_suffix: true`)**: Rotates files as `app.log.YYYY-MM-DDTHH-MM-SS` using `AppendTimestamp`, automatically pruning archives exceeding `backups`.
+2. **Append-Only Mode (`max_bytes: 0`)**: Rotation is disabled; the file is opened directly in append mode (`OpenOptions::append(true)`).
+3. **Collision Detection**: Emits a `tracing::warn!` during config resolution if multiple streams target the same rotating file with `max_bytes > 0`.
+4. **Lifecycle Persistence**: Rotators are created once per program actor and shared across child process generations, preserving sequential log rotation and avoiding file handle thrashing across restarts.
+
+### 8.5 RFC 3164 Syslog Backend (`src/logging/syslog/`)
+
+1. **Format**: Generates RFC 3164 BSD syslog messages `<PRI>TIMESTAMP HOST TAG: MESSAGE` with 1024-byte truncation.
+2. **Transports**:
+   - **Local Domain Socket**: Unix auto-probing across `/dev/log`, `/var/run/syslog`, `/var/run/log`.
+   - **Remote UDP**: Non-blocking UDP datagrams via `tokio::net::UdpSocket`.
+   - **Remote TCP**: Bounded `mpsc` queue (1024 chunks) with a dedicated background writer task supporting automatic reconnection, preventing remote network stalls from blocking child pumps.
+3. **Windows Fail-Loud**: Validates and rejects syslog configuration with a hard `ProgramError::ConfigError` on Windows.
+
+### 8.6 In-Memory Generational Rotator (`src/logging/in_memory_rotator.rs`)
+
+1. **Segmented Memory Architecture**: Organized into an `active_segment` and a bounded `VecDeque<MemorySegment>` of backup segments.
+2. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
+
+### 8.7 Stream-Independent Configuration & INI Mapping (OI-10)
+
+1. **Decoupled Quotas**: `stdout_max_bytes` vs `stderr_max_bytes`, and `stdout_backups` vs `stderr_backups`.
+2. **Resolution Fallback**: Stream-specific field -> shared `logs.max_bytes` / `logs.backups` -> hardcoded defaults (50MB / 10).
+3. **INI Adapter**: Maps all stream-independent and syslog keys (`stdout_logfile_maxbytes`, `stderr_logfile_maxbytes`, `logfile_timestamp_suffix`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`).
 
 ---
 
@@ -920,6 +1036,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
   - An asynchronous writer task (`StdinWriterTask`) manages `tokio::process::ChildStdin` with an internal memory buffer (`bytes::BytesMut`, up to 64KB).
 - **Reactor Backpressure via `tokio::select!` If-Guards**:
   - In `StdinWriterTask::run`, the event loop is structured as follows:
+
     ```rust
     tokio::select! {
         biased;
@@ -932,6 +1049,7 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
         }
     }
     ```
+
   - When the child reads slower than the input stream and `buffer.len() >= 64KB`, the `rx.recv()` branch is disabled.
   - The bounded MPSC channel (`capacity: 16`) fills up, naturally suspending `tx.send(data).await` on the caller side.
   - No bytes are dropped; backpressure propagates naturally through the OS pipe, internal buffer, MPSC channel, to the caller.
@@ -948,12 +1066,15 @@ In `RingBuffer::push`, checks `broadcast_tx.receiver_count() > 0` before sending
 ## 16. Platform Service Architecture & Windows SCM Resilience (`PlatformService`)
 
 ### 16.1 Zero-CFG Platform Boundary
+
 To achieve strict architectural decoupling, service management is abstracted under the `PlatformService` trait in `src/platform/traits.rs`:
+
 - Methods: `install`, `uninstall`, `start`, `stop`, `restart`, `run_service`.
 - Outside of `src/platform/`, the entire codebase (including `src/service/mod.rs`, `src/daemon.rs`, `src/main.rs`, and `src/cli/transport.rs`) contains **zero `#[cfg(windows)]` or `#[cfg(unix)]` branches**.
 - Service operations are uniformly dispatched via `crate::platform::native_platform().service()`.
 
 ### 16.2 Windows SCM Service Stability & Fault Hardening
+
 Running as an NT Service under the Windows Service Control Manager (SCM) entails specific constraints and failure modes. `supervisord` applies a comprehensive defense-in-depth design:
 
 1. **FFI Panic Barrier (`catch_unwind`)**:
@@ -999,8 +1120,8 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 | **Windows Native IPC** | Bind Named Pipe (`\\.\pipe\...`) & AF_UNIX; connect CLI & reverse proxy | Zero-port, elevation-free high-compatibility IPC | ✅ Named Pipe + AF_UNIX dual listeners verified |
 | **Process Group Operations** | Start, stop, restart groups via CLI and REST APIs | Group sub-DAG priority order strictly honored | ✅ `test_manager_start_and_stop_group` verified |
 | **Cron Scheduling** | Scheduled start/stop via cron expressions with zero polling | Precise trigger at scheduled time; autostart: false | ✅ `cron_tests.rs` (3 tests passed) |
-| **Lifecycle Hooks & Degradation**| Pre-start blocking, pre-start ignore failure, pre-stop graceful degradation | Safe degradation guarantees clean process termination | ✅ `program_tests.rs` (4 hook tests passed) |
-| **Data-Plane Stdin & Backpressure**| Send stdin to echo child, restart pipe isolation, backpressure & error on stopped | Zero-drop bounded buffer, backpressure propagation, EOF on drop | ✅ `program_tests.rs`, `manager_tests.rs`, `server_tests.rs`, `cli_tests.rs` (6 stdin tests passed) |
+| **Lifecycle Hooks & Degradation** | Pre-start blocking, pre-start ignore failure, pre-stop graceful degradation | Safe degradation guarantees clean process termination | ✅ `program_tests.rs` (4 hook tests passed) |
+| **Data-Plane Stdin & Backpressure** | Send stdin to echo child, restart pipe isolation, backpressure & error on stopped | Zero-drop bounded buffer, backpressure propagation, EOF on drop | ✅ `program_tests.rs`, `manager_tests.rs`, `server_tests.rs`, `cli_tests.rs` (6 stdin tests passed) |
 | **Embedded Web UI** | Offline access (`GET /` and `/vue.global.prod.js`) | Served directly from embedded FS; instant render | ✅ Vue 3 single-binary verification passed |
 | **Active Probe Recovery** | Simulate endpoint failure until failure threshold | Automated transition to Unhealthy and restart | ✅ HTTP/TCP/Exec probe state machines verified |
 | **Dynamic Paths & Naming** | Multi-tier config search, symlink dispatch, default log & UDS paths | Consistent across Windows & Unix | ✅ Verified with dynamic test suites |
@@ -1014,7 +1135,9 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 ## 18. File and Binary Change Monitoring & Debounced Auto-Restart (`WatchService`)
 
 ### 18.1 Go Supervisord Compatibility & Evolution
+
 `supervisord` models its file change detection and binary change restart after Go's `ochinchina/supervisord`, while eliminating its race conditions and excessive polling:
+
 - `restart_when_binary_changed: bool` (default: `false`): Automatically detects modifications to the target executable binary.
 - `restart_signal_when_binary_changed: Option<StopSignal>`: If specified, sends a graceful reload signal (e.g. `SIGHUP`) instead of stopping and restarting the process.
 - `restart_cmd_when_binary_changed: Option<String>`: Custom restart command executed when the binary changes.
@@ -1025,15 +1148,19 @@ Running as an NT Service under the Windows Service Control Manager (SCM) entails
 - `restart_debounce_secs: u64` (default: `5`): Settling debounce window in seconds (stability-first).
 
 ### 18.2 Inode-Resilient Directory Watching & Atomic Renames
+
 Directly watching an executable binary file via OS filesystem notifications (inotify on Linux, ReadDirectoryChangesW on Windows) suffers from inode invalidation: modern compilers (Rust, Go, C++) write into temporary files and perform atomic renames (`rename` or `MoveFileExW`) to replace the target executable.
 `supervisord` solves this by:
+
 1. Resolving the true binary location using `PlatformBackend::resolve_executable` (evaluating relative directories, executable extensions, and PATH).
 2. Registering the **parent directory** with `notify::RecommendedWatcher`.
 3. Filtering raw filesystem events by `abs_path` comparison (lexical absolute, never resolving symlinks) or wildcard filename matching.
 
 ### 18.3 Stability-First Multi-Chunk Write Debouncing Engine
+
 Compilers and package managers write large binaries in chunks over several seconds. Premature restarts during mid-write result in corrupted executions, `ETXTBSY` (Linux), or file-sharing lock violations (`ERROR_SHARING_VIOLATION` on Windows).
 `WatchService` implements an asynchronous debouncing loop:
+
 1. **Settling Window Coalescing**: Consecutive write/create/rename events reset the debounce timer (`default: 5s`).
 2. **File Accessibility & Size Verification**: Before triggering the action, `WatchService` attempts to open the modified target file in read-only mode and verifies its size > 0. If the file is locked by a compiler or linker, the trigger backs off gracefully until the file stabilizes.
 3. **Execution Dispatch**: Depending on configuration, the manager executes:
@@ -1063,6 +1190,7 @@ flowchart LR
 ```
 
 ### 19.1 Architectural Boundaries
+
 1. **Strict Isolation**: No legacy XML-RPC types or translation artifacts leak into `src/manager/` or `src/program/`.
 2. **Standard Supervisor Fault Codes (1..92)**:
    - `1 UNKNOWN_METHOD`, `2 INCORRECT_PARAMETERS`, `10 BAD_NAME`, `11 BAD_SIGNAL`, `20 NO_FILE`, `21 NOT_EXECUTABLE`, `30 FAILED`, `40 ABNORMAL_TERMINATION`, `50 SPAWN_ERROR`, `60 ALREADY_STARTED`, `70 NOT_RUNNING`, `80 SUCCESS`, `92 CANT_REREAD`.
@@ -1080,15 +1208,18 @@ flowchart LR
 ## 20. Unified Configuration Path Translation Boundary & Cross-Platform Execution Architecture (`src/config/transform.rs` & `src/platform/`)
 
 ### 20.1 Architectural Tenet: Virtual `chdir` at Parse Boundary
+
 In traditional supervisors (such as Python Supervisor), relative configuration paths are either resolved against the daemon's runtime working directory or rely on changing the process CWD. In modern multi-threaded asynchronous Rust (Tokio runtime), calling `std::env::set_current_dir(config_dir)` is strictly unacceptable:
+
 1. **Global Process Mutation & Race Conditions**: Mutating global CWD introduces data races with concurrent tasks, worker threads, and external subcommands.
 2. **CLI Option Contamination**: Global directory shifts silently invalidate relative paths provided via CLI flags (e.g. `--logfile ./daemon.log`).
 3. **Windows Service Instability**: Windows services started under SCM default to `C:\Windows\System32`; unchecked CWD changes destabilize service handles.
 
 **The Solution: Parse-Boundary Projection**:
 Rather than delegating path resolution to scattered downstream consumers or mutating OS state, `supervisord` establishes a **single, self-contained transformation boundary** (`src/config/transform.rs`). At the configuration boundary (immediately after deserializing YAML/INI and before validation), the typed configuration tree is projected into a JSON `Value` tree, walked by a pure transformation function, and deserialized back.
+
 - When `server.path_translation: true` (default), relative paths are deterministically anchored to `config_dir`, simulating the effect of `chdir(config_dir)` with zero global side effects.
-   - **INI Frontend Baseline Alignment**: `adapt_ini_to_config` (`src/compat/ini/adapter.rs`) forces `server.path_translation = false`, `server.allow_unelevated = true`, and `server.ctl_defaults = false` before invoking `translate_paths` + `validate`, aligning bare relative path resolution (daemon CWD), IPC access (no elevation gate), and no server→ctl backfill (Python requires `[supervisorctl]`) with the Python supervisor / go-supervisord baselines. YAML native configs keep the rsupervisord defaults (`true` / `false` / `true`).
+  - **INI Frontend Baseline Alignment**: `adapt_ini_to_config` (`src/compat/ini/adapter.rs`) forces `server.path_translation = false`, `server.allow_unelevated = true`, and `server.ctl_defaults = false` before invoking `translate_paths` + `validate`, aligning bare relative path resolution (daemon CWD), IPC access (no elevation gate), and no server→ctl backfill (Python requires `[supervisorctl]`) with the Python supervisor / go-supervisord baselines. YAML native configs keep the rsupervisord defaults (`true` / `false` / `true`).
 - **Zero Diffusion Principle**: Downstream modules (`schema.rs`, `process.rs`, `watch.rs`, `health.rs`) contain **zero `path_translation` conditional checks** and zero manual path concatenations. Downstream code consumes pure configuration instances directly.
 
 ```mermaid
@@ -1104,6 +1235,7 @@ flowchart TD
 ```
 
 ### 20.2 Category Rules & Field Classification Table
+
 Field categorization is strictly table-driven by schema position, avoiding error-prone heuristic guessing:
 
 | Category | Applicable Fields | Transformation Rule |
@@ -1113,6 +1245,7 @@ Field categorization is strictly table-driven by schema position, avoiding error
 | **`Default` (Plain)** | All other string fields (e.g. `environment.*`, `pre_start`, `pre_stop`, `restart_cmd_*`, `health_check.url`, glob patterns) | Expand macros only; never alter path strings. |
 
 ### 20.3 Cross-Platform Execution Hardening & Platform Abstraction (`PlatformBackend`)
+
 To eliminate cross-platform behavioral discrepancies between Windows Win32 APIs and POSIX syscalls, core execution capabilities are unified behind the `PlatformBackend` trait; path handling uses free functions `norm_path` / `abs_path` (never resolve symbolic links).
 
 1. **Platform Command Line Splitting (`split_command_line`)**:
@@ -1128,6 +1261,3 @@ To eliminate cross-platform behavioral discrepancies between Windows Win32 APIs 
 4. **Decoupling Executable Search from Child Working Directory**:
    - Win32 `CreateProcessW` uses `lpCurrentDirectory` purely to set the child process's CWD—it does **not** affect executable resolution for relative commands.
    - By resolving `command`'s `argv[0]` to an absolute path at the `transform` boundary, both Windows and Unix pass an explicit, unambiguous absolute executable path to the OS, ensuring 100% identical cross-platform behavior regardless of whether `directory` is configured or omitted.
-
-
-

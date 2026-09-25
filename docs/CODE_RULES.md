@@ -272,7 +272,7 @@ Known flaky: `tests/event_tests.rs::test_sse_all_logs_stream_endpoint`.
 ## Quick commit → rule map
 
 | Commit | Rule(s) |
-|--------|---------|
+| -------- | --------- |
 | `877e79b` | 1, 3, 11 |
 | `0b61d63` | 1, 14 |
 | `2d555c0` | 4 |

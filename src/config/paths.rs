@@ -66,7 +66,8 @@ impl<'a> PathResolver<'a> {
             }
         }
 
-        let extensions = [".conf", ".ini", ".yaml", ".yml"];
+        // YAML is prior, do not change the order!
+        let extensions = [".yaml", ".yml", ".conf", ".ini"];
 
         // 2. Current Working Directory (CWD) & ./etc/ (Python Supervisor compatibility)
         if let Ok(cwd) = std::env::current_dir() {
@@ -282,25 +283,37 @@ pub fn get_executable_dir() -> &'static Path {
 ///
 /// Intended to be read before CLI argument parsing. Computed once and cached in
 /// a function-local `static LazyLock`. The path is standardized with
-/// [`crate::platform::abs_path`] (never resolves symbolic links). On Windows,
-/// an `.exe` suffix is appended when the file name does not already end with
-/// `.exe` (case-insensitive).
+/// [`crate::platform::abs_path`] (never resolves symbolic links).
+///
+/// Processing pipeline:
+/// 1. Reads `argv[0]`. If it is a bare name without path separators, attempts
+///    `PATH` lookup via [`which`] (preserving the symlink path in `PATH`).
+/// 2. On Windows, appends `.exe` if the extension is missing.
+/// 3. Normalizes to an absolute path via `std::path::absolute` (which never
+///    resolves symlinks).
 pub fn exe_path() -> &'static Path {
     static EXE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-        let argv0 = std::env::args_os().next().unwrap_or_default();
-        let path = crate::platform::abs_path(Path::new(&argv0));
-        if cfg!(windows)
-            && path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_none_or(|e| !e.eq_ignore_ascii_case("exe"))
-        {
-            let mut os = path.into_os_string();
-            os.push(".exe");
-            os.into()
-        } else {
-            path
-        }
+        std::env::args_os()
+            .next()
+            .map(PathBuf::from)
+            .and_then(|mut argv0| {
+                which::which(&argv0).ok().or_else(|| {
+                    if cfg!(windows)
+                        && argv0
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_none_or(|e| !e.eq_ignore_ascii_case("exe"))
+                    {
+                        let mut os = argv0.into_os_string();
+                        os.push(".exe");
+                        argv0 = os.into();
+                    }
+                    let path = crate::platform::abs_path(&argv0);
+                    if path.is_file() { Some(path) } else { None }
+                })
+            })
+            .ok_or_else(std::env::current_exe)
+            .unwrap()
     });
     &EXE_PATH
 }

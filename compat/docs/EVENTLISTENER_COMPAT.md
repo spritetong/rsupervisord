@@ -109,7 +109,7 @@ The listener process's `listener_state` starts as `ACKNOWLEDGED` (busy); the sta
 | `BUSY` | insufficient `<n>` | stay `BUSY` (continue reading) | wait for the remaining data |
 | `UNKNOWN` | anything | stay `UNKNOWN` | the listener process is **permanently** out of receive |
 
-> The `READY` token is **exactly** `READY\n` (newline included); the `RESULT` prefix is `RESULT `.
+> The `READY` token is **exactly** `READY\n` (newline included); the `RESULT` prefix is `RESULT`.
 
 ### 5.3 Result Handling (`result_handler`)
 
@@ -140,6 +140,7 @@ The listener process's `listener_state` starts as `ACKNOWLEDGED` (busy); the sta
 `<STATE>` is a `getProcessStateDescription` name (`STOPPED`/`STARTING`/`RUNNING`/`BACKOFF`/`STOPPING`/`EXITED`/`FATAL`/`UNKNOWN`); `expected` is an `0/1` integer.
 
 **Trigger points**:
+
 - `PROCESS_STATE_*`: state transitions of processes in `[program:x]`/groups.
 - `PROCESS_LOG_*`: the process config sets `stdout_events_enabled` / `stderr_events_enabled=true`, and the process produces output.
 - `PROCESS_COMMUNICATION_*`: `stdout_capture_maxbytes` / `stderr_capture_maxbytes` are configured and the output contains `<!--XSUPERVISOR:BEGIN-->…<!--XSUPERVISOR:END-->` capture tokens.

@@ -361,25 +361,25 @@ FastCGI programs: extra `socket` / `socket_owner` / `socket_mode`, and reuse the
 
 ### P1
 
-6. `[include]` `files`(glob + merge).
-7. `[rpcinterface:*]` tolerance (parse and ignore).
-8. `[supervisorctl]` → CLI defaults (in coordination with `CLI_COMPAT.md` `-c`) — **done** §8 OI-1.
-9. ~~`priority` range arbitration (`0..=999`)~~ **done** (`MAX_PRIORITY`).
-10. `nodaemon` / `logfile_backups` / `identifier` value handling polish — **done** §8 OI-4.
+1. `[include]` `files`(glob + merge).
+2. `[rpcinterface:*]` tolerance (parse and ignore).
+3. `[supervisorctl]` → CLI defaults (in coordination with `CLI_COMPAT.md` `-c`) — **done** §8 OI-1.
+4. ~~`priority` range arbitration (`0..=999`)~~ **done** (`MAX_PRIORITY`).
+5. `nodaemon` / `logfile_backups` / `identifier` value handling polish — **done** §8 OI-4.
 
 ### P2
 
-11. `[supervisord]` runtime-surface fields (`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`silent`) → depends on SUPERVISORD §7 #12 — **done** §8 OI-8 (pidfile/minfds/minprocs/nodaemon/silent).
-12. `[unix_http_server]` `chown` (`chmod` implemented, see §4.1).
-13. Independent stdout/stderr `maxbytes`/`backups` — **done** §8 OI-10.
-14. Daemon `[supervisord] environment` without `set_var` side effect — **done** §8 OI-6.
+ 1. `[supervisord]` runtime-surface fields (`pidfile`/`nodaemon`/`minfds`/`minprocs`/`umask`/`directory`/`childlogdir`/`silent`) → depends on SUPERVISORD §7 #12 — **done** §8 OI-8 (pidfile/minfds/minprocs/nodaemon/silent).
+ 2. `[unix_http_server]` `chown` (`chmod` implemented, see §4.1).
+ 3. Independent stdout/stderr `maxbytes`/`backups` — **done** §8 OI-10.
+ 4. Daemon `[supervisord] environment` without `set_var` side effect — **done** §8 OI-6.
 
 ### Not Supported
 
-15. `[fcgi-program:x]` (complex, not present in the Go version either).
-16. `[program:x]` `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`serverurl` childutils (`*_syslog` **implemented**, see §8 OI-7).
-17. `[supervisord]` `nocleanup`/`strip_ansi`.
-18. `[supervisorctl]` `prompt`/`history_file`.
+ 1. `[fcgi-program:x]` (complex, not present in the Go version either).
+ 2. `[program:x]` `stdout_capture_maxbytes`/`stderr_capture_maxbytes`/`serverurl` childutils (`*_syslog` **implemented**, see §8 OI-7).
+ 3. `[supervisord]` `nocleanup`/`strip_ansi`.
+ 4. `[supervisorctl]` `prompt`/`history_file`.
 
 ---
 

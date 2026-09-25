@@ -65,8 +65,12 @@ flowchart TD
     end
 
     subgraph LoggingLayer ["Logging & Metrics Subsystem"]
-        Rotate["file-rotate (Size/Time Rotation & Archiving)"]
+        LogTransport["Zero-Thread Transport\n(Windows IOCP Named Pipe / Unix O_NONBLOCK)"]
+        LogPump["LogPump Task (Line Buffering & Dispatch)"]
+        LogSinks["Log Sinks\n(FileRotate / RFC 3164 Syslog / InMemoryRotator / StdIo)"]
         RingBuf["Memory RingBuffer (Recent 2,000 Lines Instant Playback)"]
+        LogTransport --> LogPump --> LogSinks
+        LogPump --> RingBuf
     end
 
     subgraph CommunicationLayer ["Communication Layer (Axum Web Service)"]
@@ -224,24 +228,32 @@ To prevent background task leaks while maintaining pragmatic concurrency:
 
 ---
 
-### 3.2 Log Streaming & Rotation Subsystem
+### 3.2 Log Streaming, Transport & Rotation Subsystem
 
-Built with the production-proven `file-rotate` crate:
+Built with zero-thread async transports, extensible backends, and the production-proven `file-rotate` crate:
 
-1. **Asynchronous Non-Blocking Pipe Capture**:
-   - Captures `stdout` and `stderr` asynchronously via Tokio pipes.
-   - Workers remain idle when no log data is written, incurring zero polling I/O.
-2. **Log Rotation**:
-   - **Size-Based**: `max_bytes: "20MB"` (supports `KB`, `MB`, `GB`).
-   - **Time-Based**: `rotate: daily` or `hourly`.
-   - **Retention**: `backups: 5` (retains recent archives, pruning older files).
-   - **Stream Merging**: Supports redirecting `stderr` into `stdout`.
-3. **In-Memory RingBuffer**:
-   - Maintains a bounded circular buffer (e.g., 2,000 lines) per program.
-   - **CLI**: Supports `supervisorctl tail -f <program>`, instantly replaying recent history before streaming.
-   - **Web UI**: Streams logs in real time via Server-Sent Events (SSE).
-4. **Disableable Logging & Channel Optimizations**:
-   - **Program-Level Disabling**: When `logs: { enabled: false }` or paths point to `/dev/null`, `none`, or `off`, the process is spawned with `Stdio::null()`, avoiding pipe allocations and background pump tasks.
+1. **Zero-Thread Asynchronous Subprocess Transport**:
+   - **Windows**: Uses isolated Overlapped Named Pipes (`\\.\pipe\rsupervisord-...`) registered directly with Tokio's IOCP reactor. Eliminates the legacy anonymous pipe thread-pool pinning, reducing background worker threads from **2 pinned OS threads per child to exactly 0**.
+   - **Unix**: Uses atomic `O_CLOEXEC` pipes with read/write decoupling: the supervisor read end is marked `O_NONBLOCK` via `tokio::io::unix::AsyncFd`, while the child write end remains **standard blocking** to ensure full binary compatibility (preventing `EAGAIN` crashes in Python/Node.js/C runtimes upon buffer saturation).
+2. **Unified Destination Grammar & Multi-Sink Fan-Out**:
+   - Both daemon and program streams share a unified destination grammar: file path, `AUTO` (in-memory generational buffer), `NONE`/`/dev/null`/`off` (discard), `/dev/stdout`, `/dev/stderr`, `syslog`, and `syslog@[udp|tcp:]host[:port]`.
+   - **Composite Multi-Sink Sinks**: Supports comma-separated destinations (e.g. `stdout_logfile = test.log, /dev/stdout`) with write fan-out and **primary-reader semantics** (XML-RPC tail/read and clear operations query only the primary destination).
+   - **Python Syslog Interop**: Configurable `stdout_syslog: true` / `stderr_syslog: true` creates an implicit composite fan-out sink (`[File, Syslog]`).
+3. **Stream-Independent Rotation & Modes (OI-10)**:
+   - **Decoupled Stream Quotas**: `stdout_max_bytes` and `stderr_max_bytes`, as well as `stdout_backups` and `stderr_backups`, are independently configurable, falling back to shared `logs.max_bytes` / `backups`.
+   - **Numeric Mode (`timestamp_suffix: false`)**: Rotates files as `app.log.1` .. `app.log.N` for Python Supervisor compatibility.
+   - **Timestamp Mode (`timestamp_suffix: true`)**: Rotates files as `app.log.YYYY-MM-DDTHH-MM-SS` for Go supervisord parity, automatically pruning archives beyond the configured backup count.
+   - **Append-Only Mode (`max_bytes: 0`)**: Rotation is completely disabled, continuously appending to disk (useful for shared log sinks or special character devices).
+   - **Collision Detection**: Emits a `tracing::warn!` at startup if multiple streams target the same rotating file with `max_bytes > 0`.
+4. **In-Memory Generational Buffer (`AUTO` Mode & Fast Playback)**:
+   - Generational memory segments (`InMemoryLogRotator`) provide global byte and line offset seeking.
+   - Serves XML-RPC `readProcessStdoutLog`, `tailProcessStdoutLog`, `clearProcessLogs`, `supervisorctl tail -f`, and Web UI real-time SSE streaming with zero disk I/O when `AUTO` is configured.
+5. **RFC 3164 Syslog Integration**:
+   - Generates compliant `<PRI>TIMESTAMP HOST TAG: MESSAGE` with 1024-byte truncation.
+   - Unix: Local domain socket auto-probing (`/dev/log`, `/var/run/syslog`, `/var/run/log`), remote UDP (port 514), and remote TCP (port 6514 with non-blocking channel and auto-reconnect worker).
+   - Windows: Fail-loud configuration error (`ProgramError::ConfigError`) rejecting syslog destinations.
+6. **Disableable Logging & Channel Optimizations**:
+   - **Program-Level Disabling**: When `logs: { enabled: false }` or destination is `NONE`/`/dev/null`, the child is spawned with `Stdio::null()`, avoiding pipe allocations and pump tasks.
    - **Daemon-Level Disabling**: `logging.enabled: false` or `level: "off"` completely mutes daemon tracing.
    - **Broadcast Optimization**: Log lines are only cloned into broadcast channels when active subscribers exist (`receiver_count() > 0`).
 
@@ -387,12 +399,14 @@ Following the operational model of Windows `net start/stop` (synchronous confirm
 ### 3.5 Configuration Path Translation & Cross-Platform Execution Hardening
 
 #### 3.5.1 Virtual `chdir` at Parse Boundary (`server.path_translation`)
+
 - **Modern Default (`path_translation: true`)**: Relative paths in path fields (`uds_path`, `logging.file`, `directory`, `stdout`/`stderr`, `restart_directory_monitor`) and relative `command` executables (`argv[0]` containing `/` or `\`) are automatically anchored against `config_dir` at the parse boundary. Simulates running inside `config_dir` without mutating global process state (`chdir`).
 - **Python Compatibility Mode (`path_translation: false`)**: Preserves relative paths verbatim; paths resolve relative to the daemon's runtime working directory, reproducing Python Supervisor behavior.
 - **INI Frontend Baseline Alignment**: The INI (Python-compat) frontend (`src/compat/ini/adapter.rs`) forces `path_translation = false`, `allow_unelevated = true`, and `ctl_defaults = false` before `translate_paths` + `validate`, so a stock Python `supervisord.conf` loads with path resolution, IPC access, and client connection semantics equivalent to Python supervisor / go-supervisord (bare relative paths resolve against daemon CWD; no app-layer elevation gate on IPC; no server→ctl backfill — missing `[supervisorctl]` hard-errors in `supervisorctl`). YAML native configs keep the rsupervisord defaults (`path_translation: true`, `allow_unelevated: false`, `ctl_defaults: true`).
 - **Zero Diffusion**: The feature switch and path modifications are strictly isolated within the transformation boundary (`src/config/transform.rs`). Downstream orchestration (`Manager`, `ProgramActor`, `WatchService`) contains zero conditional logic.
 
 #### 3.5.2 Platform Abstraction & OS Execution Parity (`PlatformBackend`)
+
 - **Windows Command Line Splitting (`split_command_line`)**: Standard Windows `CommandLineToArgvW` tokenizer preserving `\` directory separators while supporting quoted arguments containing whitespace. Eliminates fragile file-existence heuristics (`is_file()`) during configuration parsing.
 - **Path Standardization Without Symlink Resolution**: Config file paths and other absolute-path needs use free `abs_path` (`std::path::absolute` + lexical `norm_path`); parse/transform uses lexical `norm_path` only. Symbolic links are never resolved (no `fs::canonicalize` / `realpath`).
 - **Batch Script Dispatch (`build_command`)**: Transparently wraps `.bat` and `.cmd` files with `cmd.exe /C "<script>" <args>` on Windows, eliminating execution failures and CVE-2024-24576 security rejections.

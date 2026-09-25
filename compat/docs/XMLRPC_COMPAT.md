@@ -157,6 +157,7 @@ All business errors must map to the `faultCode`/`faultString` in the table below
 **`state` code mapping** (Python `ProcessStates`): `STOPPED=0, STARTING=10, RUNNING=20, BACKOFF=30, STOPPING=40, EXITED=100, FATAL=200, UNKNOWN=1000`. rsupervisord's `ProgramState` (`Stopped/Starting/Running/Backoff/Stopping/Exited/Fatal`) must map to the codes above.
 
 **`description` rules** (`_interpretProcessInfo`):
+
 - RUNNING → `"pid {pid}, uptime {H:MM:SS}"` (uptime = now - start, negative values clamped to zero)
 - FATAL/BACKOFF → `spawnerr` (or `unknown error (try "tail {name}")` if empty)
 - STOPPED/EXITED → local time `"%b %d %I:%M %p"` if a start exists; otherwise `"Not started"`
@@ -224,6 +225,7 @@ Python returns a **configuration snapshot** per program (groups flattened), keys
 ## 9. Priority Checklist (Summary)
 
 **P0 (make stock supervisorctl usable)**
+
 1. `/RPC2` route + XML-RPC codec + unified middleware auth (Basic OR token OR session) + Faults mapping + 2-segment method name validation.
 2. `getAPIVersion`/`getVersion`, `getSupervisorVersion`, `getIdentification`, `getState`, `getPID`.
 3. `getAllProcessInfo`, `getProcessInfo` (all fields per §6).

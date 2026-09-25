@@ -23,6 +23,11 @@ server:
   # Default on Windows: \\.\pipe\supervisord (or C:/run/supervisord.sock for Caddy UDS)
   uds_path: "${SUPERVISORD_IPC_PATH:-/var/run/supervisord.sock}"
 
+  # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
+  # Valid values: "0700", "0770", "0777" (accepts "0700" / "0o700" / "700").
+  # Defaults: "0777" if allow_unelevated=true; otherwise "0700" on Unix or "0770" on Windows.
+  # uds_chmod: "0700"
+
   # Optional TCP HTTP listener for the Embedded Web UI and REST API.
   # If omitted, server will only listen on the local IPC socket.
   # Python/go-supervisord use 127.0.0.1:9001 for [inet_http_server].
@@ -53,11 +58,6 @@ server:
   # via local IPC when the daemon is running elevated. (default: false)
   # For INI (Python-compat) configs this is forced to true (no elevation gate; socket file permissions only).
   allow_unelevated: false
-
-  # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.
-  # Valid values: "0700", "0770", "0777" (accepts "0700" / "0o700" / "700").
-  # Defaults: "0777" if allow_unelevated=true; otherwise "0700" on Unix or "0770" on Windows.
-  # uds_chmod: "0700"
 
   # When true (default), empty fields on an existing `ctl` section are filled from
   # this server section at load. When no `ctl` section is written, supervisorctl

@@ -59,6 +59,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 file-rotate = "0.8"
 shell-words = "1"
+which = "8"
 
 # CLI and formatting
 clap = { version = "4", features = ["derive"] }

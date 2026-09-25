@@ -240,9 +240,11 @@ No dedicated mode (matches all three upstreams). Two documented recipes:
 
 1. **Same path, rotation off** ✅: every program `stdout_logfile=<shared>` + `*_logfile_maxbytes=0`, main `logfile=<shared>` + `logfile_maxbytes=0`. Appends interleave; **startup warn when >1 stream targets the same rotating file with `max_bytes > 0`** (schema Phase 4 validation — implemented).
 2. **Python debug mirror** ❌ **open (P2)**: when effective `loglevel ≤ debug`, each child stdout/stderr line is **also** written to the **main log sink** at debug level with Python format:
+
    ```text
    '{process_name}' {stdout|stderr} output:\n{line}
    ```
+
    - Would apply to file **and** syslog main sinks.
    - Controlled solely by `loglevel` (no extra key), matching Python `dispatchers.py`.
    - go does **not** implement this — required only for Python config parity.
@@ -343,23 +345,23 @@ src/logging/composite.rs            // CompositeLogBackend / Null / StdIo
 
 ### P1 — go full parity
 
-7. [x] Remote `syslog@udp|tcp:host[:port]` + async writer (UDP socket; TCP writer task + re-dial).
-8. [x] `syslog_facility` / `syslog_tag` / `syslog_{stdout,stderr}_priority`.
-9. [x] `logfile_timestamp_suffix` + per-stream timestamp suffix (**default false** — Python parity; go defaults true).
-10. [x] `/dev/stdout` / `/dev/stderr` program destinations (+ daemon `logfile=/dev/stdout`).
-11. [x] Comma `CompositeSink` (first = primary reader).
-12. [ ] **Main `logfile=syslog` / `syslog@…`** — validation ✅ but tracing layer has no syslog writer (§6.6, **open**).
-13. [x] XML-RPC snapshot fields for syslog/backups/maxbytes truth.
+1. [x] Remote `syslog@udp|tcp:host[:port]` + async writer (UDP socket; TCP writer task + re-dial).
+2. [x] `syslog_facility` / `syslog_tag` / `syslog_{stdout,stderr}_priority`.
+3. [x] `logfile_timestamp_suffix` + per-stream timestamp suffix (**default false** — Python parity; go defaults true).
+4. [x] `/dev/stdout` / `/dev/stderr` program destinations (+ daemon `logfile=/dev/stdout`).
+5. [x] Comma `CompositeSink` (first = primary reader).
+6. [ ] **Main `logfile=syslog` / `syslog@…`** — validation ✅ but tracing layer has no syslog writer (§6.6, **open**).
+7. [x] XML-RPC snapshot fields for syslog/backups/maxbytes truth.
 
 ### P2 — Python polish
 
-14. [ ] Debug-level child mirror into main sink (`loglevel≤debug`) — **open** (§6.3 recipe 2).
-15. [ ] Optional: `childlogdir` + Python AUTO-tempfile mode — **deferred** (only if users demand).
-16. [x] `supervisorctl maintail` → main-log tail (CLI `handle_maintail`).
+ 1. [ ] Debug-level child mirror into main sink (`loglevel≤debug`) — **open** (§6.3 recipe 2).
+ 2. [ ] Optional: `childlogdir` + Python AUTO-tempfile mode — **deferred** (only if users demand).
+ 3. [x] `supervisorctl maintail` → main-log tail (CLI `handle_maintail`).
 
 ### Not Supported (confirmed unchanged)
 
-17. [x] capture_maxbytes, strip_ansi, serverurl, fcgi logs — unchanged.
+ 1. [x] capture_maxbytes, strip_ansi, serverurl, fcgi logs — unchanged.
 
 ---
 

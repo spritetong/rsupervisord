@@ -173,8 +173,8 @@ All 31 `supervisor.*` methods go registers are implemented in rs (verified via `
 | Endpoint | go | rsupervisord | Notes |
 | :--- | :--- | :--- | :--- |
 | `/RPC2` + basic auth | ✅ | ✅ (IPC + TCP, optional auth) | |
-| `/program/list`, `/program/info/{name}`, `/program/start|stop|restart/{name}` (incl. `/{node}`) | ✅ `rest-rpc.go:117` | 🟡 different surface: `/api/v1/status`, `/api/v1/programs/{name}/start` (`api.rs:91-95`) | **not byte-compatible** with go clients; rs chose a cleaner REST dialect — acceptable divergence, documented |
-| `/program/log_stdout|stderr/{name}` | ✅ | 🟡 `/api/v1/programs/{name}/logs` | same story |
+| `/program/list`, `/program/info/{name}`, `/program/start | stop | restart/{name}` (incl. `/{node}`) | ✅ `rest-rpc.go:117` | 🟡 different surface: `/api/v1/status`, `/api/v1/programs/{name}/start` (`api.rs:91-95`) | **not byte-compatible** with go clients; rs chose a cleaner REST dialect — acceptable divergence, documented |
+| `/program/log_stdout | stderr/{name}` | ✅ | 🟡 `/api/v1/programs/{name}/logs` | same story |
 | `/logtail/{program}/stdout` (chunked follow) | ✅ (marked buggy/deprecated in-source) | 🟡 `/logs/stream` SSE instead | rs ahead (SSE); go's own comment says deprecated |
 | `/conf/{program}` | ✅ | ❌ P3 | depends on `conf_file` key; low value — configs are YAML/INI the user already has |
 | `/confFile`, `/log` (serve missing files → 404) | 🟡 go dead endpoints | ⛔ | not chased (go bug) |
