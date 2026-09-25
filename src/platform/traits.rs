@@ -22,10 +22,8 @@ pub fn normalize_exit_status(status: &std::process::ExitStatus) -> Option<i32> {
         use std::os::unix::process::ExitStatusExt;
         if let Some(code) = status.code() {
             Some(code)
-        } else if let Some(sig) = status.signal() {
-            Some(-sig)
         } else {
-            None
+            status.signal().map(|sig| -sig)
         }
     }
     #[cfg(not(unix))]
