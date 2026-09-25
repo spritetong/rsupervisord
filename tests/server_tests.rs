@@ -499,7 +499,15 @@ programs:
     let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
 
     // Initial status: both should be RUNNING
-    let statuses = client.status(&[]).await.expect("query status");
+    let mut statuses = None;
+    for _ in 0..20 {
+        if let Ok(st) = client.status(&[]).await {
+            statuses = Some(st);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let statuses = statuses.expect("query status");
     assert_eq!(statuses.len(), 2);
     assert!(statuses.iter().all(|s| s.state == "RUNNING"));
 
