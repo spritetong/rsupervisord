@@ -34,6 +34,9 @@ thread_local! {
 
 fn ensure_panic_hook_installed() {
     PANIC_HOOK_INSTALLED.call_once(|| {
+        // Wrap whatever hook is currently registered. If external code later replaces
+        // the hook via std::panic::set_hook, silencing degrades to merely printing
+        // panic messages; catch_unwind still contains the panic either way.
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if SILENCE_PANIC_HOOK.with(|s| s.get()) {
@@ -44,20 +47,15 @@ fn ensure_panic_hook_installed() {
     });
 }
 
-struct ScopedSilenceGuard;
-impl Drop for ScopedSilenceGuard {
-    fn drop(&mut self) {
-        SILENCE_PANIC_HOOK.with(|s| s.set(false));
-    }
-}
-
 fn with_silenced_panic<F, R>(f: F) -> std::thread::Result<R>
 where
     F: FnOnce() -> R + std::panic::UnwindSafe,
 {
     ensure_panic_hook_installed();
-    SILENCE_PANIC_HOOK.with(|s| s.set(true));
-    let _guard = ScopedSilenceGuard;
+    let prev = SILENCE_PANIC_HOOK.with(|s| s.replace(true));
+    let _guard = scopeguard::guard(prev, |prev| {
+        SILENCE_PANIC_HOOK.with(|s| s.set(prev));
+    });
     std::panic::catch_unwind(f)
 }
 
@@ -271,29 +269,61 @@ impl LogRotator {
                     let last = self
                         .last_fallback_warn_epoch
                         .load(std::sync::atomic::Ordering::Relaxed);
-                    if now_epoch.saturating_sub(last) >= 5 {
+                    let should_warn = now_epoch.saturating_sub(last) >= 5;
+                    if should_warn {
                         self.last_fallback_warn_epoch
                             .store(now_epoch, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!(
-                            "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
-                            self.path.display(),
-                            err
-                        );
                     }
+                    let already_fallback = matches!(*guard, RotatorInner::Fallback { .. });
                     match std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&self.path)
                     {
-                        Ok(mut file) => {
-                            file.write_all(data)?;
-                            *guard = RotatorInner::Fallback {
-                                file,
-                                writes_since_fallback: 0,
-                            };
-                            return Ok(());
-                        }
+                        Ok(mut file) => match file.write_all(data) {
+                            Ok(()) => {
+                                if should_warn {
+                                    if already_fallback {
+                                        eprintln!(
+                                            "[rsupervisord] Warning: log write failed while already in append-only mode for '{}': {}",
+                                            self.path.display(),
+                                            err
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
+                                            self.path.display(),
+                                            err
+                                        );
+                                    }
+                                }
+                                *guard = RotatorInner::Fallback {
+                                    file,
+                                    writes_since_fallback: 0,
+                                };
+                                return Ok(());
+                            }
+                            Err(fallback_err) => {
+                                if should_warn {
+                                    eprintln!(
+                                        "[rsupervisord] Warning: log write/rotation failed for '{}': {}; append-only fallback write failed: {}",
+                                        self.path.display(),
+                                        err,
+                                        fallback_err
+                                    );
+                                }
+                                return Err(fallback_err);
+                            }
+                        },
                         Err(fallback_err) => {
+                            if should_warn {
+                                eprintln!(
+                                    "[rsupervisord] Warning: log write/rotation failed for '{}': {}; append-only fallback could not be opened: {}",
+                                    self.path.display(),
+                                    err,
+                                    fallback_err
+                                );
+                            }
                             return Err(fallback_err);
                         }
                     }
@@ -582,14 +612,48 @@ mod tests {
     }
 
     #[test]
+    fn test_log_rotator_natural_panic_entry_to_fallback() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("panic_entry.log");
+        let rotator = LogRotator::with_options(&log_file, 50, 2, false).unwrap();
+
+        // Create an on-disk suffix that the rotator never scanned, mimicking the orphaned
+        // backup produced when handle_old_files fails to remove a locked file. The next
+        // rotation then trips file_rotate's assert!(!new_path.exists()) panic for real.
+        std::fs::write(dir.path().join("panic_entry.log.1"), b"orphan").unwrap();
+
+        // The panic is caught, silenced, and the write lands via append-only fallback.
+        rotator.write_all(&[b'a'; 60]).unwrap();
+
+        {
+            let guard = rotator.inner.lock();
+            assert!(
+                matches!(*guard, RotatorInner::Fallback { .. }),
+                "Real file_rotate panic must transition the rotator into Fallback"
+            );
+        }
+
+        // The fallback file remains writable afterwards.
+        rotator.write_line("still writable").unwrap();
+    }
+
+    #[test]
     fn test_thread_isolated_panic_silencing() {
         // Test that with_silenced_panic catches a panic without propagating
         let res = with_silenced_panic(std::panic::AssertUnwindSafe(|| {
+            // While this thread is silenced, other threads must observe the flag as false.
+            let seen_on_other_thread = std::thread::spawn(|| SILENCE_PANIC_HOOK.with(|s| s.get()))
+                .join()
+                .unwrap();
+            assert!(
+                !seen_on_other_thread,
+                "silence flag must remain thread-local"
+            );
             panic!("test panic that should be caught and silenced");
         }));
         assert!(res.is_err());
 
-        // Verify that SILENCE_PANIC_HOOK is false afterwards
+        // Verify that SILENCE_PANIC_HOOK is restored afterwards
         assert!(!SILENCE_PANIC_HOOK.with(|s| s.get()));
     }
 }
