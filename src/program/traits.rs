@@ -48,4 +48,31 @@ pub trait Program: Send + Sync {
 
     /// Asynchronously sends input data to the process's standard input.
     async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ProgramError>;
+
+    /// Reads up to `length` bytes from `channel` starting at `offset`.
+    /// Returns `(content, new_offset, overflow)` on success.
+    fn read_log(
+        &self,
+        _channel: crate::logging::LogChannel,
+        _offset: i64,
+        _length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        Ok((String::new(), 0, false))
+    }
+
+    /// Tails up to `length` bytes from `channel` starting at `offset`.
+    /// Returns `(content, new_offset, overflow)` on success.
+    fn tail_log(
+        &self,
+        _channel: crate::logging::LogChannel,
+        _offset: i64,
+        _length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        Ok((String::new(), 0, false))
+    }
+
+    /// Clears both in-memory and on-disk logs for this program.
+    fn clear_logs(&self) -> Result<(), ProgramError> {
+        Ok(())
+    }
 }

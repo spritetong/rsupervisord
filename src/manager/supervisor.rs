@@ -10,6 +10,7 @@ use crate::consts::*;
 use crate::error::ProgramError;
 use crate::eventlistener::pool::EventListenerPool;
 use crate::eventlistener::program::EventListenerProgram;
+use crate::logging::InMemoryChannelRotator;
 use crate::manager::dag::DependencyGraph;
 use crate::program::config::{ProgramConfig, StopSignal};
 use crate::program::process::ProcessProgram;
@@ -17,6 +18,7 @@ use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -103,6 +105,37 @@ pub enum ManagerCommand {
     SubscribeLogs {
         name: String,
         reply: oneshot::Sender<Result<tokio::sync::broadcast::Receiver<String>, ProgramError>>,
+    },
+    ReadLog {
+        name: String,
+        channel: crate::logging::LogChannel,
+        offset: i64,
+        length: i64,
+        reply: oneshot::Sender<Result<(String, i64, bool), ProgramError>>,
+    },
+    TailLog {
+        name: String,
+        channel: crate::logging::LogChannel,
+        offset: i64,
+        length: i64,
+        reply: oneshot::Sender<Result<(String, i64, bool), ProgramError>>,
+    },
+    ClearProcessLogs {
+        name: String,
+        reply: oneshot::Sender<Result<(), ProgramError>>,
+    },
+    ReadMainLog {
+        offset: i64,
+        length: i64,
+        reply: oneshot::Sender<Result<String, ProgramError>>,
+    },
+    TailMainLog {
+        offset: i64,
+        length: i64,
+        reply: oneshot::Sender<Result<(String, i64, bool), ProgramError>>,
+    },
+    ClearMainLog {
+        reply: oneshot::Sender<Result<(), ProgramError>>,
     },
     SendStdin {
         name: String,
@@ -628,6 +661,168 @@ impl ManagerHandle {
             })?
     }
 
+    pub async fn read_log(
+        &self,
+        name: impl Into<String>,
+        channel: crate::logging::LogChannel,
+        offset: i64,
+        length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        let name_str = name.into();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::ReadLog {
+                name: name_str.clone(),
+                channel,
+                offset,
+                length,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: name_str.clone(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: name_str.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed { name: name_str })?
+    }
+
+    pub async fn tail_log(
+        &self,
+        name: impl Into<String>,
+        channel: crate::logging::LogChannel,
+        offset: i64,
+        length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        let name_str = name.into();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::TailLog {
+                name: name_str.clone(),
+                channel,
+                offset,
+                length,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: name_str.clone(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: name_str.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed { name: name_str })?
+    }
+
+    pub async fn clear_process_logs(&self, name: impl Into<String>) -> Result<(), ProgramError> {
+        let name_str = name.into();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::ClearProcessLogs {
+                name: name_str.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: name_str.clone(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: name_str.clone(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed { name: name_str })?
+    }
+
+    pub async fn read_main_log(&self, offset: i64, length: i64) -> Result<String, ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::ReadMainLog {
+                offset,
+                length,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn tail_main_log(
+        &self,
+        offset: i64,
+        length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::TailMainLog {
+                offset,
+                length,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
+    pub async fn clear_main_log(&self) -> Result<(), ProgramError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ManagerCommand::ClearMainLog { reply: reply_tx })
+            .await
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?;
+
+        let timeout_dur = AWAIT_QUERY;
+        tokio::time::timeout(timeout_dur, reply_rx)
+            .await
+            .map_err(|_| ProgramError::Timeout {
+                name: "manager".to_string(),
+                timeout_secs: timeout_dur.as_secs(),
+            })?
+            .map_err(|_| ProgramError::ChannelClosed {
+                name: "manager".to_string(),
+            })?
+    }
+
     pub async fn send_stdin(
         &self,
         name: impl Into<String>,
@@ -722,6 +917,7 @@ pub struct SupervisorManagerBuilder {
     activity_tracker: Option<crate::manager::ActivityTracker>,
     event_hub: Option<crate::manager::EventHub>,
     cancel_token: Option<CancellationToken>,
+    main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
 }
 
 impl SupervisorManagerBuilder {
@@ -731,6 +927,7 @@ impl SupervisorManagerBuilder {
             activity_tracker: None,
             event_hub: None,
             cancel_token: None,
+            main_log_rotator: None,
         }
     }
 
@@ -746,6 +943,11 @@ impl SupervisorManagerBuilder {
 
     pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
+        self
+    }
+
+    pub fn with_main_log_rotator(mut self, rotator: Option<Arc<InMemoryChannelRotator>>) -> Self {
+        self.main_log_rotator = rotator;
         self
     }
 
@@ -856,6 +1058,10 @@ impl SupervisorManagerBuilder {
         // Python Supervisor's `process_group_configs` used by addProcessGroup/removeProcessGroup.
         let pending_configs = programs_map.clone();
 
+        let main_log_rotator = self
+            .main_log_rotator
+            .or_else(|| self.config.logging.build_main_rotator());
+
         let actor = ManagerActor {
             programs,
             configs: programs_map,
@@ -870,6 +1076,8 @@ impl SupervisorManagerBuilder {
             is_shutting_down: false,
             event_pools,
             server_identifier,
+            main_log_rotator: main_log_rotator.clone(),
+            config_logging: self.config.logging.clone(),
         };
 
         let actor_handle = tokio::spawn(actor.run());
@@ -878,6 +1086,7 @@ impl SupervisorManagerBuilder {
         Ok(SupervisorManager {
             handle,
             actor_handle: Some(actor_handle),
+            main_log_rotator,
             _cancel_guard: cancel_guard,
         })
     }
@@ -886,6 +1095,7 @@ impl SupervisorManagerBuilder {
 pub struct SupervisorManager {
     handle: ManagerHandle,
     actor_handle: Option<JoinHandle<()>>,
+    main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
     _cancel_guard: tokio_util::sync::DropGuard,
 }
 
@@ -901,6 +1111,10 @@ impl SupervisorManager {
 
     pub fn handle(&self) -> ManagerHandle {
         self.handle.clone()
+    }
+
+    pub fn main_log_rotator(&self) -> Option<Arc<InMemoryChannelRotator>> {
+        self.main_log_rotator.clone()
     }
 
     pub async fn reload_config(
@@ -937,6 +1151,8 @@ struct ManagerActor {
     is_shutting_down: bool,
     event_pools: HashMap<String, EventListenerPool>,
     server_identifier: String,
+    main_log_rotator: Option<Arc<InMemoryChannelRotator>>,
+    config_logging: crate::config::schema::LoggingConfig,
 }
 
 impl ManagerActor {
@@ -1126,6 +1342,55 @@ impl ManagerActor {
                                 .and_then(|n| self.programs.get(&n))
                                 .map(|p| p.subscribe_logs())
                                 .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::ReadLog { name, channel, offset, length, reply } => {
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() })
+                                .and_then(|p| p.read_log(channel, offset, length));
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::TailLog { name, channel, offset, length, reply } => {
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() })
+                                .and_then(|p| p.tail_log(channel, offset, length));
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::ClearProcessLogs { name, reply } => {
+                            let target = if self.programs.contains_key(&name) {
+                                Some(name.clone())
+                            } else {
+                                self.find_match(&name).into_iter().next()
+                            };
+                            let res = target
+                                .and_then(|n| self.programs.get(&n))
+                                .map(|p| p.clear_logs())
+                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() })
+                                .and_then(|r| r);
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::ReadMainLog { offset, length, reply } => {
+                            let res = self.execute_read_main_log(offset, length);
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::TailMainLog { offset, length, reply } => {
+                            let res = self.execute_tail_main_log(offset, length);
+                            let _ = reply.send(res);
+                        }
+                        ManagerCommand::ClearMainLog { reply } => {
+                            let res = self.execute_clear_main_log();
                             let _ = reply.send(res);
                         }
                         ManagerCommand::SendStdin { name, data, reply } => {
@@ -1488,7 +1753,10 @@ impl ManagerActor {
         // 6. Update watch service with new program configurations
         self.watch_handle.update_configs(self.configs.clone()).await;
 
-        // 7. Broadcast ConfigReloaded event to subscribers
+        // 7. Update active daemon logging configuration and rotator
+        self.sync_logging_config(new_config.logging.clone());
+
+        // 8. Broadcast ConfigReloaded event to subscribers
         self.event_hub
             .publish_system(crate::manager::SystemEvent::ConfigReloaded {
                 added: summary.added.clone(),
@@ -1536,6 +1804,7 @@ impl ManagerActor {
             self.configs.insert(name.clone(), cfg.clone());
         }
 
+        self.sync_logging_config(new_config.logging.clone());
         self.refresh_derived_state().await;
 
         // 4. Autostart programs configured with autostart = true
@@ -1714,6 +1983,64 @@ impl ManagerActor {
                 }
             }
         }
+    }
+
+    fn sync_logging_config(&mut self, new_logging: crate::config::schema::LoggingConfig) {
+        if new_logging.enabled.is_in_memory_only() && self.main_log_rotator.is_none() {
+            self.main_log_rotator = new_logging.build_main_rotator();
+        } else if !new_logging.enabled.is_in_memory_only() {
+            self.main_log_rotator = None;
+        }
+        self.config_logging = new_logging;
+    }
+
+    fn execute_read_main_log(&self, offset: i64, length: i64) -> Result<String, ProgramError> {
+        if let Some(ref rotator) = self.main_log_rotator {
+            let (data, _, _) = rotator.read_bytes(offset, length);
+            Ok(data)
+        } else {
+            let path = self.config_logging.resolved_file_path();
+            if path.exists() {
+                crate::logging::LogFileReader::read_bytes(&path, offset, length).map_err(|e| {
+                    ProgramError::ReadLogFailed {
+                        name: "main".to_string(),
+                        error: e.to_string(),
+                    }
+                })
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    fn execute_tail_main_log(
+        &self,
+        offset: i64,
+        length: i64,
+    ) -> Result<(String, i64, bool), ProgramError> {
+        if let Some(ref rotator) = self.main_log_rotator {
+            Ok(rotator.tail_bytes(offset, length))
+        } else {
+            let path = self.config_logging.resolved_file_path();
+            if path.exists() {
+                Ok(crate::logging::LogFileReader::tail_bytes(
+                    &path, offset, length,
+                ))
+            } else {
+                Ok((String::new(), offset, false))
+            }
+        }
+    }
+
+    fn execute_clear_main_log(&self) -> Result<(), ProgramError> {
+        if let Some(ref rotator) = self.main_log_rotator {
+            rotator.clear();
+        }
+        let path = self.config_logging.resolved_file_path();
+        if path.exists() {
+            let _ = std::fs::write(&path, "");
+        }
+        Ok(())
     }
 }
 

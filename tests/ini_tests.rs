@@ -41,7 +41,7 @@ fn test_load_compat_supervisord_conf() {
     assert_eq!(config.server.password.as_deref(), Some("rpcpass"));
 
     // Logging configuration
-    assert!(config.logging.enabled);
+    assert!(config.logging.enabled.is_enabled());
     assert!(
         config
             .logging
@@ -1073,4 +1073,45 @@ fn test_ini_independent_stream_rotation_and_syslog_keys() {
     }
     #[cfg(not(unix))]
     let _ = prog;
+}
+
+#[test]
+fn test_ini_in_memory_logging_translation() {
+    use rsupervisord::config::SupervisorConfig;
+    use rsupervisord::program::config::LogMode;
+
+    let ini_str = r#"
+    [supervisord]
+    logfile = memory
+    buffer_size = 20MB
+
+    [program:mem_worker]
+    command = /bin/worker
+    stdout_logfile = memory
+    buffer_size = 5MB
+
+    [program:pure_mem_app]
+    command = /bin/app
+    logging = in_memory_only
+    buffer_size = 10MB
+    "#;
+
+    let config = SupervisorConfig::from_ini_str(ini_str).unwrap();
+    assert_eq!(config.logging.enabled, LogMode::InMemoryOnly);
+    assert_eq!(config.logging.file, None);
+    assert_eq!(config.logging.buffer_size, Some(20 * 1024 * 1024));
+
+    let resolved = config.resolve_programs().unwrap();
+
+    let mem_worker = resolved.get("mem_worker").unwrap();
+    assert_eq!(mem_worker.logs.enabled, LogMode::InMemoryOnly);
+    assert!(mem_worker.logs.is_in_memory_only());
+    assert_eq!(mem_worker.logs.buffer_size, Some(5 * 1024 * 1024));
+    assert_eq!(mem_worker.logs.effective_buffer_size(), 5 * 1024 * 1024);
+
+    let pure_mem_app = resolved.get("pure_mem_app").unwrap();
+    assert_eq!(pure_mem_app.logs.enabled, LogMode::InMemoryOnly);
+    assert!(pure_mem_app.logs.is_in_memory_only());
+    assert_eq!(pure_mem_app.logs.buffer_size, Some(10 * 1024 * 1024));
+    assert_eq!(pure_mem_app.logs.effective_buffer_size(), 10 * 1024 * 1024);
 }

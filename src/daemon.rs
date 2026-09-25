@@ -158,10 +158,12 @@ impl SupervisorDaemon {
             }
         };
 
+        let main_log_rotator = config.logging.build_main_rotator();
+
         // Initialize tracing before any early startup logs so environment
         // application, rlimit, and pidfile messages are not lost to the
         // default no-op subscriber.
-        init_tracing(&config);
+        init_tracing(&config, main_log_rotator.clone());
 
         let cmd_name = crate::config::paths::get_cmd_name();
 
@@ -223,6 +225,7 @@ impl SupervisorDaemon {
         let cancel_token = CancellationToken::new();
         let mut manager = SupervisorManager::builder(config.clone())
             .with_cancel_token(cancel_token.clone())
+            .with_main_log_rotator(main_log_rotator)
             .build()?;
         let manager_handle = manager.handle();
         tracing::info!(
@@ -290,12 +293,15 @@ impl SupervisorDaemon {
 ///
 /// CLI `-l/--loglevel` is folded into `config.logging.level` by
 /// [`DaemonArgs::apply`] before this runs; `RUST_LOG` still wins when set.
-fn init_tracing(config: &SupervisorConfig) {
+fn init_tracing(
+    config: &SupervisorConfig,
+    main_log_rotator: Option<std::sync::Arc<crate::logging::InMemoryChannelRotator>>,
+) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
     let is_logging_disabled =
-        !config.logging.enabled || config.logging.level.to_lowercase() == "off";
+        !config.logging.enabled.is_enabled() || config.logging.level.to_lowercase() == "off";
 
     if is_logging_disabled {
         let filter = tracing_subscriber::EnvFilter::new("off");
@@ -308,15 +314,16 @@ fn init_tracing(config: &SupervisorConfig) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    // OI-4: `silent` suppresses the console layer; file layer still applies.
-    // Build the file layer inside each branch so `Layer<S>` types match
-    // the subscriber stack (filter-only vs filter+console).
+    // OI-4: `silent` suppresses the console layer; file or in-memory layer still applies.
     let silent = config.logging.silent;
+
     let log_file = config.logging.file.clone();
 
     macro_rules! try_with_file {
         ($reg:expr) => {
-            if let Some(ref path) = log_file {
+            let writer_box: Option<Box<dyn std::io::Write + Send>> = if let Some(ref rotator) = main_log_rotator {
+                Some(Box::new(crate::logging::InMemoryLogWriter(std::sync::Arc::clone(rotator))))
+            } else if let Some(ref path) = log_file {
                 let path_str = path.to_string_lossy();
                 let dest = crate::logging::LogDestination::parse(&path_str)
                     .unwrap_or(crate::logging::LogDestination::File(path.clone()));
@@ -363,7 +370,7 @@ fn init_tracing(config: &SupervisorConfig) {
                     other => other,
                 };
 
-                let writer_box: Option<Box<dyn std::io::Write + Send>> = match effective_dest {
+                match effective_dest {
                     crate::logging::LogDestination::Null => None,
                     crate::logging::LogDestination::DevStdout => Some(Box::new(std::io::stdout())),
                     crate::logging::LogDestination::DevStderr => Some(Box::new(std::io::stderr())),
@@ -408,19 +415,19 @@ fn init_tracing(config: &SupervisorConfig) {
                         }
                     }
                     _ => None,
-                };
-
-                if let Some(w) = writer_box {
-                    let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(w));
-                    let make_writer = move || MutexWriter(file_writer_arc.clone());
-                    let file_layer = tracing_subscriber::fmt::layer()
-                        .with_ansi(false)
-                        .with_target(false)
-                        .with_writer(make_writer);
-                    let _ = $reg.with(file_layer).try_init();
-                } else {
-                    let _ = $reg.try_init();
                 }
+            } else {
+                None
+            };
+
+            if let Some(w) = writer_box {
+                let file_writer_arc = std::sync::Arc::new(std::sync::Mutex::new(w));
+                let make_writer = move || MutexWriter(file_writer_arc.clone());
+                let file_layer = tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_writer(make_writer);
+                let _ = $reg.with(file_layer).try_init();
             } else {
                 let _ = $reg.try_init();
             }

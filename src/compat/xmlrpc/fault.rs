@@ -213,6 +213,17 @@ impl From<ProgramError> for Fault {
                 Fault::new(FaultCode::NoFile, "NO_FILE: stdin pipe write timed out")
             }
             ProgramError::ConfigError(msg) => Fault::cant_reread(msg),
+            ProgramError::ReadLogFailed { name: _, error } => {
+                let error_lower = error.to_lowercase();
+                if error_lower.contains("not exist") || error_lower.contains("no such file") {
+                    Fault::no_file(error)
+                } else if error_lower.contains("negative") || error_lower.contains("bad arguments")
+                {
+                    Fault::bad_arguments(error)
+                } else {
+                    Fault::failed(error)
+                }
+            }
             _ => Fault::failed(err.to_string()),
         }
     }

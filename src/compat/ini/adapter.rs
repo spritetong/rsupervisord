@@ -381,6 +381,11 @@ const SUPERVISORD_MAPPINGS: &[FieldMapping] = &[
         "logging.timestamp_suffix",
         Bool
     ),
+    map_field!(
+        &["logfile_buffer_size", "buffer_size"],
+        "logging.buffer_size",
+        ByteSize
+    ),
     map_field!(&["loglevel"], "logging.level", Lowercase),
     map_field!(&["silent"], "logging.silent", Bool),
     map_field!(&["identifier"], "server.identifier", Identity),
@@ -424,6 +429,12 @@ const PROGRAM_SHARED_MAPPINGS: &[FieldMapping] = &[
     map_field!("numprocs", Usize),
     map_field!("numprocs_start", Usize),
     map_field!("process_name", Identity),
+    map_field!(&["logging", "log_mode"], "logs.enabled", Identity),
+    map_field!(
+        &["buffer_size", "log_buffer_size"],
+        "logs.buffer_size",
+        ByteSize
+    ),
     map_field!(&["stdout_logfile"], "logs.stdout", LogPath),
     map_field!(&["stderr_logfile"], "logs.stderr", LogPath),
     map_field!(
@@ -590,11 +601,24 @@ pub fn adapt_ini_to_config(
         warn_unconsumed_keys_multi("inet_http_server", sec, &[SERVER_INET_MAPPINGS], &[], &[]);
     }
 
+    fn is_in_memory_log_spec(val: &str) -> bool {
+        val.eq_ignore_ascii_case("memory")
+            || val.eq_ignore_ascii_case("in_memory")
+            || val.eq_ignore_ascii_case("in_memory_only")
+    }
+
     // 3. Process [supervisord]
     if let Some(sec) = ini.sections.get("supervisord") {
         if let Some(logfile) = sec.get("logfile") {
             if logfile.eq_ignore_ascii_case("NONE") {
                 set_json_path(&mut root, "logging.enabled", serde_json::json!(false));
+                set_json_path(&mut root, "logging.file", serde_json::Value::Null);
+            } else if is_in_memory_log_spec(logfile) {
+                set_json_path(
+                    &mut root,
+                    "logging.enabled",
+                    serde_json::json!("in_memory_only"),
+                );
                 set_json_path(&mut root, "logging.file", serde_json::Value::Null);
             } else {
                 set_json_path(&mut root, "logging.enabled", serde_json::json!(true));
@@ -640,6 +664,16 @@ pub fn adapt_ini_to_config(
             "Invalid default",
             config_dir,
         )?;
+        if let Some(stdout_log) = sec.get("stdout_logfile")
+            && is_in_memory_log_spec(stdout_log)
+        {
+            set_json_path(
+                &mut defs,
+                "logs.enabled",
+                serde_json::json!("in_memory_only"),
+            );
+            set_json_path(&mut defs, "logs.stdout", serde_json::Value::Null);
+        }
         attach_liveness_check(sec, &mut defs, "[program-default]")?;
         root["program_defaults"] = defs;
         warn_unconsumed_keys_multi(
@@ -663,6 +697,16 @@ pub fn adapt_ini_to_config(
                     &context,
                     config_dir,
                 )?;
+                if let Some(stdout_log) = sec.get("stdout_logfile")
+                    && is_in_memory_log_spec(stdout_log)
+                {
+                    set_json_path(
+                        &mut prog,
+                        "logs.enabled",
+                        serde_json::json!("in_memory_only"),
+                    );
+                    set_json_path(&mut prog, "logs.stdout", serde_json::Value::Null);
+                }
                 attach_liveness_check(sec, &mut prog, &format!("Program '{}'", prog_name))?;
                 root["programs"][prog_name] = prog;
                 warn_unconsumed_keys_multi(

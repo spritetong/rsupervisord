@@ -109,16 +109,108 @@ impl Default for StopSignal {
     }
 }
 
+/// Tri-state capture mode for standard I/O streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogMode {
+    /// Full capture: writes to in-memory buffers and configured file/syslog sinks.
+    #[default]
+    On,
+    /// Completely disabled: stdio bound to OS null device (0 pump overhead).
+    Off,
+    /// Pure in-memory: captures stdio into in-memory ring buffers; disables all disk file sinks.
+    InMemoryOnly,
+}
+
+impl LogMode {
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        *self != Self::Off
+    }
+
+    #[inline]
+    pub fn is_on(&self) -> bool {
+        *self == Self::On
+    }
+
+    #[inline]
+    pub fn is_in_memory_only(&self) -> bool {
+        *self == Self::InMemoryOnly
+    }
+}
+
+impl<'de> Deserialize<'de> for LogMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LogModeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LogModeVisitor {
+            type Value = LogMode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a boolean or log mode string ('on', 'off', 'in_memory_only')")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v { Ok(LogMode::On) } else { Ok(LogMode::Off) }
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let trimmed = s.trim();
+                if trimmed.eq_ignore_ascii_case("on")
+                    || trimmed.eq_ignore_ascii_case("true")
+                    || trimmed.eq_ignore_ascii_case("yes")
+                    || trimmed == "1"
+                {
+                    Ok(LogMode::On)
+                } else if trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("false")
+                    || trimmed.eq_ignore_ascii_case("no")
+                    || trimmed.eq_ignore_ascii_case("none")
+                    || trimmed.eq_ignore_ascii_case("disabled")
+                    || trimmed == "0"
+                {
+                    Ok(LogMode::Off)
+                } else if trimmed.eq_ignore_ascii_case("in_memory_only")
+                    || trimmed.eq_ignore_ascii_case("in_memory")
+                    || trimmed.eq_ignore_ascii_case("memory")
+                    || trimmed.eq_ignore_ascii_case("inmemory")
+                    || trimmed.eq_ignore_ascii_case("ram")
+                {
+                    Ok(LogMode::InMemoryOnly)
+                } else {
+                    Err(E::custom(format!(
+                        "Invalid log mode '{}'. Expected 'on', 'off', or 'in_memory_only'",
+                        s
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(LogModeVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramLogsConfig {
-    #[serde(default = "bool_value::<true>")]
-    #[default(true)]
-    pub enabled: bool,
+    #[serde(default, alias = "mode")]
+    #[default(LogMode::On)]
+    pub enabled: LogMode,
     #[serde(default)]
     pub stdout: Option<PathBuf>,
     #[serde(default)]
     pub stderr: Option<PathBuf>,
+    #[serde(default, with = "option_byte_size")]
+    pub buffer_size: Option<usize>,
     #[serde(default, with = "option_byte_size")]
     pub max_bytes: Option<usize>,
     #[serde(default)]
@@ -159,12 +251,25 @@ pub struct ProgramLogsConfig {
 
 impl ProgramLogsConfig {
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled.is_enabled()
+    }
+
+    pub fn is_in_memory_only(&self) -> bool {
+        self.enabled.is_in_memory_only()
+    }
+
+    pub fn effective_buffer_size(&self) -> usize {
+        self.buffer_size
+            .or(self.max_bytes)
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
     }
 
     pub fn is_stdout_disabled(&self) -> bool {
-        if !self.enabled {
+        if self.enabled == LogMode::Off {
             return true;
+        }
+        if self.enabled == LogMode::InMemoryOnly {
+            return false;
         }
         if self.stdout_syslog {
             return false;
@@ -173,8 +278,11 @@ impl ProgramLogsConfig {
     }
 
     pub fn is_stderr_disabled(&self) -> bool {
-        if !self.enabled {
+        if self.enabled == LogMode::Off {
             return true;
+        }
+        if self.enabled == LogMode::InMemoryOnly {
+            return false;
         }
         if self.stderr_syslog {
             return false;
@@ -183,13 +291,15 @@ impl ProgramLogsConfig {
     }
 
     pub fn effective_stdout_max_bytes(&self) -> usize {
-        self.stdout_max_bytes
+        self.buffer_size
+            .or(self.stdout_max_bytes)
             .or(self.max_bytes)
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
     }
 
     pub fn effective_stderr_max_bytes(&self) -> usize {
-        self.stderr_max_bytes
+        self.buffer_size
+            .or(self.stderr_max_bytes)
             .or(self.max_bytes)
             .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
     }
@@ -207,7 +317,7 @@ impl ProgramLogsConfig {
     }
 
     fn is_file_disabled(&self, file_path: Option<&std::path::Path>) -> bool {
-        if !self.enabled {
+        if self.enabled == LogMode::Off {
             return true;
         }
         if let Some(p) = file_path

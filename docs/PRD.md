@@ -245,17 +245,20 @@ Built with zero-thread async transports, extensible backends, and the production
    - **Timestamp Mode (`timestamp_suffix: true`)**: Rotates files as `app.log.YYYY-MM-DDTHH-MM-SS` for Go supervisord parity, automatically pruning archives beyond the configured backup count.
    - **Append-Only Mode (`max_bytes: 0`)**: Rotation is completely disabled, continuously appending to disk (useful for shared log sinks or special character devices).
    - **Collision Detection**: Emits a `tracing::warn!` at startup if multiple streams target the same rotating file with `max_bytes > 0`.
-4. **In-Memory Generational Buffer (`AUTO` Mode & Fast Playback)**:
-   - Generational memory segments (`InMemoryLogRotator`) provide global byte and line offset seeking.
-   - Serves XML-RPC `readProcessStdoutLog`, `tailProcessStdoutLog`, `clearProcessLogs`, `supervisorctl tail -f`, and Web UI real-time SSE streaming with zero disk I/O when `AUTO` is configured.
+4. **In-Memory Generational Buffer (`AUTO` / `in_memory_only` Mode & Fast Playback)**:
+   - **Tri-State Logging Modes (`on` / `off` / `in_memory_only`)**: Supports `enabled: on` (default, full memory + disk/syslog), `enabled: off` (stdio redirected to `Stdio::null()`, zero pump/buffer overhead), and `enabled: in_memory_only` (stdio captured and pumped exclusively to in-memory buffers; zero disk I/O).
+   - **Configurable Sizing**: In-memory capacity is configurable via `buffer_size` (e.g. `4MB`, `512KB`) or `max_bytes` / `backups`.
+   - **Startup Cold-Start Pre-Reading & Rotation (Seeding)**: When starting in `in_memory_only` mode with an existing disk log file, the engine pre-reads the tail chunk (up to buffer capacity) into memory, trims partial lines, anchors the logical byte offset to the disk `file_size`, and rotates the disk file to archive (e.g. `.1`). All subsequent logging remains purely in memory with zero disk writes.
+   - **Monotonic Logical Offset Continuity**: The in-memory buffer tracks a monotonic 64-bit cumulative byte counter (`global_bytes_written`). When circular buffer overwrites occur, the offset continues to increment monotonically. Clients tailing logs (`maintail`, `supervisorctl tail -f`, XML-RPC `tailProcessStdoutLog`) maintain seamless offset progression; when a client falls behind overwritten memory, the server cleanly returns `overflow = true` with the latest offset per supervisor wire semantics.
 5. **RFC 3164 Syslog Integration**:
    - Generates compliant `<PRI>TIMESTAMP HOST TAG: MESSAGE` with 1024-byte truncation.
    - Unix: Local domain socket auto-probing (`/dev/log`, `/var/run/syslog`, `/var/run/log`), remote UDP (port 514), and remote TCP (port 6514 with non-blocking channel and auto-reconnect worker).
    - Windows: Fail-loud configuration error (`ProgramError::ConfigError`) rejecting syslog destinations.
 6. **Disableable Logging & Channel Optimizations**:
-   - **Program-Level Disabling**: When `logs: { enabled: false }` or destination is `NONE`/`/dev/null`, the child is spawned with `Stdio::null()`, avoiding pipe allocations and pump tasks.
-   - **Daemon-Level Disabling**: `logging.enabled: false` or `level: "off"` completely mutes daemon tracing.
+   - **Program-Level Disabling**: When `logs: { enabled: off }` or destination is `NONE`/`/dev/null`, the child is spawned with `Stdio::null()`, avoiding pipe allocations and pump tasks.
+   - **Daemon-Level Disabling & Memory Mode**: `logging.enabled: false` or `level: "off"` completely mutes daemon tracing; `logging.enabled: in_memory_only` or `logfile = memory` retains the main daemon log in an in-memory buffer.
    - **Broadcast Optimization**: Log lines are only cloned into broadcast channels when active subscribers exist (`receiver_count() > 0`).
+   - **Legacy INI Compatibility**: INI settings `stdout_logfile = memory`, `stderr_logfile = memory`, `logfile = memory`, and `logging = in_memory_only` automatically map to the `in_memory_only` tri-state mode with full parameter translation.
 
 ---
 

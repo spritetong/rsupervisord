@@ -4,9 +4,9 @@
 // Licensed under the Mozilla Public License 2.0.
 // SPDX-License-Identifier: MPL-2.0
 
-use rsupervisord::logging::{LogRotator, RingBuffer};
+use rsupervisord::logging::{InMemoryChannelRotator, LogChannel, LogRotator, RingBuffer};
 use rsupervisord::program::ProcessProgram;
-use rsupervisord::program::config::{AutoRestartPolicy, ProgramConfig, ProgramLogsConfig};
+use rsupervisord::program::config::{AutoRestartPolicy, LogMode, ProgramConfig, ProgramLogsConfig};
 use rsupervisord::program::traits::Program;
 use rsupervisord::serde_util::string_to_bytes;
 use std::time::Duration;
@@ -248,7 +248,7 @@ async fn test_process_logs_disabled_uses_null_stdio() {
     config.args = args;
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = Duration::from_secs(0);
-    config.logs.enabled = false;
+    config.logs.enabled = LogMode::Off;
 
     let program = ProcessProgram::new(config).unwrap();
     program.start().await.unwrap();
@@ -293,7 +293,7 @@ async fn test_process_stdout_file_logging_and_rotation() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = Duration::from_secs(0);
     config.logs = ProgramLogsConfig {
-        enabled: true,
+        enabled: LogMode::On,
         stdout: Some(stdout_log.clone()),
         stderr: None,
         max_bytes: Some(25), // Low threshold to force rotation
@@ -376,8 +376,8 @@ async fn test_in_memory_rotator_and_reader() {
         InMemoryLogRotator, InstantLogReader, LogBackend, LogChannel, LogChunk,
     };
 
-    // Max 30 bytes per segment, 2 backups
-    let rotator = InMemoryLogRotator::new(30, 2);
+    // Max 30 bytes per segment, 3 backups (retains all 4 test segments)
+    let rotator = InMemoryLogRotator::new(30, 3);
 
     // 1. Write chunks to stdout
     let chunk1 = LogChunk::new(
@@ -505,7 +505,7 @@ async fn test_process_composite_logging() {
     // Composite destination: file1, file2
     let dest_str = format!("{}, {}", file1.display(), file2.display());
     config.logs = ProgramLogsConfig {
-        enabled: true,
+        enabled: LogMode::On,
         stdout: Some(std::path::PathBuf::from(dest_str)),
         ..Default::default()
     };
@@ -566,7 +566,7 @@ async fn test_process_timestamp_suffix_rotation() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = Duration::from_secs(0);
     config.logs = ProgramLogsConfig {
-        enabled: true,
+        enabled: LogMode::On,
         stdout: Some(stdout_log.clone()),
         stdout_max_bytes: Some(20),
         stdout_backups: Some(3),
@@ -630,7 +630,7 @@ async fn test_process_max_bytes_zero_no_rotate() {
     config.autorestart = AutoRestartPolicy::Never;
     config.start_secs = Duration::from_secs(0);
     config.logs = ProgramLogsConfig {
-        enabled: true,
+        enabled: LogMode::On,
         stdout: Some(stdout_log.clone()),
         stdout_max_bytes: Some(0), // max_bytes = 0 means never rotate
         stdout_backups: Some(5),
@@ -711,4 +711,247 @@ programs:
     );
     let resolved_map = resolved.unwrap();
     assert_eq!(resolved_map.len(), 2);
+}
+
+#[test]
+fn test_log_mode_deserialization() {
+    let raw_true: LogMode = serde_json::from_str("true").unwrap();
+    assert_eq!(raw_true, LogMode::On);
+
+    let raw_false: LogMode = serde_json::from_str("false").unwrap();
+    assert_eq!(raw_false, LogMode::Off);
+
+    let raw_on: LogMode = serde_json::from_str("\"on\"").unwrap();
+    assert_eq!(raw_on, LogMode::On);
+
+    let raw_off: LogMode = serde_json::from_str("\"off\"").unwrap();
+    assert_eq!(raw_off, LogMode::Off);
+
+    let raw_mem: LogMode = serde_json::from_str("\"in_memory_only\"").unwrap();
+    assert_eq!(raw_mem, LogMode::InMemoryOnly);
+
+    let raw_mem_alias: LogMode = serde_json::from_str("\"memory\"").unwrap();
+    assert_eq!(raw_mem_alias, LogMode::InMemoryOnly);
+}
+
+#[test]
+fn test_in_memory_seeding_and_rotation_archive() {
+    let dir = tempdir().unwrap();
+    let log_file = dir.path().join("service.log");
+
+    // Write 5 lines into service.log
+    let content = "Line 1: init system\nLine 2: loading modules\nLine 3: service online\nLine 4: ready\nLine 5: running\n";
+    std::fs::write(&log_file, content).unwrap();
+    let file_sz = content.len() as u64;
+
+    let rotator = InMemoryChannelRotator::new(1024, 2);
+    // Seed with large enough limit so entire file fits
+    let seeded_bytes = rotator.seed_from_file(&log_file, 1024).unwrap();
+    assert_eq!(seeded_bytes, file_sz);
+
+    // Verify on-disk file was rotated to service.log.1
+    let rotated_file = dir.path().join("service.log.1");
+    assert!(
+        !log_file.exists(),
+        "Original service.log should have been renamed"
+    );
+    assert!(rotated_file.exists(), "Archived service.log.1 should exist");
+
+    // Verify cumulative offset matches file size
+    let (data, offset, overflow) = rotator.tail_bytes(0, 100);
+    assert_eq!(offset, file_sz as i64);
+    assert!(!overflow);
+    assert!(data.contains("Line 5: running"));
+
+    // Verify subsequent appends increment cumulative offset monotonically
+    rotator.append_line("Line 6: new event");
+    let (tail_data, new_offset, _) = rotator.tail_bytes(0, 100);
+    assert!(new_offset > file_sz as i64);
+    assert!(tail_data.contains("Line 6: new event"));
+}
+
+#[test]
+fn test_in_memory_offset_overflow_after_eviction() {
+    // 2 segments of 20 bytes (1 active + 1 backup = max 40 bytes retained)
+    let rotator = InMemoryChannelRotator::new(20, 1);
+
+    // Each line is 10 bytes: e.g. "1: AAAAAA\n"
+    rotator.append_line("1: AAAAAA"); // active = 10
+    rotator.append_line("2: BBBBBB"); // active = 20
+    rotator.append_line("3: CCCCCC"); // 20 + 10 > 20 -> rotates active [1,2] to backup; active=[3] (10)
+    rotator.append_line("4: DDDDDD"); // active = 20
+    rotator.append_line("5: EEEEEE"); // 20 + 10 > 20 -> rotates [3,4] to backup, evicts [1,2]! active=[5] (10)
+
+    // At this point, lines 1 and 2 (first 20 bytes) have been evicted.
+    // Reading from offset 5 (< oldest_available_offset = 20) should indicate overflow = true
+    let (_, _, overflow) = rotator.tail_bytes(5, 10);
+    assert!(
+        overflow,
+        "Reading from evicted offset must indicate overflow"
+    );
+
+    // Reading from a recent offset within the retained window should have overflow = false
+    let current_offset = rotator.tail_bytes(0, 10).1;
+    let (_, _, overflow_recent) = rotator.tail_bytes(current_offset - 10, 10);
+    assert!(
+        !overflow_recent,
+        "Reading within available buffer window must not overflow"
+    );
+}
+
+#[tokio::test]
+async fn test_process_in_memory_only_pure_logging() {
+    let dir = tempdir().unwrap();
+    let stdout_log = dir.path().join("should_not_exist.log");
+
+    #[cfg(windows)]
+    let (cmd, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output 'pure in-memory log 1'; Start-Sleep -Milliseconds 100; Write-Output 'pure in-memory log 2'".to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (cmd, args) = (
+        "sh",
+        vec![
+            "-c".to_string(),
+            "echo 'pure in-memory log 1'; sleep 0.1; echo 'pure in-memory log 2'".to_string(),
+        ],
+    );
+
+    let mut config = ProgramConfig::new("in_memory_prog", cmd);
+    config.args = args;
+    config.autorestart = AutoRestartPolicy::Never;
+    config.start_secs = Duration::from_secs(0);
+    config.logs = ProgramLogsConfig {
+        enabled: LogMode::InMemoryOnly,
+        stdout: Some(stdout_log.clone()),
+        buffer_size: Some(1024 * 1024),
+        ..Default::default()
+    };
+
+    let program = ProcessProgram::new(config).unwrap();
+    program.start().await.unwrap();
+
+    let mut found = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (tail_data, _, _) = program.tail_log(LogChannel::Stdout, 0, 4096).unwrap();
+        if tail_data.contains("pure in-memory log 2") {
+            found = true;
+            break;
+        }
+    }
+    let _ = program.stop(Duration::from_secs(1)).await;
+
+    assert!(found, "Should have received stdout logs in memory rotator");
+    assert!(
+        !stdout_log.exists(),
+        "On-disk log file must NOT be created in in_memory_only mode"
+    );
+}
+
+#[test]
+fn test_log_file_reader_operations() {
+    use rsupervisord::logging::LogFileReader;
+    use std::io::Write;
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test_reader.log");
+
+    {
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        f.write_all(b"line1:hello\nline2:world\nline3:foo\nline4:bar\n")
+            .unwrap();
+    }
+
+    // 1. Positive offset reading
+    let s = LogFileReader::read_bytes(&file_path, 0, 12).unwrap();
+    assert_eq!(s, "line1:hello\n");
+
+    let s2 = LogFileReader::read_bytes(&file_path, 12, 0).unwrap();
+    assert_eq!(s2, "line2:world\nline3:foo\nline4:bar\n");
+
+    // 2. Negative offset (tail reading)
+    let tail_str = LogFileReader::read_bytes(&file_path, -10, 0).unwrap();
+    assert_eq!(tail_str, "line4:bar\n");
+
+    // Bad arguments: offset < 0 with length != 0
+    assert!(LogFileReader::read_bytes(&file_path, -10, 5).is_err());
+    // Bad arguments: length < 0
+    assert!(LogFileReader::read_bytes(&file_path, 0, -5).is_err());
+
+    // 3. Slice reader
+    let slice_data = b"alpha\nbeta\ngamma\n";
+    let slice_res = LogFileReader::read_bytes_from_slice(slice_data, -6, 0).unwrap();
+    assert_eq!(slice_res, "gamma\n");
+
+    // 4. Tail bytes with overflow detection
+    let (t_data, new_off, overflow) = LogFileReader::tail_bytes(&file_path, 0, 10);
+    assert_eq!(t_data, "line4:bar\n");
+    assert!(overflow);
+    assert_eq!(new_off, 44);
+
+    // 5. Seed and archive
+    let archive_target = dir.path().join("to_seed.log");
+    {
+        let mut f = std::fs::File::create(&archive_target).unwrap();
+        f.write_all(b"pre:leading-partial-discard\nvalid:entry1\nvalid:entry2\n")
+            .unwrap();
+    }
+
+    let (seeded, total_sz) = LogFileReader::seed_and_archive(&archive_target, 28, Some("1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(total_sz, 54);
+    assert_eq!(
+        String::from_utf8_lossy(&seeded),
+        "valid:entry1\nvalid:entry2\n"
+    );
+
+    // Original file must be renamed to .1
+    assert!(!archive_target.exists());
+    let archived = format!("{}.1", archive_target.display());
+    assert!(std::path::Path::new(&archived).exists());
+}
+
+#[tokio::test]
+async fn test_daemon_main_log_in_memory_and_maintail() {
+    use rsupervisord::config::schema::{LoggingConfig, SupervisorConfig};
+    use rsupervisord::manager::SupervisorManager;
+
+    let dir = tempdir().unwrap();
+    let main_log = dir.path().join("daemon_main.log");
+
+    // Write initial log on disk to verify cold start pre-read
+    std::fs::write(&main_log, "cold start: supervisor initial line\n").unwrap();
+
+    let config = SupervisorConfig {
+        logging: LoggingConfig {
+            enabled: LogMode::InMemoryOnly,
+            file: Some(main_log.clone()),
+            buffer_size: Some(1024 * 1024),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let manager = SupervisorManager::builder(config).build().unwrap();
+    let handle = manager.handle();
+
+    // The disk file should have been archived to .1 and seeded
+    let read_val = handle.read_main_log(0, 0).await.unwrap();
+    assert!(read_val.contains("cold start: supervisor initial line"));
+
+    // Tail main log
+    let (tail_val, new_off, _) = handle.tail_main_log(0, 4096).await.unwrap();
+    assert!(tail_val.contains("cold start: supervisor initial line"));
+    assert!(new_off > 0);
+
+    // Clear main log
+    handle.clear_main_log().await.unwrap();
+    let cleared_val = handle.read_main_log(0, 0).await.unwrap();
+    assert_eq!(cleared_val, "");
 }

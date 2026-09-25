@@ -875,7 +875,7 @@ pub async fn handle_tail(
 
         let length = bytes.unwrap_or(DEFAULT_TAIL_BYTES);
         let param = format!(
-            "<param><value><string>{}</string></value></param><param><value><int>0</int></value></param><param><value><int>{}</int></value></param>",
+            "<param><value><string>{}</string></value></param><param><value><int>-{}</int></value></param><param><value><int>0</int></value></param>",
             name, length
         );
         let xml = client.call_xmlrpc(method, &param).await?;
@@ -898,27 +898,79 @@ pub async fn handle_maintail(
     client: &SupervisorClient,
     follow: bool,
     bytes: Option<usize>,
-    lines: Option<usize>,
+    _lines: Option<usize>,
 ) -> Result<i32> {
-    if follow {
-        client.stream_all_logs(|line| println!("{}", line)).await?;
-    } else {
-        let length = bytes.unwrap_or(DEFAULT_TAIL_BYTES);
+    let length = bytes.unwrap_or(DEFAULT_TAIL_BYTES);
+
+    if !follow {
         let param = format!(
-            "<param><value><int>0</int></value></param><param><value><int>{}</int></value></param>",
+            "<param><value><int>-{}</int></value></param><param><value><int>0</int></value></param>",
             length
         );
         let xml = client.call_xmlrpc("supervisor.readLog", &param).await?;
         let text = extract_xml_tag(&xml, "string").unwrap_or_default();
-        if text.is_empty() {
-            let log_lines = client
-                .read_logs("all", lines.unwrap_or(DEFAULT_LOG_LINES))
-                .await?;
-            for l in log_lines {
-                println!("{}", l);
-            }
-        } else {
+        print!("{}", text);
+        return Ok(0);
+    }
+
+    // Follow mode
+    // 1. Initial fetch of the tail
+    let param = format!(
+        "<param><value><int>0</int></value></param><param><value><int>{}</int></value></param>",
+        length
+    );
+    let xml = client.call_xmlrpc("supervisor.tailMainLog", &param).await;
+    let mut current_offset = match xml {
+        Ok(ref xml_resp) => {
+            let (text, off, _) = parse_tail_xml(xml_resp);
             print!("{}", text);
+            off
+        }
+        Err(_) => {
+            let param = format!(
+                "<param><value><int>-{}</int></value></param><param><value><int>0</int></value></param>",
+                length
+            );
+            if let Ok(xml_resp) = client.call_xmlrpc("supervisor.readLog", &param).await {
+                let text = extract_xml_tag(&xml_resp, "string").unwrap_or_default();
+                print!("{}", text);
+            }
+            0
+        }
+    };
+
+    // 2. Continuous follow polling until interrupted (Ctrl+C)
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+            _ = interval.tick() => {
+                let param = format!(
+                    "<param><value><int>{}</int></value></param><param><value><int>4096</int></value></param>",
+                    current_offset
+                );
+                if let Ok(xml_resp) = client.call_xmlrpc("supervisor.tailMainLog", &param).await {
+                    let (text, off, _) = parse_tail_xml(&xml_resp);
+                    if !text.is_empty() {
+                        print!("{}", text);
+                    }
+                    current_offset = off;
+                } else {
+                    let param = format!(
+                        "<param><value><int>{}</int></value></param><param><value><int>0</int></value></param>",
+                        current_offset
+                    );
+                    if let Ok(xml_resp) = client.call_xmlrpc("supervisor.readLog", &param).await {
+                        let text = extract_xml_tag(&xml_resp, "string").unwrap_or_default();
+                        if !text.is_empty() {
+                            print!("{}", text);
+                            current_offset += text.len() as i64;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -945,6 +997,18 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let content_start = start_pos + open_tag.len();
     let end_pos = xml[content_start..].find(&close_tag)?;
     Some(xml[content_start..content_start + end_pos].to_string())
+}
+
+fn parse_tail_xml(xml: &str) -> (String, i64, bool) {
+    let content = extract_xml_tag(xml, "string").unwrap_or_default();
+    let offset = extract_xml_tag(xml, "int")
+        .and_then(|s| s.parse::<i64>().ok())
+        .or_else(|| extract_xml_tag(xml, "i4").and_then(|s| s.parse::<i64>().ok()))
+        .unwrap_or(0);
+    let overflow = extract_xml_tag(xml, "boolean")
+        .map(|s| s == "1" || s == "true")
+        .unwrap_or(false);
+    (content, offset, overflow)
 }
 
 fn parse_reload_config_xml(xml: &str) -> (Vec<String>, Vec<String>, Vec<String>) {

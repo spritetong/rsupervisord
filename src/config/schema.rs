@@ -7,7 +7,7 @@
 use crate::consts::*;
 use crate::error::ProgramError;
 use crate::program::config::{
-    AutoRestartPolicy, HealthCheckConfig, ProgramConfig, ProgramLogsConfig, StopSignal,
+    AutoRestartPolicy, HealthCheckConfig, LogMode, ProgramConfig, ProgramLogsConfig, StopSignal,
 };
 use crate::serde_util::duration_secs;
 use serde::{Deserialize, Serialize};
@@ -109,14 +109,16 @@ impl ServerConfig {
 #[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
-    #[serde(default = "bool_value::<true>")]
-    #[default(true)]
-    pub enabled: bool,
+    #[serde(default, alias = "mode")]
+    #[default(crate::program::config::LogMode::On)]
+    pub enabled: crate::program::config::LogMode,
     #[serde(default)]
     pub file: Option<PathBuf>,
     #[serde(default = "default_log_level")]
     #[default(default_log_level())]
     pub level: String,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub buffer_size: Option<usize>,
     #[serde(default, with = "crate::serde_util::option_byte_size")]
     #[default(Some(DEFAULT_LOG_MAX_BYTES))]
     pub max_bytes: Option<usize>,
@@ -129,6 +131,42 @@ pub struct LoggingConfig {
     /// When true, suppress console (stdout/stderr) log output (INI `silent`).
     #[serde(default)]
     pub silent: bool,
+}
+
+impl LoggingConfig {
+    pub fn effective_buffer_size(&self) -> usize {
+        self.buffer_size
+            .or(self.max_bytes)
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+    }
+
+    /// Resolves the effective daemon log file path (either explicitly configured or default).
+    pub fn resolved_file_path(&self) -> PathBuf {
+        self.file.clone().unwrap_or_else(|| {
+            crate::config::paths::PathResolver::from_current_exe().default_daemon_log_path()
+        })
+    }
+
+    /// Builds an `InMemoryChannelRotator` for daemon logging if `is_in_memory_only()` is enabled,
+    /// seeding from the configured file if present.
+    pub fn build_main_rotator(
+        &self,
+    ) -> Option<std::sync::Arc<crate::logging::InMemoryChannelRotator>> {
+        if self.enabled.is_in_memory_only() {
+            let buffer_size = self.effective_buffer_size();
+            let backups = self.backups;
+            let rot = std::sync::Arc::new(crate::logging::InMemoryChannelRotator::new(
+                buffer_size,
+                backups,
+            ));
+            if let Some(ref path) = self.file {
+                let _ = rot.seed_from_file(path, buffer_size);
+            }
+            Some(rot)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, SmartDefault, Serialize, Deserialize)]
@@ -213,12 +251,14 @@ pub struct ProgramDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramLogsConfigRaw {
-    #[serde(default)]
-    pub enabled: Option<bool>,
+    #[serde(default, alias = "mode")]
+    pub enabled: Option<crate::program::config::LogMode>,
     #[serde(default)]
     pub stdout: Option<PathBuf>,
     #[serde(default)]
     pub stderr: Option<PathBuf>,
+    #[serde(default, with = "crate::serde_util::option_byte_size")]
+    pub buffer_size: Option<usize>,
     #[serde(default, with = "crate::serde_util::option_byte_size")]
     pub max_bytes: Option<usize>,
     #[serde(default)]
@@ -631,7 +671,7 @@ impl SupervisorConfig {
         if self.server.uds_path == default_no_dir {
             self.server.uds_path = resolver.default_uds_path();
         }
-        if self.logging.enabled && self.logging.file.is_none() {
+        if self.logging.enabled.is_on() && self.logging.file.is_none() {
             self.logging.file = Some(resolver.default_daemon_log_path());
         }
     }
@@ -1050,7 +1090,11 @@ impl SupervisorConfig {
                     let enabled = raw_logs
                         .and_then(|l| l.enabled)
                         .or_else(|| def_logs.and_then(|l| l.enabled))
-                        .unwrap_or(true);
+                        .unwrap_or(crate::program::config::LogMode::On);
+
+                    let buffer_size = raw_logs
+                        .and_then(|l| l.buffer_size)
+                        .or_else(|| def_logs.and_then(|l| l.buffer_size));
 
                     let resolver = crate::config::paths::PathResolver::from_current_exe()
                         .with_config_dir(self.config_dir.as_deref());
@@ -1064,7 +1108,7 @@ impl SupervisorConfig {
                             .eval_named(&stdout_str, "stdout_logfile")
                             .map_err(|e| ProgramError::ConfigError(e.to_string()))?;
                         Some(PathBuf::from(evaled_stdout))
-                    } else if enabled {
+                    } else if enabled == crate::program::config::LogMode::On {
                         Some(resolver.default_program_log_path(instance_name))
                     } else {
                         None
@@ -1162,6 +1206,7 @@ impl SupervisorConfig {
                         enabled,
                         stdout,
                         stderr,
+                        buffer_size,
                         max_bytes,
                         backups,
                         stdout_max_bytes,
@@ -1474,7 +1519,7 @@ impl SupervisorConfig {
                 };
 
                 let logs = ProgramLogsConfig {
-                    enabled: true,
+                    enabled: LogMode::On,
                     stdout: None, // stdout is reserved for the wire protocol
                     stderr,
                     ..Default::default()
@@ -1553,7 +1598,7 @@ impl SupervisorConfig {
         // Phase 4: Warn if multiple log streams target the same rotating file with max_bytes > 0
         let mut rotating_files: HashMap<PathBuf, Vec<String>> = HashMap::new();
         for (prog_name, prog) in &resolved {
-            if !prog.logs.enabled {
+            if !prog.logs.is_enabled() {
                 continue;
             }
 
@@ -1815,13 +1860,13 @@ programs:
 
         // app_inherit should inherit enabled: false and redirect_stderr: true
         let inherit_logs = &resolved["app_inherit"].logs;
-        assert!(!inherit_logs.enabled);
+        assert!(!inherit_logs.enabled.is_enabled());
         assert!(inherit_logs.redirect_stderr);
         assert_eq!(inherit_logs.stdout, Some(PathBuf::from("/tmp/app.log")));
 
         // app_override should explicitly override both
         let override_logs = &resolved["app_override"].logs;
-        assert!(override_logs.enabled);
+        assert!(override_logs.enabled.is_enabled());
         assert!(!override_logs.redirect_stderr);
         assert!(override_logs.stdout.is_some());
     }

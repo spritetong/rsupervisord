@@ -140,13 +140,18 @@ pub fn parse_environment(s: &str) -> Result<HashMap<String, String>, ProgramErro
 }
 
 /// Normalizes log file path:
-/// - `AUTO` (case-insensitive) -> `None` (use rsupervisord default path)
+/// - `AUTO`, `memory`, `in_memory`, `in_memory_only` (case-insensitive) -> `None`
 /// - `NONE` / `OFF` / `NULL` / `/dev/null` -> `Some(PathBuf::from("/dev/null"))`
 /// - empty -> `None`
 /// - any other path -> `Some(PathBuf::from(s))`
 pub fn parse_log_path(s: &str) -> Option<PathBuf> {
     let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("AUTO") {
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("AUTO")
+        || trimmed.eq_ignore_ascii_case("memory")
+        || trimmed.eq_ignore_ascii_case("in_memory")
+        || trimmed.eq_ignore_ascii_case("in_memory_only")
+    {
         None
     } else if trimmed.eq_ignore_ascii_case("NONE")
         || trimmed.eq_ignore_ascii_case("OFF")

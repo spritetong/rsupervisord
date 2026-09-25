@@ -68,6 +68,9 @@ pub enum ProgramError {
 
     #[error("Failed to write to stdin of program '{name}': {error}")]
     StdinWriteFailed { name: String, error: String },
+
+    #[error("Failed to read log for '{name}': {error}")]
+    ReadLogFailed { name: String, error: String },
 }
 
 impl ProgramError {
@@ -106,7 +109,8 @@ impl ProgramError {
             | Self::PreStartHookFailed { name, .. }
             | Self::InvalidCronExpression { name, .. }
             | Self::StdinWriteTimeout { name, .. }
-            | Self::StdinWriteFailed { name, .. } => Some(name),
+            | Self::StdinWriteFailed { name, .. }
+            | Self::ReadLogFailed { name, .. } => Some(name),
             Self::PlatformError(_) | Self::ConfigError(_) => None,
         }
     }

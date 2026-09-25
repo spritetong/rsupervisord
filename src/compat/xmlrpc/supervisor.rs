@@ -11,7 +11,7 @@ use crate::manager::ManagerHandle;
 use crate::program::config::StopSignal;
 use crate::program::state::ProgramState;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 pub struct SupervisorRpcContext {
@@ -208,37 +208,35 @@ pub async fn handle_supervisor_method(
         "supervisor.readLog" | "supervisor.readMainLog" => {
             let offset = params.first().and_then(|v| v.as_i32()).unwrap_or(0);
             let length = params.get(1).and_then(|v| v.as_i32()).unwrap_or(0);
-            read_main_log(ctx, offset, length)
+            read_main_log(ctx, offset, length).await
         }
-        "supervisor.clearLog" => clear_main_log(ctx),
+        "supervisor.tailMainLog" => {
+            let offset = params.first().and_then(|v| v.as_i64()).unwrap_or(0);
+            let length = params.get(1).and_then(|v| v.as_i64()).unwrap_or(4096);
+            let (data, new_off, overflow) = ctx
+                .manager
+                .tail_main_log(offset, length)
+                .await
+                .map_err(Fault::from)?;
+            Ok(Value::Array(vec![
+                Value::String(data),
+                Value::Int(new_off as i32),
+                Value::Boolean(overflow),
+            ]))
+        }
+        "supervisor.clearLog" => clear_main_log(ctx).await,
         "supervisor.clearProcessLogs" | "supervisor.clearProcessLog" => {
             let name = get_str_param(params, 0, "clearProcessLogs requires name parameter")?;
-            let cfg = ctx.manager.get_config(name).await.map_err(Fault::from)?;
-            if let Some(ref path) = cfg.logs.stdout
-                && path.exists()
-            {
-                let _ = std::fs::write(path, "");
-            }
-            if let Some(ref path) = cfg.logs.stderr
-                && path.exists()
-            {
-                let _ = std::fs::write(path, "");
-            }
+            ctx.manager
+                .clear_process_logs(name)
+                .await
+                .map_err(Fault::from)?;
             Ok(Value::Boolean(true))
         }
         "supervisor.clearAllProcessLogs" => {
             let configs = ctx.manager.get_all_configs().await.map_err(Fault::from)?;
             for cfg in configs.values() {
-                if let Some(ref path) = cfg.logs.stdout
-                    && path.exists()
-                {
-                    let _ = std::fs::write(path, "");
-                }
-                if let Some(ref path) = cfg.logs.stderr
-                    && path.exists()
-                {
-                    let _ = std::fs::write(path, "");
-                }
+                let _ = ctx.manager.clear_process_logs(&cfg.name).await;
             }
             let statuses = ctx.manager.get_all_status().await.map_err(Fault::from)?;
             let results = statuses
@@ -403,185 +401,7 @@ async fn execute_signal(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogChannel {
-    Stdout,
-    Stderr,
-}
-
-fn read_file_bytes(path: &Path, offset: i32, length: i32) -> Result<String, Fault> {
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = File::open(path).map_err(|_| Fault::no_file(path.to_string_lossy()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| Fault::failed("Failed to read metadata"))?;
-    let file_len = metadata.len();
-
-    let abs_offset = offset.unsigned_abs() as u64;
-
-    let (pos, to_read) = if offset < 0 {
-        if length != 0 {
-            return Err(Fault::bad_arguments(
-                "length must be 0 when offset is negative",
-            ));
-        }
-        let pos = file_len.saturating_sub(abs_offset);
-        let to_read = (file_len - pos).min(abs_offset);
-        (pos, to_read)
-    } else {
-        if length < 0 {
-            return Err(Fault::bad_arguments("length cannot be negative"));
-        }
-        let pos = (offset as u64).min(file_len);
-        let remaining = file_len.saturating_sub(pos);
-        let to_read = if length == 0 {
-            remaining
-        } else {
-            (length as u64).min(remaining)
-        };
-        (pos, to_read)
-    };
-
-    file.seek(SeekFrom::Start(pos))
-        .map_err(|_| Fault::failed("Failed to seek in log file"))?;
-
-    let mut buf = Vec::with_capacity(to_read as usize);
-    std::io::Read::take(&mut file, to_read)
-        .read_to_end(&mut buf)
-        .map_err(|_| Fault::failed("Failed to read log file"))?;
-
-    Ok(String::from_utf8_lossy(&buf).to_string())
-}
-
-fn tail_file_bytes(path: &Path, offset: i64, length: i64) -> (String, i64, bool) {
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return (String::new(), offset, false),
-    };
-    let sz = match file.metadata() {
-        Ok(m) => m.len() as i64,
-        Err(_) => return (String::new(), offset, false),
-    };
-
-    let mut overflow = false;
-    let mut off = offset;
-    let mut len = length;
-
-    if sz > (off + len) {
-        overflow = true;
-        off = sz - 1;
-    }
-
-    if (off + len) > sz {
-        if off > (sz - 1) {
-            len = 0;
-        }
-        off = sz - len;
-    }
-
-    if off < 0 {
-        off = 0;
-    }
-    if len < 0 {
-        len = 0;
-    }
-
-    let data = if len == 0 {
-        Vec::new()
-    } else {
-        if file.seek(SeekFrom::Start(off as u64)).is_err() {
-            return (String::new(), offset, false);
-        }
-        let mut buf = Vec::with_capacity(len as usize);
-        match std::io::Read::take(&mut file, len as u64).read_to_end(&mut buf) {
-            Ok(_) => buf,
-            Err(_) => Vec::new(),
-        }
-    };
-
-    (String::from_utf8_lossy(&data).to_string(), sz, overflow)
-}
-
-fn read_memory_log(logs: &[String], offset: i32, length: i32) -> Result<String, Fault> {
-    let mut full_text = logs.join("\n");
-    if !full_text.is_empty() {
-        full_text.push('\n');
-    }
-    let bytes = full_text.as_bytes();
-    let total_len = bytes.len();
-    let abs_offset = offset.unsigned_abs() as usize;
-
-    let (pos, to_read) = if offset < 0 {
-        if length != 0 {
-            return Err(Fault::bad_arguments(
-                "length must be 0 when offset is negative",
-            ));
-        }
-        let pos = total_len.saturating_sub(abs_offset);
-        let to_read = (total_len - pos).min(abs_offset);
-        (pos, to_read)
-    } else {
-        if length < 0 {
-            return Err(Fault::bad_arguments("length cannot be negative"));
-        }
-        let pos = (offset as usize).min(total_len);
-        let remaining = total_len.saturating_sub(pos);
-        let to_read = if length == 0 {
-            remaining
-        } else {
-            (length as usize).min(remaining)
-        };
-        (pos, to_read)
-    };
-
-    Ok(String::from_utf8_lossy(&bytes[pos..pos + to_read]).to_string())
-}
-
-fn tail_memory_log(logs: &[String], offset: i64, length: i64) -> (String, i64, bool) {
-    let mut full_text = logs.join("\n");
-    if !full_text.is_empty() {
-        full_text.push('\n');
-    }
-    let bytes = full_text.as_bytes();
-    let sz = bytes.len() as i64;
-
-    let mut overflow = false;
-    let mut off = offset;
-    let mut len = length;
-
-    if sz > (off + len) {
-        overflow = true;
-        off = sz - 1;
-    }
-
-    if (off + len) > sz {
-        if off > (sz - 1) {
-            len = 0;
-        }
-        off = sz - len;
-    }
-
-    if off < 0 {
-        off = 0;
-    }
-    if len < 0 {
-        len = 0;
-    }
-
-    let slice = if len == 0 || off >= sz {
-        &[]
-    } else {
-        let end = (off + len).min(sz) as usize;
-        &bytes[off as usize..end]
-    };
-
-    (String::from_utf8_lossy(slice).to_string(), sz, overflow)
-}
+use crate::logging::LogChannel;
 
 async fn tail_process_log(
     ctx: &SupervisorRpcContext,
@@ -592,57 +412,17 @@ async fn tail_process_log(
     let offset = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
     let length = params.get(2).and_then(|v| v.as_i64()).unwrap_or(4096);
 
-    let cfg = ctx.manager.get_config(name).await.map_err(Fault::from)?;
+    let (data, new_off, overflow) = ctx
+        .manager
+        .tail_log(name, channel, offset, length)
+        .await
+        .map_err(Fault::from)?;
 
-    match channel {
-        LogChannel::Stderr => {
-            if cfg.logs.redirect_stderr {
-                return Ok(Value::Array(vec![
-                    Value::String(String::new()),
-                    Value::Int(offset as i32),
-                    Value::Boolean(false),
-                ]));
-            }
-            if let Some(ref path) = cfg.logs.stderr
-                && path.exists()
-            {
-                let (data, new_off, overflow) = tail_file_bytes(path, offset, length);
-                return Ok(Value::Array(vec![
-                    Value::String(data),
-                    Value::Int(new_off as i32),
-                    Value::Boolean(overflow),
-                ]));
-            }
-            Ok(Value::Array(vec![
-                Value::String(String::new()),
-                Value::Int(offset as i32),
-                Value::Boolean(false),
-            ]))
-        }
-        LogChannel::Stdout => {
-            if let Some(ref path) = cfg.logs.stdout
-                && path.exists()
-            {
-                let (data, new_off, overflow) = tail_file_bytes(path, offset, length);
-                return Ok(Value::Array(vec![
-                    Value::String(data),
-                    Value::Int(new_off as i32),
-                    Value::Boolean(overflow),
-                ]));
-            }
-            let logs = ctx
-                .manager
-                .read_logs(name, None)
-                .await
-                .map_err(Fault::from)?;
-            let (data, new_off, overflow) = tail_memory_log(&logs, offset, length);
-            Ok(Value::Array(vec![
-                Value::String(data),
-                Value::Int(new_off as i32),
-                Value::Boolean(overflow),
-            ]))
-        }
-    }
+    Ok(Value::Array(vec![
+        Value::String(data),
+        Value::Int(new_off as i32),
+        Value::Boolean(overflow),
+    ]))
 }
 
 async fn read_process_log(
@@ -651,70 +431,33 @@ async fn read_process_log(
     channel: LogChannel,
 ) -> Result<Value, Fault> {
     let name = get_str_param(params, 0, "readProcessLog requires name parameter")?;
-    let offset = params.get(1).and_then(|v| v.as_i32()).unwrap_or(0);
-    let length = params.get(2).and_then(|v| v.as_i32()).unwrap_or(0);
+    let offset = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    let length = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let cfg = ctx.manager.get_config(name).await.map_err(Fault::from)?;
+    let (data, _new_off, _overflow) = ctx
+        .manager
+        .read_log(name, channel, offset, length)
+        .await
+        .map_err(Fault::from)?;
 
-    match channel {
-        LogChannel::Stderr => {
-            if cfg.logs.redirect_stderr {
-                return Err(Fault::no_file("no log file"));
-            }
-            if let Some(ref path) = cfg.logs.stderr
-                && path.exists()
-            {
-                return read_file_bytes(path, offset, length).map(Value::String);
-            }
-            Err(Fault::no_file("no log file"))
-        }
-        LogChannel::Stdout => {
-            if let Some(ref path) = cfg.logs.stdout
-                && path.exists()
-            {
-                return read_file_bytes(path, offset, length).map(Value::String);
-            }
-            let logs = ctx
-                .manager
-                .read_logs(name, None)
-                .await
-                .map_err(Fault::from)?;
-            if logs.is_empty() && cfg.logs.stdout.is_some() {
-                return Err(Fault::no_file("no log file"));
-            }
-            let res = read_memory_log(&logs, offset, length)?;
-            Ok(Value::String(res))
-        }
-    }
+    Ok(Value::String(data))
 }
 
-fn read_main_log(_ctx: &SupervisorRpcContext, offset: i32, length: i32) -> Result<Value, Fault> {
-    let candidate_paths = [
-        PathBuf::from("logs/supervisord.log"),
-        PathBuf::from("supervisord.log"),
-        PathBuf::from("/tmp/supervisord.log"),
-    ];
-
-    for p in &candidate_paths {
-        if p.exists() {
-            return read_file_bytes(p, offset, length).map(Value::String);
-        }
-    }
-
-    Ok(Value::String(String::new()))
+async fn read_main_log(
+    ctx: &SupervisorRpcContext,
+    offset: i32,
+    length: i32,
+) -> Result<Value, Fault> {
+    let data = ctx
+        .manager
+        .read_main_log(offset as i64, length as i64)
+        .await
+        .map_err(Fault::from)?;
+    Ok(Value::String(data))
 }
 
-fn clear_main_log(_ctx: &SupervisorRpcContext) -> Result<Value, Fault> {
-    let candidate_paths = [
-        PathBuf::from("logs/supervisord.log"),
-        PathBuf::from("supervisord.log"),
-        PathBuf::from("/tmp/supervisord.log"),
-    ];
-    for p in &candidate_paths {
-        if p.exists() {
-            let _ = std::fs::write(p, "");
-        }
-    }
+async fn clear_main_log(ctx: &SupervisorRpcContext) -> Result<Value, Fault> {
+    ctx.manager.clear_main_log().await.map_err(Fault::from)?;
     Ok(Value::Boolean(true))
 }
 

@@ -23,7 +23,7 @@ pub use destination::{
 };
 pub use in_memory_rotator::{InMemoryChannelRotator, InMemoryLogRotator};
 pub use pump::LogPumpBuilder;
-pub use reader::InstantLogReader;
+pub use reader::{InMemoryLogWriter, InstantLogReader, LogFileReader, LogReadError};
 pub use ring_buffer::RingBuffer;
 pub use rotator::LogRotator;
 pub use syslog::SyslogLogBackend;

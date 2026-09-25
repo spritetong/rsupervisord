@@ -7,13 +7,15 @@
 use crate::consts::MAX_LIVE_LOG_LINE_BYTES;
 use crate::error::ProgramError;
 use crate::logging::backend::LogBackend;
-use crate::logging::reader::InstantLogReader;
+use crate::logging::reader::{InstantLogReader, LogFileReader};
 use crate::logging::types::{LogChannel, LogChunk};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 /// An in-memory rotated log segment representing one generation of log records.
@@ -67,6 +69,8 @@ pub struct InMemoryChannelRotator {
     broadcast_tx: broadcast::Sender<String>,
     /// Incomplete line tail awaiting a newline for live broadcast.
     pending_line: Mutex<BytesMut>,
+    /// Monotonic total cumulative byte count since startup/seeding (satisfies supervisor offset semantics).
+    cumulative_bytes: AtomicU64,
 }
 
 impl InMemoryChannelRotator {
@@ -80,6 +84,7 @@ impl InMemoryChannelRotator {
             backups_queue: RwLock::new(VecDeque::with_capacity(backups)),
             broadcast_tx,
             pending_line: Mutex::new(BytesMut::new()),
+            cumulative_bytes: AtomicU64::new(0),
         }
     }
 
@@ -176,6 +181,38 @@ impl InMemoryChannelRotator {
                 active.line_offsets.push(prev_len + i + 1);
             }
         }
+
+        self.cumulative_bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+    }
+
+    /// Returns the total cumulative bytes written to this channel since inception/seeding.
+    #[inline]
+    pub fn cumulative_bytes(&self) -> u64 {
+        self.cumulative_bytes.load(Ordering::SeqCst)
+    }
+
+    /// Seeds this in-memory channel with the trailing chunk of an existing disk file,
+    /// sets the initial cumulative byte offset to the disk file size, and rotates
+    /// the on-disk file (renaming to `<path>.1`) to prevent subsequent disk writes.
+    pub fn seed_from_file(&self, path: &Path, max_seed_bytes: usize) -> std::io::Result<u64> {
+        match LogFileReader::seed_and_archive(path, max_seed_bytes, Some("1"))? {
+            Some((bytes, file_size)) => {
+                if !bytes.is_empty() {
+                    let mut active = self.active.write();
+                    let prev_len = active.data.len();
+                    active.data.extend_from_slice(&bytes);
+                    for (i, &b) in bytes.iter().enumerate() {
+                        if b == b'\n' {
+                            active.line_offsets.push(prev_len + i + 1);
+                        }
+                    }
+                }
+                self.cumulative_bytes.store(file_size, Ordering::SeqCst);
+                Ok(file_size)
+            }
+            None => Ok(0),
+        }
     }
 
     /// Appends a text line with an added newline delimiter.
@@ -205,71 +242,129 @@ impl InMemoryChannelRotator {
         out
     }
 
-    /// Reads bytes starting from offset with length, returning `(content, total_size, overflow)`.
+    /// Reads bytes starting from monotonic offset with length, returning `(content, total_size, overflow)`.
     pub fn read_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
         let full = self.snapshot_bytes();
-        let sz = full.len() as i64;
+        let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
+        let retained_sz = full.len() as i64;
+        let oldest_available_offset = total_sz.saturating_sub(retained_sz);
 
         let mut overflow = false;
-        let mut off = offset;
         let mut len = length;
 
-        if off < 0 {
-            off += sz;
-            if off < 0 {
+        if len < 0 {
+            len = 0;
+        }
+
+        let (start_off, to_read) = if offset < 0 {
+            let target = total_sz + offset;
+            let actual_start = if target < oldest_available_offset {
                 overflow = true;
-                off = 0;
-            }
-        }
-
-        if len < 0 {
-            len = 0;
-        }
-
-        let start = off.min(sz) as usize;
-        let end = (off + len).min(sz) as usize;
-
-        let slice = if start < end { &full[start..end] } else { &[] };
-
-        (String::from_utf8_lossy(slice).to_string(), sz, overflow)
-    }
-
-    /// Tails bytes backwards from buffer end, matching supervisor XML-RPC semantics.
-    pub fn tail_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
-        let full = self.snapshot_bytes();
-        let sz = full.len() as i64;
-
-        let mut overflow = false;
-        let mut off = offset;
-        let mut len = length;
-
-        if sz > (off + len) {
-            overflow = true;
-            off = sz - 1;
-        }
-
-        if (off + len) > sz {
-            if off > (sz - 1) {
-                len = 0;
-            }
-            off = sz - len;
-        }
-
-        if off < 0 {
-            off = 0;
-        }
-        if len < 0 {
-            len = 0;
-        }
-
-        let slice = if len == 0 || off >= sz {
-            &[]
+                oldest_available_offset
+            } else {
+                target
+            };
+            let rem = (total_sz - actual_start) as usize;
+            let r = if len == 0 {
+                rem
+            } else {
+                (len as usize).min(rem)
+            };
+            (actual_start, r)
         } else {
-            let end = (off + len).min(sz) as usize;
-            &full[off as usize..end]
+            if offset < oldest_available_offset {
+                overflow = true;
+                (
+                    oldest_available_offset,
+                    (len as usize).min(retained_sz as usize),
+                )
+            } else if offset >= total_sz {
+                return (String::new(), total_sz, false);
+            } else {
+                let rem = (total_sz - offset) as usize;
+                let r = if len == 0 {
+                    rem
+                } else {
+                    (len as usize).min(rem)
+                };
+                (offset, r)
+            }
         };
 
-        (String::from_utf8_lossy(slice).to_string(), sz, overflow)
+        let local_start = (start_off - oldest_available_offset) as usize;
+        let local_end = (local_start + to_read).min(full.len());
+        let slice = if local_start < local_end {
+            &full[local_start..local_end]
+        } else {
+            &[]
+        };
+
+        (
+            String::from_utf8_lossy(slice).to_string(),
+            total_sz,
+            overflow,
+        )
+    }
+
+    /// Tails bytes backwards from buffer end or monotonic offset, matching supervisor XML-RPC semantics.
+    pub fn tail_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
+        let full = self.snapshot_bytes();
+        let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
+        let retained_sz = full.len() as i64;
+        let oldest_available_offset = total_sz.saturating_sub(retained_sz);
+
+        let mut len = length;
+        if len < 0 {
+            len = 0;
+        }
+
+        if offset == 0 {
+            let actual_len = if len == 0 {
+                retained_sz as usize
+            } else {
+                (len as usize).min(full.len())
+            };
+            let start = full.len().saturating_sub(actual_len);
+            let slice = &full[start..];
+            let has_overflow = total_sz > actual_len as i64;
+            return (
+                String::from_utf8_lossy(slice).to_string(),
+                total_sz,
+                has_overflow,
+            );
+        }
+
+        let mut overflow = false;
+        let mut off = offset;
+
+        if off < oldest_available_offset {
+            overflow = true;
+            off = oldest_available_offset;
+        }
+
+        if off >= total_sz {
+            return (String::new(), total_sz, false);
+        }
+
+        let local_start = (off - oldest_available_offset) as usize;
+        let to_read = if len == 0 {
+            full.len() - local_start
+        } else {
+            (len as usize).min(full.len() - local_start)
+        };
+        let local_end = local_start + to_read;
+        let slice = if local_start < local_end {
+            &full[local_start..local_end]
+        } else {
+            &[]
+        };
+
+        let new_offset = off + slice.len() as i64;
+        (
+            String::from_utf8_lossy(slice).to_string(),
+            new_offset,
+            overflow,
+        )
     }
 
     /// Returns the most recent `max_lines` lines.
@@ -284,7 +379,7 @@ impl InMemoryChannelRotator {
         }
     }
 
-    /// Clears both active and backup segments and any pending broadcast line.
+    /// Clears both active and backup segments, any pending broadcast line, and resets cumulative bytes.
     pub fn clear(&self) {
         {
             // Lock order: active before backups_queue.
@@ -294,6 +389,7 @@ impl InMemoryChannelRotator {
             active.line_offsets.clear();
             backups.clear();
         }
+        self.cumulative_bytes.store(0, Ordering::SeqCst);
         self.pending_line.lock().clear();
     }
 
@@ -319,6 +415,19 @@ impl InMemoryChannelRotator {
     }
 }
 
+#[async_trait]
+impl LogBackend for InMemoryChannelRotator {
+    async fn write_chunk(&self, chunk: &LogChunk) -> Result<(), ProgramError> {
+        self.append_bytes(&chunk.data);
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<(), ProgramError> {
+        self.flush_broadcast();
+        Ok(())
+    }
+}
+
 /// In-memory log rotator managing stdout and stderr channels.
 ///
 /// Functions as both a built-in `LogBackend` and an `InstantLogReader`.
@@ -336,6 +445,14 @@ impl InMemoryLogRotator {
         }
     }
 
+    /// Creates a new in-memory rotator wrapping existing channel rotators.
+    pub fn new_with_channels(
+        stdout: Arc<InMemoryChannelRotator>,
+        stderr: Arc<InMemoryChannelRotator>,
+    ) -> Self {
+        Self { stdout, stderr }
+    }
+
     /// Returns a reference to the stdout channel rotator.
     #[inline]
     pub fn stdout(&self) -> &Arc<InMemoryChannelRotator> {
@@ -346,6 +463,21 @@ impl InMemoryLogRotator {
     #[inline]
     pub fn stderr(&self) -> &Arc<InMemoryChannelRotator> {
         &self.stderr
+    }
+
+    /// Seeds stdout and stderr channels from existing on-disk log files and rotates them.
+    pub fn seed_from_files(
+        &self,
+        stdout_path: Option<&Path>,
+        stderr_path: Option<&Path>,
+        max_seed_bytes: usize,
+    ) {
+        if let Some(p) = stdout_path {
+            let _ = self.stdout.seed_from_file(p, max_seed_bytes);
+        }
+        if let Some(p) = stderr_path {
+            let _ = self.stderr.seed_from_file(p, max_seed_bytes);
+        }
     }
 }
 

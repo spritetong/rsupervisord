@@ -657,14 +657,30 @@ flowchart TD
 
 ### 8.6 In-Memory Generational Rotator (`src/logging/in_memory_rotator.rs`)
 
-1. **Segmented Memory Architecture**: Organized into an `active_segment` and a bounded `VecDeque<MemorySegment>` of backup segments.
-2. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
+1. **Tri-State Logging Modes (`LogMode`)**:
+   - `On` (`true`, default): Full capture into memory buffers and configured disk/syslog backends.
+   - `Off` (`false`): Subprocess stdio bound to `Stdio::null()`, zero pump tasks or buffers allocated.
+   - `InMemoryOnly` (`"in_memory_only"`, `"memory"`): Captures stdout/stderr via async zero-thread pipes exclusively into in-memory rotators; completely disables all disk log writers.
+2. **Segmented Memory & Sizing Architecture**:
+   - Organized into an `active` segment and a bounded `VecDeque<MemorySegment>` of backup segments.
+   - Configurable per stream via `buffer_size` or `max_bytes` / `backups`. When `backups: 0`, operates as a single contiguous circular buffer.
+3. **Startup Pre-Reading & Rotation (Seeding)**:
+   - On cold start in `in_memory_only` mode, if a previous disk log file exists, `seed_from_file(path, max_bytes)`:
+     - Pre-reads the tail chunk (up to capacity) into memory, discarding any incomplete leading line fragment.
+     - Anchors the starting monotonic offset counter `cumulative_bytes` to the on-disk `file_size`.
+     - Rotates and archives the disk file (`app.log -> app.log.1`), ensuring zero subsequent disk writes occur during daemon lifetime.
+4. **Monotonic Cumulative Logical Offset (`global_bytes_written`)**:
+   - Tracks a 64-bit monotonic offset that never resets across circular segment evictions.
+   - Satisfies supervisor XML-RPC `(content, new_offset, overflow)` contract:
+     - When client offset is within retained memory window: returns data slice and increments `new_offset`.
+     - When client offset falls behind evicted memory: returns `overflow = true` and updates `new_offset` to current end of stream, prompting the client to resynchronize without disruption.
+5. **Dual Role**: Implements `LogBackend` to receive chunks from the pump and `InstantLogReader` to serve XML-RPC `read_bytes` / `tail_bytes` and Web UI streaming with zero disk I/O.
 
 ### 8.7 Stream-Independent Configuration & INI Mapping (OI-10)
 
 1. **Decoupled Quotas**: `stdout_max_bytes` vs `stderr_max_bytes`, and `stdout_backups` vs `stderr_backups`.
 2. **Resolution Fallback**: Stream-specific field -> shared `logs.max_bytes` / `logs.backups` -> hardcoded defaults (50MB / 10).
-3. **INI Adapter**: Maps all stream-independent and syslog keys (`stdout_logfile_maxbytes`, `stderr_logfile_maxbytes`, `logfile_timestamp_suffix`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`).
+3. **INI Adapter**: Maps all stream-independent and syslog keys (`stdout_logfile_maxbytes`, `stderr_logfile_maxbytes`, `logfile_timestamp_suffix`, `syslog_facility`, `syslog_tag`, `syslog_stdout_priority`, `syslog_stderr_priority`). Additionally translates `stdout_logfile = memory`, `stderr_logfile = memory`, `logfile = memory`, and `logging = in_memory_only` to `LogMode::InMemoryOnly`.
 
 ---
 
