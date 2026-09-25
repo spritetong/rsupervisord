@@ -235,6 +235,8 @@ async fn test_unix_process_group_cleanup() {
     config.args = vec!["-c".to_string(), script.to_string()];
     config.start_secs = Duration::from_secs(0);
     config.stop_wait_secs = Duration::from_secs(2);
+    config.stop_as_group = true;
+    config.kill_as_group = true;
 
     let mut program = ProcessProgram::new(config).expect("create");
     program.start().await.expect("start");

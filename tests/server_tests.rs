@@ -29,19 +29,34 @@ fn get_worker_command(msg: &str, secs: u64) -> String {
     }
 }
 
+static IPC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static PORT_OFFSET: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
 fn get_ephemeral_port() -> u16 {
+    static BASE_PORT: std::sync::LazyLock<u16> = std::sync::LazyLock::new(|| {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral std port");
+        listener.local_addr().expect("local addr").port()
+    });
+    for _ in 0..200 {
+        let offset = PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = BASE_PORT.wrapping_add(offset);
+        if candidate >= 1024 && StdTcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return candidate;
+        }
+    }
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral std port");
     listener.local_addr().expect("local addr").port()
 }
 
 fn get_test_ipc_path(prefix: &str) -> PathBuf {
+    let id = IPC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(windows)]
     {
         PathBuf::from(format!(
             r"\\.\pipe\rsupervisord_test_{}_{}_{}",
             prefix,
             std::process::id(),
-            get_ephemeral_port()
+            id
         ))
     }
     #[cfg(unix)]
@@ -51,7 +66,7 @@ fn get_test_ipc_path(prefix: &str) -> PathBuf {
             "rsupervisord_test_{}_{}_{}.sock",
             prefix,
             std::process::id(),
-            get_ephemeral_port()
+            id
         ))
     }
 }

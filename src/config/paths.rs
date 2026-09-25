@@ -196,8 +196,14 @@ pub fn derive_cmd_name(argv0: Option<&OsStr>) -> String {
         Some(p) => p,
         None => exe_path(),
     };
-    let Some(stem) = path.file_stem().map(|s| s.to_string_lossy()) else {
-        return "supervisord".to_string();
+    let raw_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let file_name = raw_name.rsplit('\\').next().unwrap_or(raw_name);
+    let stem = match Path::new(file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+    {
+        Some(s) if !s.is_empty() => s,
+        _ => return "supervisord".to_string(),
     };
 
     // Normalize Cargo test runner artifacts (e.g. `rsupervisord-097ddb1e4b724e0a`)

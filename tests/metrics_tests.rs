@@ -9,7 +9,6 @@ use rsupervisord::cli::transport::Endpoint;
 use rsupervisord::config::SupervisorConfig;
 use rsupervisord::manager::SupervisorManager;
 use rsupervisord::server::ServerEngine;
-use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -28,19 +27,17 @@ fn get_worker_command(secs: u64) -> String {
     }
 }
 
-fn get_ephemeral_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral std port");
-    listener.local_addr().expect("local addr").port()
-}
+static IPC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn get_test_ipc_path(prefix: &str) -> PathBuf {
+    let id = IPC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(windows)]
     {
         PathBuf::from(format!(
             r"\\.\pipe\rsupervisord_test_{}_{}_{}",
             prefix,
             std::process::id(),
-            get_ephemeral_port()
+            id
         ))
     }
     #[cfg(unix)]
@@ -50,7 +47,7 @@ fn get_test_ipc_path(prefix: &str) -> PathBuf {
             "rsupervisord_test_{}_{}_{}.sock",
             prefix,
             std::process::id(),
-            get_ephemeral_port()
+            id
         ))
     }
 }
