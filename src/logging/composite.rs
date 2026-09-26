@@ -60,17 +60,31 @@ impl LogBackend for CompositeLogBackend {
     }
 
     async fn flush(&self) -> Result<(), ProgramError> {
+        let mut first_err = None;
         for backend in &self.backends {
-            let _ = backend.flush().await;
+            if let Err(e) = backend.flush().await {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
     }
 
     async fn close(&self) -> Result<(), ProgramError> {
+        let mut first_err = None;
         for backend in &self.backends {
-            let _ = backend.close().await;
+            if let Err(e) = backend.close().await {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
     }
 
     fn clear(&self) -> Result<(), ProgramError> {

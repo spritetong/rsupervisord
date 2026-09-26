@@ -215,8 +215,15 @@ where
                 }
             }
 
-            if let Some(ref b) = backend {
-                let _ = b.flush().await;
+            if let Some(ref b) = backend
+                && let Err(e) = b.flush().await
+            {
+                tracing::warn!(
+                    program = ?program_name,
+                    stream = stream_name,
+                    error = %e,
+                    "Failed to flush log backend on pump completion"
+                );
             }
         })
     }

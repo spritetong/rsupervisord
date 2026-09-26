@@ -391,7 +391,7 @@ impl LogRotator {
     /// Truncates the log file and resets rotation state without count desync.
     pub fn clear(&self) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        let _ = std::fs::write(&self.path, "");
+        std::fs::write(&self.path, "")?;
         *guard = match Self::build_inner(
             &self.path,
             self.max_bytes,

@@ -713,7 +713,7 @@ programs:
         "resolve_programs should reject duplicate rotating log destinations"
     );
     let err = resolved.unwrap_err().to_string();
-    assert!(err.contains("Duplicate rotating log file path"));
+    assert!(err.contains("Duplicate log file path"));
 
     // When max_bytes == 0 (append-only), sharing is permitted
     let yaml_append = r#"

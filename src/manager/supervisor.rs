@@ -16,6 +16,7 @@ use crate::program::config::{ProgramConfig, StopSignal};
 use crate::program::process::ProcessProgram;
 use crate::program::state::{ProgramState, ProgramStatus};
 use crate::program::traits::Program;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -161,6 +162,7 @@ pub struct ManagerHandle {
     activity_tracker: crate::manager::ActivityTracker,
     event_hub: crate::manager::EventHub,
     server_identifier: String,
+    shared_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
 }
 
 impl ManagerHandle {
@@ -175,6 +177,40 @@ impl ManagerHandle {
             activity_tracker: crate::manager::ActivityTracker::default(),
             event_hub: crate::manager::EventHub::default(),
             server_identifier: "rsupervisord-compat".to_string(),
+            shared_configs: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    fn find_group_targets(&self, group: &str) -> Vec<ProgramConfig> {
+        let trimmed = group.trim();
+        let configs = self.shared_configs.read();
+        if let Some((group_part, prog_part)) = trimmed.split_once(':') {
+            let mut matches = Vec::new();
+            for (p_name, cfg) in configs.iter() {
+                if cfg.group == group_part
+                    && (prog_part == "*"
+                        || prog_part == p_name
+                        || p_name.strip_prefix(&format!("{}:", group_part)) == Some(prog_part))
+                {
+                    matches.push(cfg.clone());
+                }
+            }
+            if !matches.is_empty() {
+                return matches;
+            }
+        }
+        let matches: Vec<ProgramConfig> = configs
+            .values()
+            .filter(|cfg| cfg.group == trimmed)
+            .cloned()
+            .collect();
+        if !matches.is_empty() {
+            return matches;
+        }
+        if let Some(cfg) = configs.get(trimmed) {
+            vec![cfg.clone()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -339,10 +375,20 @@ impl ManagerHandle {
     }
 
     pub async fn start_group(&self, group: impl Into<String>) -> Result<Vec<String>, ProgramError> {
+        let group_str = group.into();
+        let targets = self.find_group_targets(&group_str);
+        let count = targets.len().max(1);
+        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
+        let timeout_dur = per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_GROUP)
+            .min(MAX_TIMEOUT);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StartGroup {
-                group: group.into(),
+                group: group_str,
                 reply: reply_tx,
             })
             .await
@@ -350,7 +396,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -367,10 +412,34 @@ impl ManagerHandle {
         group: impl Into<String>,
         grace_period: Option<Duration>,
     ) -> Result<Vec<String>, ProgramError> {
+        let group_str = group.into();
+        let targets = self.find_group_targets(&group_str);
+        let timeout_dur = if targets.is_empty() {
+            AWAIT_GROUP
+        } else {
+            let total_dur: Duration = targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(STOP_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
+            total_dur
+                .saturating_add(AWAIT_QUERY)
+                .max(AWAIT_GROUP)
+                .min(MAX_TIMEOUT)
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StopGroup {
-                group: group.into(),
+                group: group_str,
                 grace_period,
                 reply: reply_tx,
             })
@@ -379,7 +448,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -396,10 +464,38 @@ impl ManagerHandle {
         group: impl Into<String>,
         grace_period: Option<Duration>,
     ) -> Result<Vec<String>, ProgramError> {
+        let group_str = group.into();
+        let targets = self.find_group_targets(&group_str);
+        let count = targets.len().max(1);
+        let start_dur = (DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY))
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY);
+        let stop_dur = if targets.is_empty() {
+            AWAIT_GROUP
+        } else {
+            targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(RESTART_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d))
+        };
+        let timeout_dur = stop_dur
+            .saturating_add(start_dur)
+            .max(AWAIT_BULK)
+            .min(MAX_TIMEOUT);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::RestartGroup {
-                group: group.into(),
+                group: group_str,
                 grace_period,
                 reply: reply_tx,
             })
@@ -408,7 +504,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -421,6 +516,14 @@ impl ManagerHandle {
     }
 
     pub async fn start_all(&self) -> Result<(), ProgramError> {
+        let count = self.shared_configs.read().len().max(1);
+        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
+        let timeout_dur = per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_BULK)
+            .min(MAX_TIMEOUT);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StartAll { reply: reply_tx })
@@ -429,7 +532,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -442,6 +544,31 @@ impl ManagerHandle {
     }
 
     pub async fn stop_all(&self, grace_period: Option<Duration>) -> Result<(), ProgramError> {
+        let timeout_dur = {
+            let configs = self.shared_configs.read();
+            if configs.is_empty() {
+                AWAIT_BULK
+            } else {
+                let total_dur: Duration = configs
+                    .values()
+                    .map(|cfg| {
+                        let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                        grace
+                            .checked_add(DEFAULT_HOOK_TIMEOUT)
+                            .unwrap_or(MAX_TIMEOUT)
+                            .checked_add(DRAIN_TIMEOUT)
+                            .unwrap_or(MAX_TIMEOUT)
+                            .checked_add(STOP_GRACE_EXTRA)
+                            .unwrap_or(MAX_TIMEOUT)
+                    })
+                    .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
+                total_dur
+                    .saturating_add(AWAIT_QUERY)
+                    .max(AWAIT_BULK)
+                    .min(MAX_TIMEOUT)
+            }
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StopAll {
@@ -453,7 +580,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -469,6 +595,16 @@ impl ManagerHandle {
         &self,
         new_config: SupervisorConfig,
     ) -> Result<ReloadSummary, ProgramError> {
+        let count = self.shared_configs.read().len().max(1);
+        let per_proc = DEFAULT_STOP_WAIT
+            .saturating_add(DEFAULT_HOOK_TIMEOUT)
+            .saturating_add(STOP_GRACE_EXTRA);
+        let timeout_dur = per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_GROUP)
+            .min(MAX_TIMEOUT);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::ReloadConfig {
@@ -480,7 +616,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_GROUP;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -493,6 +628,16 @@ impl ManagerHandle {
     }
 
     pub async fn restart_daemon(&self, new_config: SupervisorConfig) -> Result<(), ProgramError> {
+        let count = self.shared_configs.read().len().max(1);
+        let per_proc = DEFAULT_STOP_WAIT
+            .saturating_add(DEFAULT_HOOK_TIMEOUT)
+            .saturating_add(RESTART_GRACE_EXTRA);
+        let timeout_dur = per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_BULK)
+            .max(AWAIT_BULK)
+            .min(MAX_TIMEOUT);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::RestartDaemon {
@@ -504,7 +649,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_BULK;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -906,13 +1050,36 @@ impl ManagerHandle {
     }
 
     pub async fn shutdown(&self) -> Result<(), ProgramError> {
+        let timeout_dur = {
+            let configs = self.shared_configs.read();
+            if configs.is_empty() {
+                AWAIT_BULK
+            } else {
+                let total_dur: Duration = configs
+                    .values()
+                    .map(|cfg| {
+                        cfg.stop_wait_secs
+                            .checked_add(DEFAULT_HOOK_TIMEOUT)
+                            .unwrap_or(MAX_TIMEOUT)
+                            .checked_add(DRAIN_TIMEOUT)
+                            .unwrap_or(MAX_TIMEOUT)
+                            .checked_add(STOP_GRACE_EXTRA)
+                            .unwrap_or(MAX_TIMEOUT)
+                    })
+                    .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
+                total_dur
+                    .saturating_add(AWAIT_QUERY)
+                    .max(AWAIT_BULK)
+                    .min(MAX_TIMEOUT)
+            }
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
             .command_tx
             .send(ManagerCommand::Shutdown { reply: reply_tx })
             .await;
 
-        let timeout_dur = AWAIT_BULK;
         let _ = tokio::time::timeout(timeout_dur, reply_rx).await;
         self.cancel_token.cancel();
         Ok(())
@@ -994,12 +1161,15 @@ impl SupervisorManagerBuilder {
             .unwrap_or("rsupervisord-compat")
             .to_string();
 
+        let shared_configs = Arc::new(RwLock::new(programs_map.clone()));
+
         let handle = ManagerHandle {
             command_tx,
             cancel_token: cancel_token.clone(),
             activity_tracker: activity_tracker.clone(),
             event_hub: event_hub.clone(),
             server_identifier: server_identifier.clone(),
+            shared_configs: shared_configs.clone(),
         };
 
         let mut event_pools = HashMap::new();
@@ -1084,6 +1254,7 @@ impl SupervisorManagerBuilder {
         let actor = ManagerActor {
             programs,
             configs: programs_map,
+            shared_configs,
             pending_configs,
             dag,
             cron_table,
@@ -1173,6 +1344,7 @@ impl SupervisorManager {
 struct ManagerActor {
     programs: HashMap<String, Box<dyn Program>>,
     configs: HashMap<String, ProgramConfig>,
+    shared_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
     pending_configs: HashMap<String, ProgramConfig>,
     dag: DependencyGraph,
     cron_table: crate::manager::cron::CronTable,
@@ -1806,7 +1978,10 @@ impl ManagerActor {
         // 7. Update active daemon logging configuration and rotator
         self.sync_logging_config(new_config.logging.clone());
 
-        // 8. Broadcast ConfigReloaded event to subscribers
+        // 8. Synchronize shared configs for dynamic timeout calculation
+        *self.shared_configs.write() = self.configs.clone();
+
+        // 9. Broadcast ConfigReloaded event to subscribers
         self.event_hub
             .publish_system(crate::manager::SystemEvent::ConfigReloaded {
                 added: summary.added.clone(),
@@ -1978,6 +2153,7 @@ impl ManagerActor {
         }
         self.cron_table = crate::manager::cron::CronTable::from_configs(&self.configs);
         self.watch_handle.update_configs(self.configs.clone()).await;
+        *self.shared_configs.write() = self.configs.clone();
     }
 
     /// Handles cron actions that became due at current wall-clock time.

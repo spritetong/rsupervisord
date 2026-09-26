@@ -296,15 +296,23 @@ async fn test_cli_command_handlers_execution() {
 
 #[tokio::test]
 async fn test_cli_connection_refused_error() {
-    // Pick an unused port
-    let client = SupervisorClient::new(Endpoint::Tcp("127.0.0.1:54321".to_string()), None);
+    // Dynamically obtain a guaranteed unused port by binding ephemeral port 0 and dropping immediately
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
     let res = client.status(&[]).await;
-    assert!(res.is_err());
+    assert!(res.is_err(), "Expected connection to closed port to fail");
     let err_msg = res.unwrap_err().to_string();
     assert!(
         err_msg.contains("Cannot connect")
             || err_msg.contains("Connection timed out")
             || err_msg.contains("refused")
+            || err_msg.contains("actively refused")
+            || err_msg.contains("closed"),
+        "Expected connection refusal or timeout message, got: {}",
+        err_msg
     );
 }
 

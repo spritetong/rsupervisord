@@ -1594,22 +1594,25 @@ impl SupervisorConfig {
             }
         }
 
-        // Phase 4: Error if multiple log streams target the same rotating file with max_bytes > 0
-        let mut rotating_files: HashMap<PathBuf, Vec<String>> = HashMap::new();
-        if self
-            .logging
-            .max_bytes
-            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
-            > 0
-            && let Some(ref p) = self.logging.file
+        // Phase 4: Validate log file sharing across streams.
+        // If 2 or more streams share the same file and at least one has max_bytes > 0 (rotating),
+        // reject with ConfigError because independent rotators/appenders stomp each other.
+        // Multiple streams sharing the same file is only permitted when ALL streams are non-rotating (max_bytes == 0).
+        let mut file_streams: HashMap<PathBuf, Vec<(String, bool)>> = HashMap::new();
+        if let Some(ref p) = self.logging.file
             && let Ok(dest) =
                 crate::logging::destination::LogDestination::parse(&p.to_string_lossy())
         {
+            let is_rotating = self
+                .logging
+                .max_bytes
+                .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+                > 0;
             for file_path in dest.file_paths() {
-                rotating_files
+                file_streams
                     .entry(file_path.to_path_buf())
                     .or_default()
-                    .push("daemon:main".to_string());
+                    .push(("daemon:main".to_string(), is_rotating));
             }
         }
 
@@ -1618,40 +1621,40 @@ impl SupervisorConfig {
                 continue;
             }
 
-            if prog.logs.effective_stdout_max_bytes() > 0
-                && let Some(dest) = prog.logs.stdout.as_ref().and_then(|p| {
-                    crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok()
-                })
-            {
+            if let Some(dest) = prog.logs.stdout.as_ref().and_then(|p| {
+                crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok()
+            }) {
+                let is_rotating = prog.logs.effective_stdout_max_bytes() > 0;
                 for file_path in dest.file_paths() {
-                    rotating_files
+                    file_streams
                         .entry(file_path.to_path_buf())
                         .or_default()
-                        .push(format!("{}:stdout", prog_name));
+                        .push((format!("{}:stdout", prog_name), is_rotating));
                 }
             }
 
             if !prog.logs.redirect_stderr
-                && prog.logs.effective_stderr_max_bytes() > 0
                 && let Some(dest) = prog.logs.stderr.as_ref().and_then(|p| {
                     crate::logging::destination::LogDestination::parse(&p.to_string_lossy()).ok()
                 })
             {
+                let is_rotating = prog.logs.effective_stderr_max_bytes() > 0;
                 for file_path in dest.file_paths() {
-                    rotating_files
+                    file_streams
                         .entry(file_path.to_path_buf())
                         .or_default()
-                        .push(format!("{}:stderr", prog_name));
+                        .push((format!("{}:stderr", prog_name), is_rotating));
                 }
             }
         }
 
-        for (path, streams) in rotating_files {
-            if streams.len() > 1 {
+        for (path, streams) in file_streams {
+            if streams.len() > 1 && streams.iter().any(|(_, rotating)| *rotating) {
+                let stream_names: Vec<String> = streams.into_iter().map(|(s, _)| s).collect();
                 return Err(ProgramError::ConfigError(format!(
-                    "Duplicate rotating log file path '{}' configured for multiple streams ({:?}). Set 'redirect_stderr: true' to combine stdout and stderr, or configure distinct log paths to avoid competing rotators.",
+                    "Duplicate log file path '{}' configured for multiple streams ({:?}) with rotation enabled. Set 'redirect_stderr: true' to combine stdout and stderr, or configure distinct log paths to avoid competing rotators.",
                     path.display(),
-                    streams
+                    stream_names
                 )));
             }
         }
@@ -1684,7 +1687,31 @@ programs:
             "Expected error for duplicate rotating log paths"
         );
         let err = res.unwrap_err().to_string();
-        assert!(err.contains("Duplicate rotating log file path"));
+        assert!(err.contains("Duplicate log file path"));
+    }
+
+    #[test]
+    fn test_mixed_mode_rotating_and_append_log_paths_rejected() {
+        // One rotating stream (stdout) and one pure append stream (stderr) targeting the same path
+        let yaml = r#"
+programs:
+  app:
+    command: "sleep 10"
+    logs:
+      stdout: "/var/log/app.log"
+      stdout_max_bytes: 1048576
+      stderr: "/var/log/app.log"
+      stderr_max_bytes: 0
+      redirect_stderr: false
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let res = config.resolve_programs();
+        assert!(
+            res.is_err(),
+            "Expected error for mixed rotating and append log paths on the same file"
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Duplicate log file path"));
     }
 
     #[test]

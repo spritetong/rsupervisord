@@ -765,8 +765,18 @@ impl Drop for RunningChild {
     fn drop(&mut self) {
         self.cancel_token.cancel();
         let is_running = !matches!(self.child.try_wait(), Ok(Some(_)));
-        if is_running {
+        #[cfg(windows)]
+        {
+            // On Windows, the Job Object encapsulates grandchildren that may still be running
+            // even after the direct child process has exited. Ensure all descendants are terminated.
             let _ = self.platform_guard.force_kill();
+        }
+        #[cfg(not(windows))]
+        if is_running {
+            // On Unix, only signal if the child is still running to avoid signalling reaped PIDs / PGIDs.
+            let _ = self.platform_guard.force_kill();
+        }
+        if is_running {
             let _ = self.child.start_kill();
         }
         if let Some(w) = self.stdin_writer.take() {

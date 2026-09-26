@@ -227,8 +227,21 @@ struct EventListenerChild {
 impl Drop for EventListenerChild {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        let _ = self.platform_guard.force_kill();
-        let _ = self.child.start_kill();
+        let is_running = !matches!(self.child.try_wait(), Ok(Some(_)));
+        #[cfg(windows)]
+        {
+            // On Windows, the Job Object encapsulates grandchildren that may still be running
+            // even after the direct child process has exited. Ensure all descendants are terminated.
+            let _ = self.platform_guard.force_kill();
+        }
+        #[cfg(not(windows))]
+        if is_running {
+            // On Unix, only signal if the child is still running to avoid signalling reaped PIDs / PGIDs.
+            let _ = self.platform_guard.force_kill();
+        }
+        if is_running {
+            let _ = self.child.start_kill();
+        }
     }
 }
 

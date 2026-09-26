@@ -480,3 +480,58 @@ programs:
 
     manager.shutdown().await.expect("manager shutdown");
 }
+
+#[tokio::test]
+async fn test_manager_dynamic_timeout_group() {
+    let yaml = format!(
+        r#"
+program_defaults:
+  autostart: false
+  start_secs: 0
+  stop_wait_secs: 1
+
+groups:
+  multi_group:
+    programs:
+      - p1
+      - p2
+      - p3
+
+programs:
+  p1:
+    command: "{cmd}"
+  p2:
+    command: "{cmd}"
+  p3:
+    command: "{cmd}"
+"#,
+        cmd = get_sleep_cmd(10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    // Start group dynamically
+    let started = handle
+        .start_group("multi_group")
+        .await
+        .expect("start multi_group");
+    assert_eq!(started.len(), 3);
+
+    // Restart group dynamically with custom grace period
+    let restarted = handle
+        .restart_group("multi_group", Some(std::time::Duration::from_secs(1)))
+        .await
+        .expect("restart multi_group");
+    assert_eq!(restarted.len(), 3);
+
+    // Stop group dynamically
+    let stopped = handle
+        .stop_group("multi_group", None)
+        .await
+        .expect("stop multi_group");
+    assert_eq!(stopped.len(), 3);
+
+    manager.shutdown().await.expect("manager shutdown");
+}
