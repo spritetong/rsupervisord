@@ -1594,8 +1594,25 @@ impl SupervisorConfig {
             }
         }
 
-        // Phase 4: Warn if multiple log streams target the same rotating file with max_bytes > 0
+        // Phase 4: Error if multiple log streams target the same rotating file with max_bytes > 0
         let mut rotating_files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        if self
+            .logging
+            .max_bytes
+            .unwrap_or(crate::consts::DEFAULT_LOG_MAX_BYTES)
+            > 0
+            && let Some(ref p) = self.logging.file
+            && let Ok(dest) =
+                crate::logging::destination::LogDestination::parse(&p.to_string_lossy())
+        {
+            for file_path in dest.file_paths() {
+                rotating_files
+                    .entry(file_path.to_path_buf())
+                    .or_default()
+                    .push("daemon:main".to_string());
+            }
+        }
+
         for (prog_name, prog) in &resolved {
             if !prog.logs.is_enabled() {
                 continue;
@@ -1631,12 +1648,11 @@ impl SupervisorConfig {
 
         for (path, streams) in rotating_files {
             if streams.len() > 1 {
-                tracing::warn!(
-                    path = %path.display(),
-                    streams = ?streams,
-                    "Multiple log streams target rotating file '{}'. Concurrent rotation may lead to lost logs or premature rotation.",
-                    path.display()
-                );
+                return Err(ProgramError::ConfigError(format!(
+                    "Duplicate rotating log file path '{}' configured for multiple streams ({:?}). Set 'redirect_stderr: true' to combine stdout and stderr, or configure distinct log paths to avoid competing rotators.",
+                    path.display(),
+                    streams
+                )));
             }
         }
 
@@ -1647,6 +1663,29 @@ impl SupervisorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_duplicate_rotating_log_paths_rejected() {
+        let yaml = r#"
+programs:
+  app:
+    command: "sleep 10"
+    logs:
+      stdout: "/var/log/app.log"
+      stderr: "/var/log/app.log"
+      stdout_max_bytes: 1048576
+      stderr_max_bytes: 1048576
+      redirect_stderr: false
+"#;
+        let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
+        let res = config.resolve_programs();
+        assert!(
+            res.is_err(),
+            "Expected error for duplicate rotating log paths"
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Duplicate rotating log file path"));
+    }
 
     #[test]
     fn test_deny_unknown_fields() {

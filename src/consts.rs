@@ -175,6 +175,10 @@ pub const DEFAULT_IN_MEMORY_LOG_BUFFER_SIZE: usize = 1024 * 1024;
 pub_const!(DEFAULT_LOG_BACKUPS: usize = 10);
 // Maximum bytes buffered for an incomplete live-broadcast line before force-flush.
 pub_const!(MAX_LIVE_LOG_LINE_BYTES: usize = 64 * 1024);
+/// Maximum byte count returned or allocated in a single log read operation (16MB safety cap).
+pub const MAX_LOG_READ_LIMIT: usize = 16 * 1024 * 1024;
+/// Maximum buffer size for a single line read in log pump (1MB chunk safety cap to prevent OOM).
+pub const MAX_PUMP_CHUNK_SIZE: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Permissions / umask

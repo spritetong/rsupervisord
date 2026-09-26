@@ -9,7 +9,7 @@ use crate::logging::ring_buffer::RingBuffer;
 use crate::logging::types::{LogChannel, LogChunk};
 use crate::manager::{EventHub, LogEntry};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::task::JoinHandle;
 
 /// Builder for constructing asynchronous log pump tasks.
@@ -135,7 +135,11 @@ where
 
             loop {
                 buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
+                match (&mut reader)
+                    .take(crate::consts::MAX_PUMP_CHUNK_SIZE as u64)
+                    .read_until(b'\n', &mut buf)
+                    .await
+                {
                     Ok(0) => break, // EOF
                     Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

@@ -8,8 +8,6 @@ use crate::error::ProgramError;
 use crate::logging::backend::LogBackend;
 use crate::logging::types::LogChunk;
 use async_trait::async_trait;
-use file_rotate::suffix::{AppendCount, AppendTimestamp, DateFrom, FileLimit};
-use file_rotate::{ContentLimit, FileRotate, compression::Compression};
 use parking_lot::Mutex;
 use std::fs::File;
 use std::io::Write;
@@ -17,93 +15,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 enum RotatorInner {
-    Count(FileRotate<AppendCount>),
-    Timestamp(FileRotate<AppendTimestamp>),
-    Append(File),
+    Active {
+        file: Option<File>,
+        current_size: u64,
+    },
     Fallback {
         file: File,
         writes_since_fallback: usize,
     },
 }
 
-static PANIC_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
-
-thread_local! {
-    static SILENCE_PANIC_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn ensure_panic_hook_installed() {
-    PANIC_HOOK_INSTALLED.call_once(|| {
-        // Wrap whatever hook is currently registered. If external code later replaces
-        // the hook via std::panic::set_hook, silencing degrades to merely printing
-        // panic messages; catch_unwind still contains the panic either way.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if SILENCE_PANIC_HOOK.with(|s| s.get()) {
-                return;
-            }
-            prev_hook(info);
-        }));
-    });
-}
-
-fn with_silenced_panic<F, R>(f: F) -> std::thread::Result<R>
-where
-    F: FnOnce() -> R + std::panic::UnwindSafe,
-{
-    ensure_panic_hook_installed();
-    let prev = SILENCE_PANIC_HOOK.with(|s| s.replace(true));
-    let _guard = scopeguard::guard(prev, |prev| {
-        SILENCE_PANIC_HOOK.with(|s| s.set(prev));
-    });
-    std::panic::catch_unwind(f)
-}
-
-fn catch_file_rotate_panic<F: FnOnce() -> std::io::Result<usize> + std::panic::UnwindSafe>(
-    f: F,
-) -> std::io::Result<usize> {
-    match with_silenced_panic(f) {
-        Ok(io_res) => io_res,
-        Err(_) => Err(std::io::Error::other("file_rotate panicked during write")),
-    }
-}
-
-fn catch_file_rotate_flush<F: FnOnce() -> std::io::Result<()> + std::panic::UnwindSafe>(
-    f: F,
-) -> std::io::Result<()> {
-    match with_silenced_panic(f) {
-        Ok(io_res) => io_res,
-        Err(_) => Err(std::io::Error::other("file_rotate panicked during flush")),
-    }
-}
-
-impl Write for RotatorInner {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Count(w) => {
-                catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| w.write(buf)))
-            }
-            Self::Timestamp(w) => {
-                catch_file_rotate_panic(std::panic::AssertUnwindSafe(|| w.write(buf)))
-            }
-            Self::Append(w) => w.write(buf),
-            Self::Fallback { file, .. } => file.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Count(w) => catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| w.flush())),
-            Self::Timestamp(w) => {
-                catch_file_rotate_flush(std::panic::AssertUnwindSafe(|| w.flush()))
-            }
-            Self::Append(w) => w.flush(),
-            Self::Fallback { file, .. } => file.flush(),
-        }
-    }
-}
-
-/// Thread-safe resilient file rotator wrapping `file_rotate::FileRotate` or append-only `File`.
+/// Thread-safe resilient file rotator with standard library atomic rotation and append-only fallback.
 #[derive(Clone)]
 pub struct LogRotator {
     path: PathBuf,
@@ -128,10 +50,10 @@ impl LogRotator {
     fn build_inner(
         path: &Path,
         max_bytes: usize,
-        backups: usize,
-        timestamp_suffix: bool,
+        _backups: usize,
+        _timestamp_suffix: bool,
     ) -> Result<RotatorInner, ProgramError> {
-        let initial_file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
@@ -143,34 +65,16 @@ impl LogRotator {
                 ))
             })?;
 
-        let inner = if max_bytes == 0 {
-            // max_bytes == 0 means never rotate (Python and Go compatibility contract)
-            RotatorInner::Append(initial_file)
-        } else if timestamp_suffix {
-            let scheme = AppendTimestamp::with_format(
-                "%Y-%m-%dT%H-%M-%S",
-                FileLimit::MaxFiles(backups),
-                DateFrom::Now,
-            );
-            let rotator = FileRotate::new(
-                path,
-                scheme,
-                ContentLimit::Bytes(max_bytes),
-                Compression::None,
-                None,
-            );
-            RotatorInner::Timestamp(rotator)
+        let current_size = if max_bytes > 0 {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
         } else {
-            let rotator = FileRotate::new(
-                path,
-                AppendCount::new(backups),
-                ContentLimit::Bytes(max_bytes),
-                Compression::None,
-                None,
-            );
-            RotatorInner::Count(rotator)
+            0
         };
-        Ok(inner)
+
+        Ok(RotatorInner::Active {
+            file: Some(file),
+            current_size,
+        })
     }
 
     /// Creates a LogRotator with explicit timestamp_suffix selection.
@@ -218,11 +122,155 @@ impl LogRotator {
         self.write_all(&buf)
     }
 
+    fn rotate_on_disk(path: &Path, backups: usize, timestamp_suffix: bool) -> std::io::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        if backups == 0 {
+            let _ = std::fs::remove_file(path);
+            return Ok(());
+        }
+
+        if timestamp_suffix {
+            let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+            let mut target = PathBuf::from(format!("{}.{}", path.display(), timestamp));
+            if target.exists() {
+                for counter in 1.. {
+                    let candidate =
+                        PathBuf::from(format!("{}.{}-{}", path.display(), timestamp, counter));
+                    if !candidate.exists() {
+                        target = candidate;
+                        break;
+                    }
+                }
+            }
+            std::fs::rename(path, &target)?;
+
+            // Prune older files exceeding backups count
+            if let Some(parent) = path.parent() {
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let prefix = format!("{}.", filename);
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    let mut ts_files = Vec::new();
+                    for entry in entries.flatten() {
+                        if let Ok(ft) = entry.file_type()
+                            && ft.is_file()
+                        {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            if name.starts_with(&prefix) && name != filename {
+                                ts_files.push((name, entry.path()));
+                            }
+                        }
+                    }
+                    ts_files.sort_by(|a, b| a.0.cmp(&b.0));
+                    if ts_files.len() > backups {
+                        let to_remove = ts_files.len() - backups;
+                        for (_, old_path) in ts_files.into_iter().take(to_remove) {
+                            let _ = std::fs::remove_file(old_path);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Numeric rotation: .1, .2, ..., .backups
+            let oldest = PathBuf::from(format!("{}.{}", path.display(), backups));
+            if oldest.exists() {
+                std::fs::remove_file(&oldest)?;
+            }
+            for i in (1..backups).rev() {
+                let src = PathBuf::from(format!("{}.{}", path.display(), i));
+                let dst = PathBuf::from(format!("{}.{}", path.display(), i + 1));
+                if src.exists() {
+                    if dst.exists() {
+                        std::fs::remove_file(&dst)?;
+                    }
+                    std::fs::rename(&src, &dst)?;
+                }
+            }
+            let dst_1 = PathBuf::from(format!("{}.1", path.display()));
+            if dst_1.exists() {
+                std::fs::remove_file(&dst_1)?;
+            }
+            std::fs::rename(path, &dst_1)?;
+        }
+        Ok(())
+    }
+
+    fn write_fallback(
+        &self,
+        guard: &mut RotatorInner,
+        data: &[u8],
+        reason: &str,
+    ) -> std::io::Result<()> {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = self
+            .last_fallback_warn_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let should_warn = now_epoch.saturating_sub(last) >= 5;
+        if should_warn {
+            self.last_fallback_warn_epoch
+                .store(now_epoch, std::sync::atomic::Ordering::Relaxed);
+            let already_fallback = matches!(*guard, RotatorInner::Fallback { .. });
+            if already_fallback {
+                eprintln!(
+                    "[rsupervisord] Warning: log write failed while already in append-only mode for '{}': {}",
+                    self.path.display(),
+                    reason
+                );
+            } else {
+                eprintln!(
+                    "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
+                    self.path.display(),
+                    reason
+                );
+            }
+        }
+
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            Ok(mut file) => match file.write_all(data) {
+                Ok(()) => {
+                    *guard = RotatorInner::Fallback {
+                        file,
+                        writes_since_fallback: 0,
+                    };
+                    Ok(())
+                }
+                Err(e) => {
+                    if should_warn {
+                        eprintln!(
+                            "[rsupervisord] Warning: append-only fallback write failed for '{}': {}",
+                            self.path.display(),
+                            e
+                        );
+                    }
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                if should_warn {
+                    eprintln!(
+                        "[rsupervisord] Warning: append-only fallback open failed for '{}': {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Writes a raw byte buffer to the rotating log file with automatic recovery.
     pub fn write_all(&self, mut data: &[u8]) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
 
-        // Check if we can recover from Fallback back to standard FileRotate
+        // Check if we can recover from Fallback back to standard Active rotator
         if let RotatorInner::Fallback {
             ref mut writes_since_fallback,
             ..
@@ -230,113 +278,113 @@ impl LogRotator {
         {
             *writes_since_fallback += 1;
             if *writes_since_fallback >= 50 {
-                let recovered_res = with_silenced_panic(std::panic::AssertUnwindSafe(|| {
-                    Self::build_inner(
-                        &self.path,
-                        self.max_bytes,
-                        self.backups,
-                        self.timestamp_suffix,
-                    )
-                }));
-                match recovered_res {
-                    Ok(Ok(recovered)) => {
+                match Self::build_inner(
+                    &self.path,
+                    self.max_bytes,
+                    self.backups,
+                    self.timestamp_suffix,
+                ) {
+                    Ok(recovered) => {
                         *guard = recovered;
                     }
-                    _ => {
+                    Err(_) => {
                         *writes_since_fallback = 0;
                     }
                 }
             }
         }
 
-        while !data.is_empty() {
-            match guard.write(data) {
-                Ok(0) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer to log rotator",
-                    ));
-                }
-                Ok(n) => {
-                    data = &data[n..];
-                }
-                Err(err) => {
-                    // Rate-limit warnings to stderr (at most once every 5 seconds)
-                    let now_epoch = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let last = self
-                        .last_fallback_warn_epoch
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let should_warn = now_epoch.saturating_sub(last) >= 5;
-                    if should_warn {
-                        self.last_fallback_warn_epoch
-                            .store(now_epoch, std::sync::atomic::Ordering::Relaxed);
+        match *guard {
+            RotatorInner::Active {
+                ref mut file,
+                ref mut current_size,
+            } => {
+                if self.max_bytes == 0 {
+                    let f = file
+                        .as_mut()
+                        .ok_or_else(|| std::io::Error::other("file handle missing"))?;
+                    if let Err(e) = f.write_all(data) {
+                        return self.write_fallback(&mut guard, data, &e.to_string());
                     }
-                    let already_fallback = matches!(*guard, RotatorInner::Fallback { .. });
-                    match std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&self.path)
-                    {
-                        Ok(mut file) => match file.write_all(data) {
-                            Ok(()) => {
-                                if should_warn {
-                                    if already_fallback {
-                                        eprintln!(
-                                            "[rsupervisord] Warning: log write failed while already in append-only mode for '{}': {}",
-                                            self.path.display(),
-                                            err
-                                        );
-                                    } else {
-                                        eprintln!(
-                                            "[rsupervisord] Warning: log write/rotation failed for '{}': {}; falling back to append-only mode",
-                                            self.path.display(),
-                                            err
-                                        );
-                                    }
-                                }
-                                *guard = RotatorInner::Fallback {
-                                    file,
-                                    writes_since_fallback: 0,
-                                };
-                                return Ok(());
+                    *current_size += data.len() as u64;
+                    return Ok(());
+                }
+
+                while !data.is_empty() {
+                    if *current_size + data.len() as u64 > self.max_bytes as u64 {
+                        let bytes_left =
+                            (self.max_bytes as u64).saturating_sub(*current_size) as usize;
+                        if bytes_left > 0 {
+                            let f = file
+                                .as_mut()
+                                .ok_or_else(|| std::io::Error::other("file handle missing"))?;
+                            if let Err(e) = f.write_all(&data[..bytes_left]) {
+                                return self.write_fallback(&mut guard, data, &e.to_string());
                             }
-                            Err(fallback_err) => {
-                                if should_warn {
-                                    eprintln!(
-                                        "[rsupervisord] Warning: log write/rotation failed for '{}': {}; append-only fallback write failed: {}",
-                                        self.path.display(),
-                                        err,
-                                        fallback_err
-                                    );
-                                }
-                                return Err(fallback_err);
-                            }
-                        },
-                        Err(fallback_err) => {
-                            if should_warn {
-                                eprintln!(
-                                    "[rsupervisord] Warning: log write/rotation failed for '{}': {}; append-only fallback could not be opened: {}",
-                                    self.path.display(),
-                                    err,
-                                    fallback_err
-                                );
-                            }
-                            return Err(fallback_err);
+                            *current_size += bytes_left as u64;
+                            data = &data[bytes_left..];
                         }
+
+                        // Close current file handle so Windows allows renaming
+                        if let Some(mut f) = file.take() {
+                            let _ = f.flush();
+                        }
+
+                        if let Err(e) =
+                            Self::rotate_on_disk(&self.path, self.backups, self.timestamp_suffix)
+                        {
+                            return self.write_fallback(&mut guard, data, &e.to_string());
+                        }
+
+                        match std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(&self.path)
+                        {
+                            Ok(new_file) => {
+                                *file = Some(new_file);
+                                *current_size = 0;
+                            }
+                            Err(e) => {
+                                return self.write_fallback(&mut guard, data, &e.to_string());
+                            }
+                        }
+                    } else {
+                        let f = file
+                            .as_mut()
+                            .ok_or_else(|| std::io::Error::other("file handle missing"))?;
+                        if let Err(e) = f.write_all(data) {
+                            return self.write_fallback(&mut guard, data, &e.to_string());
+                        }
+                        *current_size += data.len() as u64;
+                        break;
                     }
                 }
+                Ok(())
+            }
+            RotatorInner::Fallback { ref mut file, .. } => {
+                if let Err(e) = file.write_all(data) {
+                    return self.write_fallback(&mut guard, data, &e.to_string());
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     /// Flushes any buffered content to disk.
     pub fn flush(&self) -> std::io::Result<()> {
         let mut guard = self.inner.lock();
-        let _ = guard.flush();
+        match *guard {
+            RotatorInner::Active { ref mut file, .. } => {
+                if let Some(f) = file {
+                    f.flush()?;
+                }
+            }
+            RotatorInner::Fallback { ref mut file, .. } => {
+                file.flush()?;
+            }
+        }
         Ok(())
     }
 
@@ -587,12 +635,12 @@ mod tests {
                 .unwrap();
         }
 
-        // 3. Verify inner state has recovered back to RotatorInner::Count
+        // 3. Verify inner state has recovered back to RotatorInner::Active
         {
             let guard = rotator.inner.lock();
             assert!(
-                matches!(*guard, RotatorInner::Count(_)),
-                "Expected rotator to recover back to Count variant"
+                matches!(*guard, RotatorInner::Active { .. }),
+                "Expected rotator to recover back to Active variant"
             );
         }
 
@@ -612,48 +660,54 @@ mod tests {
     }
 
     #[test]
-    fn test_log_rotator_natural_panic_entry_to_fallback() {
+    fn test_log_rotator_blocked_target_entry_to_fallback() {
         let dir = tempdir().unwrap();
         let log_file = dir.path().join("panic_entry.log");
-        let rotator = LogRotator::with_options(&log_file, 50, 2, false).unwrap();
+        let rotator = LogRotator::with_options(&log_file, 50, 1, false).unwrap();
 
-        // Create an on-disk suffix that the rotator never scanned, mimicking the orphaned
-        // backup produced when handle_old_files fails to remove a locked file. The next
-        // rotation then trips file_rotate's assert!(!new_path.exists()) panic for real.
-        std::fs::write(dir.path().join("panic_entry.log.1"), b"orphan").unwrap();
+        // Create an unremovable orphan file (exclusive lock on Windows, unwritable dir on Unix)
+        let orphan = dir.path().join("panic_entry.log.1");
+        std::fs::write(&orphan, b"orphan").unwrap();
 
-        // The panic is caught, silenced, and the write lands via append-only fallback.
+        #[cfg(windows)]
+        let _lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(&orphan)
+                .unwrap()
+        };
+
+        #[cfg(not(windows))]
+        {
+            // On Unix, make file unremovable by removing write permissions on parent dir
+            let mut dir_perms = std::fs::metadata(dir.path()).unwrap().permissions();
+            dir_perms.set_readonly(true);
+            let _ = std::fs::set_permissions(dir.path(), dir_perms);
+        }
+
+        // When rotation is blocked because target cannot be removed, rotator enters fallback
         rotator.write_all(&[b'a'; 60]).unwrap();
 
         {
             let guard = rotator.inner.lock();
             assert!(
                 matches!(*guard, RotatorInner::Fallback { .. }),
-                "Real file_rotate panic must transition the rotator into Fallback"
+                "Blocked rotation must transition the rotator into Fallback mode without panicking"
             );
         }
 
         // The fallback file remains writable afterwards.
         rotator.write_line("still writable").unwrap();
-    }
 
-    #[test]
-    fn test_thread_isolated_panic_silencing() {
-        // Test that with_silenced_panic catches a panic without propagating
-        let res = with_silenced_panic(std::panic::AssertUnwindSafe(|| {
-            // While this thread is silenced, other threads must observe the flag as false.
-            let seen_on_other_thread = std::thread::spawn(|| SILENCE_PANIC_HOOK.with(|s| s.get()))
-                .join()
-                .unwrap();
-            assert!(
-                !seen_on_other_thread,
-                "silence flag must remain thread-local"
-            );
-            panic!("test panic that should be caught and silenced");
-        }));
-        assert!(res.is_err());
-
-        // Verify that SILENCE_PANIC_HOOK is restored afterwards
-        assert!(!SILENCE_PANIC_HOOK.with(|s| s.get()));
+        #[cfg(not(windows))]
+        {
+            let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(dir.path(), perms);
+        }
     }
 }

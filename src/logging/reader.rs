@@ -71,7 +71,8 @@ impl LogFileReader {
 
         use std::io::{Read, Seek, SeekFrom};
         file.seek(SeekFrom::Start(pos as u64))?;
-        let mut buf = Vec::with_capacity(to_read as usize);
+        let alloc_cap = (to_read as usize).min(crate::consts::MAX_LOG_READ_LIMIT);
+        let mut buf = Vec::with_capacity(alloc_cap);
         std::io::Read::take(&mut file, to_read as u64).read_to_end(&mut buf)?;
 
         Ok(String::from_utf8_lossy(&buf).to_string())
@@ -120,7 +121,8 @@ impl LogFileReader {
                     "length must be 0 when offset is negative".to_string(),
                 ));
             }
-            let abs_offset = offset.unsigned_abs() as i64;
+            let max_read = (crate::consts::MAX_LOG_READ_LIMIT as u64).min(total_len.max(0) as u64);
+            let abs_offset = offset.unsigned_abs().min(max_read) as i64;
             let pos = (total_len - abs_offset).max(0);
             let to_read = (total_len - pos).min(abs_offset);
             Ok((pos, to_read))
@@ -130,13 +132,14 @@ impl LogFileReader {
                     "length cannot be negative".to_string(),
                 ));
             }
-            let pos = offset.min(total_len);
+            let pos = offset.clamp(0, total_len.max(0));
             let remaining = total_len - pos;
             let to_read = if length == 0 {
                 remaining
             } else {
                 length.min(remaining)
             };
+            let to_read = to_read.min(crate::consts::MAX_LOG_READ_LIMIT as i64);
             Ok((pos, to_read))
         }
     }
@@ -144,19 +147,20 @@ impl LogFileReader {
     /// Helper to compute `(offset, length, overflow)` for XML-RPC tail semantics.
     pub fn compute_tail_window(sz: i64, offset: i64, length: i64) -> (i64, i64, bool) {
         let mut overflow = false;
-        let mut off = offset;
-        let mut len = length;
+        let mut off = offset.max(0);
+        let mut len = length.clamp(0, crate::consts::MAX_LOG_READ_LIMIT as i64);
 
-        if sz > (off + len) {
+        if sz > off.saturating_add(len) {
             overflow = true;
-            off = sz - 1;
+            off = sz.saturating_sub(1);
         }
 
-        if (off + len) > sz {
-            if off > (sz - 1) {
+        if off.saturating_add(len) > sz {
+            if off > sz.saturating_sub(1) {
                 len = 0;
             }
-            off = sz - len;
+            off = (sz - len).max(0);
+            len = (sz - off).max(0);
         }
 
         if off < 0 {
@@ -194,7 +198,8 @@ impl LogFileReader {
             if file.seek(SeekFrom::Start(off as u64)).is_err() {
                 return (String::new(), offset, false);
             }
-            let mut buf = Vec::with_capacity(len as usize);
+            let alloc_cap = (len as usize).min(crate::consts::MAX_LOG_READ_LIMIT);
+            let mut buf = Vec::with_capacity(alloc_cap);
             match std::io::Read::take(&mut file, len as u64).read_to_end(&mut buf) {
                 Ok(_) => buf,
                 Err(_) => Vec::new(),
@@ -279,5 +284,42 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for InMemoryLogWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_read_window_extreme_boundaries() {
+        // offset == i64::MIN must not panic with overflow
+        let res = LogFileReader::compute_read_window(100, i64::MIN, 0);
+        assert!(res.is_ok());
+        let (pos, to_read) = res.unwrap();
+        assert_eq!(pos, 0);
+        assert_eq!(to_read, 100);
+
+        // length == i64::MAX must be clamped by MAX_LOG_READ_LIMIT
+        let res = LogFileReader::compute_read_window(100, 0, i64::MAX);
+        assert!(res.is_ok());
+        let (pos, to_read) = res.unwrap();
+        assert_eq!(pos, 0);
+        assert_eq!(to_read, 100);
+    }
+
+    #[test]
+    fn test_compute_tail_window_extreme_boundaries() {
+        // length == i64::MAX with sz == 100 must not panic on addition
+        let (off, len, overflow) = LogFileReader::compute_tail_window(100, 0, i64::MAX);
+        assert_eq!(off, 0);
+        assert!(len <= 100);
+        assert!(!overflow);
+
+        // offset == i64::MAX
+        let (off, len, overflow) = LogFileReader::compute_tail_window(100, i64::MAX, 10);
+        assert!(off <= 100);
+        assert_eq!(len, 0);
+        assert!(!overflow);
     }
 }

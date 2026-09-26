@@ -107,13 +107,29 @@ impl ServerEngine {
             });
         }
 
-        tokio::select! {
-            biased;
+        loop {
+            tokio::select! {
+                biased;
 
-            _ = cancel_token.cancelled() => {
-                tracing::info!("Server engine shutdown triggered");
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Server engine shutdown triggered");
+                    break;
+                }
+                res = set.join_next() => {
+                    match res {
+                        Some(Ok(())) => {
+                            tracing::warn!("A server listener task finished");
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("A server listener task panicked or failed: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("All server listener tasks have ended");
+                            break;
+                        }
+                    }
+                }
             }
-            _ = set.join_next() => {}
         }
 
         // Immediately abort remaining listener tasks so blocking accepts don't stall daemon teardown

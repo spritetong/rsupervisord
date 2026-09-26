@@ -73,3 +73,15 @@ pub async fn wait_for_shutdown_signal() {
         windows::wait_for_windows_shutdown_signal().await;
     }
 }
+
+/// Creates a platform reload signal stream (SIGHUP on Unix).
+#[cfg(unix)]
+pub fn reload_signal_stream() -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to register SIGHUP reload signal: {}", e);
+            None
+        }
+    }
+}

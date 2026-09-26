@@ -240,7 +240,11 @@ impl SupervisorDaemon {
         }
 
         // Spawn server engine
-        let server = ServerEngine::new(manager_handle, Some(config_path), config.server);
+        let server = ServerEngine::new(
+            manager_handle.clone(),
+            Some(config_path.clone()),
+            config.server,
+        );
         let server_token = cancel_token.clone();
         let server_handle = tokio::spawn(async move {
             if let Err(e) = server.run(server_token).await {
@@ -261,15 +265,46 @@ impl SupervisorDaemon {
             });
         }
 
-        // Wait cooperatively for OS shutdown signal or cancellation
-        tokio::select! {
-            biased;
+        // Main daemon loop: handle reload signals (SIGHUP) and wait cooperatively for OS shutdown signal or cancellation
+        #[cfg(unix)]
+        let mut reload_stream = crate::platform::reload_signal_stream();
 
-            _ = cancel_token.cancelled() => {
-                tracing::info!("Daemon cancellation triggered");
-            }
-            _ = crate::platform::wait_for_shutdown_signal() => {
-                tracing::info!("Shutdown signal received, initiating graceful shutdown...");
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Daemon cancellation triggered");
+                    break;
+                }
+                _ = crate::platform::wait_for_shutdown_signal() => {
+                    tracing::info!("Shutdown signal received, initiating graceful shutdown...");
+                    break;
+                }
+                _ = async {
+                    #[cfg(unix)]
+                    if let Some(ref mut s) = reload_stream {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                    #[cfg(not(unix))]
+                    std::future::pending::<()>().await;
+                } => {
+                    tracing::info!("SIGHUP reload signal received; reloading configuration from {:?}", config_path);
+                    match SupervisorConfig::from_file(&config_path) {
+                        Ok(new_config) => {
+                            if let Err(e) = manager_handle.reload_config(new_config).await {
+                                tracing::error!("Failed to apply reloaded configuration on SIGHUP: {}", e);
+                            } else {
+                                tracing::info!("Configuration reload completed successfully on SIGHUP");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to parse configuration on SIGHUP: {}", e);
+                        }
+                    }
+                }
             }
         }
 

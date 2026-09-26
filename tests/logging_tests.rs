@@ -709,11 +709,28 @@ programs:
     let config = SupervisorConfig::from_yaml_str(yaml).unwrap();
     let resolved = config.resolve_programs();
     assert!(
-        resolved.is_ok(),
-        "resolve_programs should succeed while logging warning"
+        resolved.is_err(),
+        "resolve_programs should reject duplicate rotating log destinations"
     );
-    let resolved_map = resolved.unwrap();
-    assert_eq!(resolved_map.len(), 2);
+    let err = resolved.unwrap_err().to_string();
+    assert!(err.contains("Duplicate rotating log file path"));
+
+    // When max_bytes == 0 (append-only), sharing is permitted
+    let yaml_append = r#"
+programs:
+  prog1:
+    command: "echo 1"
+    logs:
+      stdout: "shared_append.log"
+      stdout_max_bytes: 0
+  prog2:
+    command: "echo 2"
+    logs:
+      stdout: "shared_append.log"
+      stdout_max_bytes: 0
+"#;
+    let config_append = SupervisorConfig::from_yaml_str(yaml_append).unwrap();
+    assert!(config_append.resolve_programs().is_ok());
 }
 
 #[test]
