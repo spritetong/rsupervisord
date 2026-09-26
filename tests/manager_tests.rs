@@ -535,3 +535,88 @@ programs:
 
     manager.shutdown().await.expect("manager shutdown");
 }
+
+#[tokio::test]
+async fn test_manager_timeout_calculations_exact_values() {
+    let yaml = format!(
+        r#"
+groups:
+  worker:
+    programs:
+      - w1
+      - w2
+      - w3
+
+programs:
+  w1:
+    command: "{cmd}"
+    stop_wait_secs: 5
+  w2:
+    command: "{cmd}"
+    stop_wait_secs: 5
+  w3:
+    command: "{cmd}"
+    stop_wait_secs: 5
+  solo:
+    command: "{cmd}"
+    stop_wait_secs: 8
+"#,
+        cmd = get_sleep_cmd(10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse yaml");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let handle = manager.handle();
+
+    // 1. Single program: solo
+    // start: 25s * 1 + 10s = 35s
+    assert_eq!(
+        handle.compute_start_program_timeout("solo"),
+        std::time::Duration::from_secs(35)
+    );
+    // stop with default grace (8s): (8 + 15 + 2 + 15) + 10 = 50s
+    assert_eq!(
+        handle.compute_stop_program_timeout("solo", None),
+        std::time::Duration::from_secs(50)
+    );
+    // stop with custom grace (20s): (20 + 15 + 2 + 15) + 10 = 62s
+    assert_eq!(
+        handle.compute_stop_program_timeout("solo", Some(std::time::Duration::from_secs(20))),
+        std::time::Duration::from_secs(62)
+    );
+
+    // 2. Wildcard program: worker:* matches 3 programs
+    // start: 25s * 3 + 10s = 85s (was 30s before fix)
+    assert_eq!(
+        handle.compute_start_program_timeout("worker:*"),
+        std::time::Duration::from_secs(85)
+    );
+    // stop: 3 * (5 + 15 + 2 + 15) + 10 = 111s + 10s = 121s (was 37s before fix)
+    assert_eq!(
+        handle.compute_stop_program_timeout("worker:*", None),
+        std::time::Duration::from_secs(121)
+    );
+
+    // 3. Group operations: worker matches 3 programs
+    assert_eq!(
+        handle.compute_start_group_timeout("worker"),
+        std::time::Duration::from_secs(85)
+    );
+    assert_eq!(
+        handle.compute_stop_group_timeout("worker", None),
+        std::time::Duration::from_secs(121)
+    );
+    // restart: stop(3 * 47 = 141) + start(85) = 226s
+    assert_eq!(
+        handle.compute_restart_group_timeout("worker", None),
+        std::time::Duration::from_secs(226)
+    );
+
+    // 4. Add process group scaling: worker has 3 candidates in pending_configs
+    assert_eq!(
+        handle.compute_add_process_group_timeout("worker"),
+        std::time::Duration::from_secs(85)
+    );
+
+    manager.shutdown().await.expect("manager shutdown");
+}

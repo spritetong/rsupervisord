@@ -163,6 +163,7 @@ pub struct ManagerHandle {
     event_hub: crate::manager::EventHub,
     server_identifier: String,
     shared_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
+    shared_pending_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
 }
 
 impl ManagerHandle {
@@ -178,12 +179,19 @@ impl ManagerHandle {
             event_hub: crate::manager::EventHub::default(),
             server_identifier: "rsupervisord-compat".to_string(),
             shared_configs: Arc::new(RwLock::new(HashMap::new())),
+            shared_pending_configs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    fn find_group_targets(&self, group: &str) -> Vec<ProgramConfig> {
-        let trimmed = group.trim();
+    pub(crate) fn find_targets_for_program(&self, name: &str) -> Vec<ProgramConfig> {
+        let trimmed = name.trim();
         let configs = self.shared_configs.read();
+        // 1. Exact match on program name first (e.g. direct instance name "worker:0" or "single_prog")
+        if let Some(cfg) = configs.get(trimmed) {
+            return vec![cfg.clone()];
+        }
+
+        // 2. Colon-separated pattern e.g. "group:*" or "group:name"
         if let Some((group_part, prog_part)) = trimmed.split_once(':') {
             let mut matches = Vec::new();
             for (p_name, cfg) in configs.iter() {
@@ -199,19 +207,204 @@ impl ManagerHandle {
                 return matches;
             }
         }
+
+        // 3. Group match e.g. "worker" matches all instances with group == "worker"
         let matches: Vec<ProgramConfig> = configs
             .values()
             .filter(|cfg| cfg.group == trimmed)
             .cloned()
             .collect();
-        if !matches.is_empty() {
-            return matches;
-        }
-        if let Some(cfg) = configs.get(trimmed) {
-            vec![cfg.clone()]
+        matches
+    }
+
+    pub(crate) fn find_targets_for_group(&self, group: &str) -> Vec<ProgramConfig> {
+        let trimmed = group.trim();
+        let wildcard = format!("{}:*", trimmed);
+        let targets = self.find_targets_for_program(&wildcard);
+        if !targets.is_empty() {
+            targets
         } else {
-            Vec::new()
+            self.find_targets_for_program(trimmed)
         }
+    }
+
+    pub fn compute_start_program_timeout(&self, name: &str) -> Duration {
+        let targets = self.find_targets_for_program(name);
+        let count = targets.len().max(1);
+        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
+        per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_ACTION)
+            .min(MAX_TIMEOUT)
+    }
+
+    pub fn compute_stop_program_timeout(
+        &self,
+        name: &str,
+        grace_period: Option<Duration>,
+    ) -> Duration {
+        let targets = self.find_targets_for_program(name);
+        if targets.is_empty() {
+            grace_period
+                .unwrap_or(DEFAULT_STOP_WAIT)
+                .checked_add(DEFAULT_HOOK_TIMEOUT)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(DRAIN_TIMEOUT)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(STOP_GRACE_EXTRA)
+                .unwrap_or(MAX_TIMEOUT)
+                .max(AWAIT_ACTION)
+                .min(MAX_TIMEOUT)
+        } else {
+            let total_dur: Duration = targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(STOP_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
+            total_dur
+                .saturating_add(AWAIT_QUERY)
+                .max(AWAIT_ACTION)
+                .min(MAX_TIMEOUT)
+        }
+    }
+
+    pub fn compute_restart_program_timeout(
+        &self,
+        name: &str,
+        grace_period: Option<Duration>,
+    ) -> Duration {
+        let targets = self.find_targets_for_program(name);
+        let count = targets.len().max(1);
+        let start_dur = (DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY))
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY);
+        let stop_dur = if targets.is_empty() {
+            grace_period
+                .unwrap_or(DEFAULT_STOP_WAIT)
+                .checked_add(DEFAULT_HOOK_TIMEOUT * 2)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(DRAIN_TIMEOUT)
+                .unwrap_or(MAX_TIMEOUT)
+                .checked_add(RESTART_GRACE_EXTRA)
+                .unwrap_or(MAX_TIMEOUT)
+        } else {
+            targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(RESTART_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d))
+        };
+        stop_dur
+            .saturating_add(start_dur)
+            .max(AWAIT_ACTION)
+            .min(MAX_TIMEOUT)
+    }
+
+    pub fn compute_start_group_timeout(&self, group: &str) -> Duration {
+        let targets = self.find_targets_for_group(group);
+        let count = targets.len().max(1);
+        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
+        per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_GROUP)
+            .min(MAX_TIMEOUT)
+    }
+
+    pub fn compute_stop_group_timeout(
+        &self,
+        group: &str,
+        grace_period: Option<Duration>,
+    ) -> Duration {
+        let targets = self.find_targets_for_group(group);
+        if targets.is_empty() {
+            AWAIT_GROUP
+        } else {
+            let total_dur: Duration = targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(STOP_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
+            total_dur
+                .saturating_add(AWAIT_QUERY)
+                .max(AWAIT_GROUP)
+                .min(MAX_TIMEOUT)
+        }
+    }
+
+    pub fn compute_restart_group_timeout(
+        &self,
+        group: &str,
+        grace_period: Option<Duration>,
+    ) -> Duration {
+        let targets = self.find_targets_for_group(group);
+        let count = targets.len().max(1);
+        let start_dur = (DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY))
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY);
+        let stop_dur = if targets.is_empty() {
+            AWAIT_GROUP
+        } else {
+            targets
+                .iter()
+                .map(|cfg| {
+                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
+                    grace
+                        .checked_add(DEFAULT_HOOK_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(DRAIN_TIMEOUT)
+                        .unwrap_or(MAX_TIMEOUT)
+                        .checked_add(RESTART_GRACE_EXTRA)
+                        .unwrap_or(MAX_TIMEOUT)
+                })
+                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d))
+        };
+        stop_dur
+            .saturating_add(start_dur)
+            .max(AWAIT_BULK)
+            .min(MAX_TIMEOUT)
+    }
+
+    pub fn compute_add_process_group_timeout(&self, group: &str) -> Duration {
+        let count = {
+            self.shared_pending_configs
+                .read()
+                .values()
+                .filter(|cfg| cfg.group == group)
+                .count()
+                .max(1)
+        };
+        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
+        per_proc
+            .saturating_mul(count as u32)
+            .saturating_add(AWAIT_QUERY)
+            .max(AWAIT_GROUP)
+            .min(MAX_TIMEOUT)
     }
 
     pub fn server_identifier(&self) -> &str {
@@ -250,10 +443,12 @@ impl ManagerHandle {
     }
 
     pub async fn start_program(&self, name: impl Into<String>) -> Result<(), ProgramError> {
+        let name_str = name.into();
+        let timeout_dur = self.compute_start_program_timeout(&name_str);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StartProgram {
-                name: name.into(),
+                name: name_str,
                 reply: reply_tx,
             })
             .await
@@ -261,7 +456,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_ACTION;
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -278,10 +472,12 @@ impl ManagerHandle {
         name: impl Into<String>,
         grace_period: Option<Duration>,
     ) -> Result<(), ProgramError> {
+        let name_str = name.into();
+        let timeout_dur = self.compute_stop_program_timeout(&name_str, grace_period);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StopProgram {
-                name: name.into(),
+                name: name_str,
                 grace_period,
                 reply: reply_tx,
             })
@@ -290,14 +486,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = grace_period
-            .unwrap_or(DEFAULT_STOP_WAIT)
-            .checked_add(DEFAULT_HOOK_TIMEOUT)
-            .unwrap_or(MAX_TIMEOUT)
-            .checked_add(DRAIN_TIMEOUT)
-            .unwrap_or(MAX_TIMEOUT)
-            .checked_add(STOP_GRACE_EXTRA)
-            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -314,10 +502,12 @@ impl ManagerHandle {
         name: impl Into<String>,
         grace_period: Option<Duration>,
     ) -> Result<(), ProgramError> {
+        let name_str = name.into();
+        let timeout_dur = self.compute_restart_program_timeout(&name_str, grace_period);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::RestartProgram {
-                name: name.into(),
+                name: name_str,
                 grace_period,
                 reply: reply_tx,
             })
@@ -326,14 +516,6 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = grace_period
-            .unwrap_or(DEFAULT_STOP_WAIT)
-            .checked_add(DEFAULT_HOOK_TIMEOUT * 2)
-            .unwrap_or(MAX_TIMEOUT)
-            .checked_add(DRAIN_TIMEOUT)
-            .unwrap_or(MAX_TIMEOUT)
-            .checked_add(RESTART_GRACE_EXTRA)
-            .unwrap_or(MAX_TIMEOUT);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -376,15 +558,7 @@ impl ManagerHandle {
 
     pub async fn start_group(&self, group: impl Into<String>) -> Result<Vec<String>, ProgramError> {
         let group_str = group.into();
-        let targets = self.find_group_targets(&group_str);
-        let count = targets.len().max(1);
-        let per_proc = DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY);
-        let timeout_dur = per_proc
-            .saturating_mul(count as u32)
-            .saturating_add(AWAIT_QUERY)
-            .max(AWAIT_GROUP)
-            .min(MAX_TIMEOUT);
-
+        let timeout_dur = self.compute_start_group_timeout(&group_str);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StartGroup {
@@ -413,29 +587,7 @@ impl ManagerHandle {
         grace_period: Option<Duration>,
     ) -> Result<Vec<String>, ProgramError> {
         let group_str = group.into();
-        let targets = self.find_group_targets(&group_str);
-        let timeout_dur = if targets.is_empty() {
-            AWAIT_GROUP
-        } else {
-            let total_dur: Duration = targets
-                .iter()
-                .map(|cfg| {
-                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
-                    grace
-                        .checked_add(DEFAULT_HOOK_TIMEOUT)
-                        .unwrap_or(MAX_TIMEOUT)
-                        .checked_add(DRAIN_TIMEOUT)
-                        .unwrap_or(MAX_TIMEOUT)
-                        .checked_add(STOP_GRACE_EXTRA)
-                        .unwrap_or(MAX_TIMEOUT)
-                })
-                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d));
-            total_dur
-                .saturating_add(AWAIT_QUERY)
-                .max(AWAIT_GROUP)
-                .min(MAX_TIMEOUT)
-        };
-
+        let timeout_dur = self.compute_stop_group_timeout(&group_str, grace_period);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::StopGroup {
@@ -465,33 +617,7 @@ impl ManagerHandle {
         grace_period: Option<Duration>,
     ) -> Result<Vec<String>, ProgramError> {
         let group_str = group.into();
-        let targets = self.find_group_targets(&group_str);
-        let count = targets.len().max(1);
-        let start_dur = (DEFAULT_HOOK_TIMEOUT.saturating_add(AWAIT_QUERY))
-            .saturating_mul(count as u32)
-            .saturating_add(AWAIT_QUERY);
-        let stop_dur = if targets.is_empty() {
-            AWAIT_GROUP
-        } else {
-            targets
-                .iter()
-                .map(|cfg| {
-                    let grace = grace_period.unwrap_or(cfg.stop_wait_secs);
-                    grace
-                        .checked_add(DEFAULT_HOOK_TIMEOUT)
-                        .unwrap_or(MAX_TIMEOUT)
-                        .checked_add(DRAIN_TIMEOUT)
-                        .unwrap_or(MAX_TIMEOUT)
-                        .checked_add(RESTART_GRACE_EXTRA)
-                        .unwrap_or(MAX_TIMEOUT)
-                })
-                .fold(Duration::ZERO, |acc, d| acc.saturating_add(d))
-        };
-        let timeout_dur = stop_dur
-            .saturating_add(start_dur)
-            .max(AWAIT_BULK)
-            .min(MAX_TIMEOUT);
-
+        let timeout_dur = self.compute_restart_group_timeout(&group_str, grace_period);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ManagerCommand::RestartGroup {
@@ -673,7 +799,7 @@ impl ManagerHandle {
                 name: "manager".to_string(),
             })?;
 
-        let timeout_dur = AWAIT_GROUP;
+        let timeout_dur = self.compute_add_process_group_timeout(name);
         tokio::time::timeout(timeout_dur, reply_rx)
             .await
             .map_err(|_| ProgramError::Timeout {
@@ -1162,6 +1288,7 @@ impl SupervisorManagerBuilder {
             .to_string();
 
         let shared_configs = Arc::new(RwLock::new(programs_map.clone()));
+        let shared_pending_configs = Arc::new(RwLock::new(programs_map.clone()));
 
         let handle = ManagerHandle {
             command_tx,
@@ -1170,6 +1297,7 @@ impl SupervisorManagerBuilder {
             event_hub: event_hub.clone(),
             server_identifier: server_identifier.clone(),
             shared_configs: shared_configs.clone(),
+            shared_pending_configs: shared_pending_configs.clone(),
         };
 
         let mut event_pools = HashMap::new();
@@ -1256,6 +1384,7 @@ impl SupervisorManagerBuilder {
             configs: programs_map,
             shared_configs,
             pending_configs,
+            shared_pending_configs,
             dag,
             cron_table,
             watch_handle,
@@ -1346,6 +1475,7 @@ struct ManagerActor {
     configs: HashMap<String, ProgramConfig>,
     shared_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
     pending_configs: HashMap<String, ProgramConfig>,
+    shared_pending_configs: Arc<RwLock<HashMap<String, ProgramConfig>>>,
     dag: DependencyGraph,
     cron_table: crate::manager::cron::CronTable,
     watch_handle: crate::manager::WatchServiceHandle,
@@ -1888,6 +2018,7 @@ impl ManagerActor {
         // The newly parsed config becomes the pending/source config for
         // addProcessGroup/removeProcessGroup, mirroring process_group_configs.
         self.pending_configs = new_programs_map.clone();
+        *self.shared_pending_configs.write() = self.pending_configs.clone();
 
         let diff = ConfigDiff::compute(&self.configs, &new_programs_map);
 
@@ -2005,6 +2136,7 @@ impl ManagerActor {
         // 1. Stage the new generation before touching the running one.
         // On failure, programs, configs, event pools, and the DAG remain untouched.
         self.pending_configs = new_programs_map.clone();
+        *self.shared_pending_configs.write() = self.pending_configs.clone();
         let mut staged_pools = HashMap::new();
         let mut staged = Vec::with_capacity(new_programs_map.len());
         for (name, cfg) in &new_programs_map {
