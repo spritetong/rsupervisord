@@ -152,7 +152,7 @@ When `-c / --config` is not explicitly provided, configuration files are discove
 
 - **IPC Endpoint** (when `server.uds_path` is omitted):
   - **Linux / Unix**: `/var/run/<cmd_name>.sock`.
-  - **Windows**: named pipe `\\.\pipe\<cmd_name>`.
+  - **Windows**: named pipe `\\.\pipe\<cmd_name>.rsupervisord.ipc`.
 - **Daemon Log** (when `logging.file` is omitted and logging is enabled):
   - **Linux / Unix**: `/var/log/<cmd_name>/<cmd_name>.log`.
   - **Windows**: `<config_dir>/logs/<cmd_name>.log`.
@@ -352,7 +352,7 @@ worker_threads: 2
 server:
   # Local IPC endpoint (Unix Domain Socket on Unix, named pipe / AF_UNIX on Windows)
   # Linux default: /var/run/supervisord.sock
-  # Windows default: \\.\pipe\supervisord
+  # Windows default: \\.\pipe\supervisord.rsupervisord.ipc
   uds_path: "/var/run/supervisord.sock"
 
   # Optional TCP HTTP listener for REST API and embedded Web dashboard
@@ -607,7 +607,7 @@ event_listeners:
   - **`pidfile`** (*path string*, optional): File that receives the daemon PID at startup and is removed when the daemon exits.
   - **`minfds`** (*integer*, optional, Unix only): Raise the soft file-descriptor limit to at least this value on startup (best effort).
   - **`minprocs`** (*integer*, optional, Unix only): Raise the soft process limit to at least this value on startup (best effort).
-- **`server.uds_path`** (*path string*, default: `/var/run/<cmd_name>.sock` on Unix, `\\.\pipe\<cmd_name>` on Windows): Local IPC endpoint. Unix uses a socket file; Windows accepts a named pipe (`\\.\pipe\name`) or an `AF_UNIX` file path.
+- **`server.uds_path`** (*path string*, default: `/var/run/<cmd_name>.sock` on Unix, `\\.\pipe\<cmd_name>.rsupervisord.ipc` on Windows): Local IPC endpoint. Unix uses a socket file; Windows accepts a named pipe (`\\.\pipe\name`) or an `AF_UNIX` file path.
 - **`server.http_bind`** (*string*, optional): TCP bind address and port. Serves REST API and Web Dashboard. TCP listening is disabled if omitted. `":9001"`, `"*:9001"`, and `"9001"` are normalized to `"0.0.0.0:9001"`.
 - **`server.auth_token`** (*string*, optional): Bearer token for HTTP REST/XMLRPC/SSE (`Authorization: Bearer <token>` or `?token=`). When basic credentials are also configured, **either** may be used (OR). Applied on both TCP and IPC listeners.
 - **`server.username` / `server.password`** (*string*, optional; aliases `http_username` / `http_password`): HTTP Basic Auth credentials. Passwords support cleartext or `{SHA}` hashed format. IPC uses `uds_username`/`uds_password` (auto-filled from this pair when omitted). The Web UI signs in via a login modal and keeps an HttpOnly session cookie — secrets are never stored in the browser.

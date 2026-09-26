@@ -36,7 +36,10 @@ fn test_platform_default_uds_path_is_valid() {
     assert_eq!(uds_path.to_str().unwrap(), "/var/run/supervisord.sock");
 
     #[cfg(windows)]
-    assert_eq!(uds_path.to_str().unwrap(), r"\\.\pipe\supervisord");
+    assert_eq!(
+        uds_path.to_str().unwrap(),
+        r"\\.\pipe\supervisord.rsupervisord.ipc"
+    );
 }
 
 /// Unix: bind_ipc_listener must apply the requested mode to the socket file

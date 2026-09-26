@@ -345,7 +345,7 @@ impl PlatformBackend for WindowsPlatformBackend {
     }
 
     fn default_local_ipc_path(&self, cmd_name: &str, _config_dir: Option<&Path>) -> PathBuf {
-        PathBuf::from(format!(r"\\.\pipe\{}", cmd_name))
+        PathBuf::from(format!(r"\\.\pipe\{}.rsupervisord.ipc", cmd_name))
     }
 
     fn is_elevated(&self) -> bool {

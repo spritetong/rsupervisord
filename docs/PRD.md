@@ -24,7 +24,7 @@ In containerized environments, microservices architectures, edge devices, and Wi
 
 - **Zero Process Polling in Minimal Feature Set (0% CPU Overhead)**: Purely event-driven via OS kernel notifications (Linux `pidfd`/`epoll`/signals, Windows kernel handle events via `RegisterWaitForSingleObject` and `Job Objects`). Zero background polling timers when health checks are omitted.
 - **First-Class Cross-Platform Architecture**: Strict separation between core business orchestration and platform-specific implementations. The business layer contains zero `#[cfg]` branches, relying on uniform platform traits and Windows native Job Objects for 100% reliable descendant tree reclamation.
-- **High-Compatibility Windows Named Pipe & AF_UNIX Dual Transports**: Listens concurrently on Windows Named Pipes (`\\.\pipe\<cmd_name>`) and AF_UNIX sockets. Named pipe is enabled by default on Windows for superior OS version compatibility without administrator elevation issues.
+- **High-Compatibility Windows Named Pipe & AF_UNIX Dual Transports**: Listens concurrently on Windows Named Pipes (`\\.\pipe\<cmd_name>.rsupervisord.ipc`) and AF_UNIX sockets. Named pipe is enabled by default on Windows for superior OS version compatibility without administrator elevation issues.
 - **Hierarchical Process Groups**: Support for `group` classifications and batch operations across CLI (`<group>:*`), Web UI, and REST APIs.
 - **High-Precision Zero-Polling Cron Scheduling**: Native Cron expressions (`cron` for start, `cron_stop` for stop) supporting standard 5-part POSIX crontabs and 6-part second extensions, waking up reactively via earliest-deadline calculation without periodic polling.
 - **Lifecycle Hooks with Failure Degradation**: Supports `pre_start` and `pre_stop` execution. `pre_start` blocks start unless `pre_start_ignore_failure: true`, while `pre_stop` always degrades gracefully to guarantee processes are never unkillable.
@@ -267,7 +267,7 @@ Built with zero-thread async transports, extensible backends, and the production
 #### 3.3.1 Transport Endpoints & Dual Transports
 
 - **Windows Named Pipe (Default IPC on Windows)**:
-  - Listens on `\\.\pipe\<cmd_name>` (e.g. `\\.\pipe\supervisord`).
+  - Listens on `\\.\pipe\<cmd_name>.rsupervisord.ipc` (e.g. `\\.\pipe\supervisord.rsupervisord.ipc`).
   - Enabled by default on Windows (unless explicitly disabled via `pipe_path: ""`). Provides superior OS compatibility and zero file-permission/socket-path issues across Windows 10/11 and Server editions.
   - Windows daemon binds **both Named Pipe and AF_UNIX UDS concurrently**, allowing clients to connect via either mechanism.
   - CLI automatically selects the Named Pipe transport on Windows when available.
@@ -431,8 +431,8 @@ worker_threads: 2
 server:
   # Native local UDS socket path (Supported on Linux, macOS, BSD, and Windows 10/11)
   uds_path: "/var/run/supervisord.sock"
-  # Windows Named Pipe path (Defaults to \\.\pipe\<cmd_name> on Windows; set to "" to disable)
-  pipe_path: "\\\\.\\pipe\\supervisord"
+  # Windows Named Pipe path (Defaults to `\\.\pipe\<cmd_name>.rsupervisord.ipc` on Windows; set to "" to disable)
+  pipe_path: "\\\\.\\pipe\\supervisord.rsupervisord.ipc"
   # Optional: Remote TCP listener
   http_bind: "127.0.0.1:9001"
   auth_token: ""
@@ -685,7 +685,7 @@ rsupervisord/
 
 ### Milestone 5: Windows Named Pipe, Process Groups, Cron Scheduler & Lifecycle Hooks
 
-- [x] Implement native Windows Named Pipe (`\\.\pipe\<cmd_name>`) IPC transport with dual-listener support.
+- [x] Implement native Windows Named Pipe (`\\.\pipe\<cmd_name>.rsupervisord.ipc`) IPC transport with dual-listener support.
 - [x] Add hierarchical process groups with group DAG batch operations across CLI, REST API, and Web UI.
 - [x] Integrate zero-polling Cron expressions (`cron` / `cron_stop`) with dynamic deadline scheduling.
 - [x] Implement `pre_start` and `pre_stop` lifecycle hooks with failure degradation semantics.

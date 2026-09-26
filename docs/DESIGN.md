@@ -823,7 +823,7 @@ flowchart TD
 ```
 
 1. **Windows Named Pipe (Default IPC)**:
-   - Server binds `\\.\pipe\<cmd_name>` using asynchronous `ServerOptions::create_with_security_attributes_raw` so the first instance carries a baked-in `SECURITY_ATTRIBUTES` DACL (authorization layer; no race window before permissions are applied).
+   - Server binds `\\.\pipe\<cmd_name>.rsupervisord.ipc` using asynchronous `ServerOptions::create_with_security_attributes_raw` so the first instance carries a baked-in `SECURITY_ATTRIBUTES` DACL (authorization layer; no race window before permissions are applied).
    - Bypasses filesystem path and Unix Domain Socket implementation quirks across diverse Windows builds (e.g. Windows Server, Windows 10 without AF_UNIX support).
    - Handles continuous client reconnection loops via Tokio tasks. The security descriptor is built during bind (block-scoped so raw pointers never cross an `await`), and the kernel copies the SD into each pipe instance object.
 2. **Native Windows AF_UNIX UDS Listener**:

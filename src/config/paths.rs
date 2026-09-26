@@ -167,9 +167,9 @@ impl<'a> PathResolver<'a> {
             .default_local_ipc_path(&self.cmd_name, self.config_dir.as_deref())
     }
 
-    /// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>`).
+    /// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>.rsupervisord.ipc`).
     pub fn default_named_pipe_path(&self) -> PathBuf {
-        PathBuf::from(format!(r"\\.\pipe\{}", self.cmd_name))
+        PathBuf::from(format!(r"\\.\pipe\{}.rsupervisord.ipc", self.cmd_name))
     }
 
     /// Returns the default log path for the daemon itself (`<cmd_name>.log`).
@@ -377,7 +377,7 @@ pub fn default_uds_path(cmd_name: &str, config_dir: Option<&Path>) -> PathBuf {
         .default_uds_path()
 }
 
-/// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>`).
+/// Returns the default Windows named pipe path (`\\.\pipe\<cmd_name>.rsupervisord.ipc`).
 #[inline]
 pub fn default_named_pipe_path(cmd_name: &str) -> PathBuf {
     PathResolver::new(cmd_name).default_named_pipe_path()

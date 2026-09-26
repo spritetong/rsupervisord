@@ -665,13 +665,15 @@ mod tests {
         let log_file = dir.path().join("panic_entry.log");
         let rotator = LogRotator::with_options(&log_file, 50, 1, false).unwrap();
 
-        // Create an unremovable orphan file (exclusive lock on Windows, unwritable dir on Unix)
+        // Create an unremovable orphan:
+        // On Windows: exclusive file lock prevents deletion (ERROR_SHARING_VIOLATION).
+        // On Unix: create as a directory; remove_file (unlink) fails with EISDIR even under root (UID 0 in WSL).
         let orphan = dir.path().join("panic_entry.log.1");
-        std::fs::write(&orphan, b"orphan").unwrap();
 
         #[cfg(windows)]
         let _lock = {
             use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(&orphan, b"orphan").unwrap();
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -682,10 +684,7 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            // On Unix, make file unremovable by removing write permissions on parent dir
-            let mut dir_perms = std::fs::metadata(dir.path()).unwrap().permissions();
-            dir_perms.set_readonly(true);
-            let _ = std::fs::set_permissions(dir.path(), dir_perms);
+            std::fs::create_dir(&orphan).unwrap();
         }
 
         // When rotation is blocked because target cannot be removed, rotator enters fallback
@@ -701,13 +700,5 @@ mod tests {
 
         // The fallback file remains writable afterwards.
         rotator.write_line("still writable").unwrap();
-
-        #[cfg(not(windows))]
-        {
-            let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(dir.path(), perms);
-        }
     }
 }

@@ -20,7 +20,7 @@ worker_threads: 2
 server:
   # Local IPC socket path (Unix Domain Socket on Unix, Named Pipe / UDS on Windows)
   # Default on Unix: /var/run/supervisord.sock (or /tmp/supervisord.sock)
-  # Default on Windows: \\.\pipe\supervisord (or C:/run/supervisord.sock for Caddy UDS)
+  # Default on Windows: \\.\pipe\supervisord.rsupervisord.ipc (or C:/run/supervisord.sock for Caddy UDS)
   uds_path: "${SUPERVISORD_IPC_PATH:-/var/run/supervisord.sock}"
 
   # Optional IPC endpoint permission mode (alias: chmod). Quoted octal string.

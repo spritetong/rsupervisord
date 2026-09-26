@@ -152,7 +152,7 @@ cargo build --release
 
 - **IPC 端点**（未配置 `server.uds_path` 时）：
   - **Linux / Unix**：`/var/run/<cmd_name>.sock`。
-  - **Windows**：命名管道 `\\.\pipe\<cmd_name>`。
+  - **Windows**：命名管道 `\\.\pipe\<cmd_name>.rsupervisord.ipc`。
 - **守护进程自身日志**（未配置 `logging.file` 且日志开启时）：
   - **Linux / Unix**：`/var/log/<cmd_name>/<cmd_name>.log`。
   - **Windows**：`<配置文件目录>/logs/<cmd_name>.log`。
@@ -351,7 +351,7 @@ worker_threads: 2
 server:
   # 本地 IPC 端点 (Unix 为套接字文件，Windows 为命名管道 / AF_UNIX)
   # Linux 默认: /var/run/supervisord.sock
-  # Windows 默认: \\.\pipe\supervisord
+  # Windows 默认: \\.\pipe\supervisord.rsupervisord.ipc
   uds_path: "/var/run/supervisord.sock"
 
   # 可选：TCP HTTP 监听地址 (同时支持 REST API 与内置 Web 控制台)
@@ -605,7 +605,7 @@ event_listeners:
   - **`pidfile`** (*路径字符串*, 可选): 写入守护进程 PID 的文件，守护进程退出时自动删除。
   - **`minfds`** (*整型*, 可选，仅 Unix): 启动时将文件描述符软限制提升到该值（尽力而为）。
   - **`minprocs`** (*整型*, 可选，仅 Unix): 启动时将进程数软限制提升到该值（尽力而为）。
-- **`server.uds_path`** (*路径字符串*, 默认: Unix 为 `/var/run/<cmd_name>.sock`，Windows 为 `\\.\pipe\<cmd_name>`): 本地 IPC 端点。Unix 使用套接字文件；Windows 支持命名管道 (`\\.\pipe\name`) 或 `AF_UNIX` 文件路径。
+- **`server.uds_path`** (*路径字符串*, 默认: Unix 为 `/var/run/<cmd_name>.sock`，Windows 为 `\\.\pipe\<cmd_name>.rsupervisord.ipc`): 本地 IPC 端点。Unix 使用套接字文件；Windows 支持命名管道 (`\\.\pipe\name`) 或 `AF_UNIX` 文件路径。
 - **`server.http_bind`** (*字符串*, 默认: 无): TCP 监听网络地址与端口。提供 REST API 与 Web 控制台，省略则不开放 TCP 监听。`":9001"`、`"*:9001"`、`"9001"` 会归一化为 `"0.0.0.0:9001"`。
 - **`server.auth_token`** (*字符串*, 可选): REST/XMLRPC/SSE 访问令牌（`Authorization: Bearer <token>` 或 `?token=`）。与 basic 凭据同时配置时二者均可通过（OR 语义），TCP 与 IPC 监听器同时生效。
 - **`server.username` / `server.password`** (*字符串*, 可选; 别名 `http_username` / `http_password`): HTTP Basic Auth 访问凭据。密码支持 `{SHA}` 前缀哈希值。IPC 使用 `uds_username`/`uds_password`（缺省时从本对自动填充）。Web UI 通过登录弹窗换取 HttpOnly 会话 Cookie，浏览器中不保存任何明文凭据。
