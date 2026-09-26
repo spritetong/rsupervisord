@@ -220,13 +220,25 @@ impl PlatformBackend for UnixPlatformBackend {
 
                 // 2. Apply umask if configured
                 if let Some(mask) = umask {
-                    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask));
+                    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask as _));
                 }
 
                 // 3. Drop privileges if user specified
                 if let Some((uid, gid)) = parsed_ids {
                     if let Some(g) = gid {
-                        let _ = nix::unistd::setgroups(&[g]);
+                        #[cfg(not(any(
+                            target_vendor = "apple",
+                            target_os = "redox",
+                            target_os = "haiku"
+                        )))]
+                        {
+                            let _ = nix::unistd::setgroups(&[g]);
+                        }
+                        #[cfg(target_vendor = "apple")]
+                        {
+                            let raw_gid = g.as_raw();
+                            let _ = libc::setgroups(1, &raw_gid);
+                        }
                         nix::unistd::setgid(g).map_err(std::io::Error::other)?;
                     }
                     if let Some(u) = uid {
@@ -406,7 +418,7 @@ impl UnixIpcListener {
         // before set_permissions applies the configured mode (parity with Windows
         // pipe first-instance SECURITY_ATTRIBUTES; closes the bind→chmod race).
         let previous_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(
-            crate::consts::BIND_UMASK,
+            crate::consts::BIND_UMASK as _,
         ));
         let bind_result = tokio::net::UnixListener::bind(path);
         nix::sys::stat::umask(previous_umask);

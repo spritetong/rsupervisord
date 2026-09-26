@@ -186,11 +186,32 @@ impl SupervisorDaemon {
                     "minfds",
                 );
             }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "aix"
+            ))]
             if let Some(minprocs) = config.minprocs {
                 apply_rlimit(
                     nix::sys::resource::Resource::RLIMIT_NPROC,
                     minprocs,
                     "minprocs",
+                );
+            }
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "aix"
+            )))]
+            if let Some(_minprocs) = config.minprocs {
+                tracing::debug!(
+                    "minprocs (RLIMIT_NPROC) is not supported on this platform; ignored"
                 );
             }
         }
