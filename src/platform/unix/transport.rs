@@ -57,11 +57,16 @@ impl AsyncRead for UnixPipeReader {
             }
 
             let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                guard.clear_ready();
-                continue;
+            match err.kind() {
+                io::ErrorKind::WouldBlock => {
+                    guard.clear_ready();
+                    continue;
+                }
+                // EINTR: retry the read. Readiness is still valid, so it must
+                // not be cleared here (edge-triggered AsyncFd would lose the edge).
+                io::ErrorKind::Interrupted => continue,
+                _ => return Poll::Ready(Err(err)),
             }
-            return Poll::Ready(Err(err));
         }
     }
 }

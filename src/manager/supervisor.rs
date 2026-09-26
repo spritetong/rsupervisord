@@ -1726,6 +1726,38 @@ impl ManagerActor {
             unchanged: diff.unchanged.clone(),
         };
 
+        // Phase 1: instantiate every replacement before mutating the running
+        // generation, so a configuration error can never leave half-applied state.
+        // On failure, programs, configs, event pools, and the DAG remain untouched.
+        let mut staged_pools = self.event_pools.clone();
+        let mut staged_modified = Vec::with_capacity(diff.modified.len());
+        for new_cfg in &diff.modified {
+            let new_prog = instantiate_program(
+                new_cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut staged_pools,
+            )?;
+            staged_modified.push((new_cfg.clone(), new_prog));
+        }
+        let mut staged_added = Vec::with_capacity(diff.added.len());
+        for new_cfg in &diff.added {
+            let new_prog = instantiate_program(
+                new_cfg,
+                &self.server_identifier,
+                &self.activity_tracker,
+                &self.event_hub,
+                &self.cancel_token,
+                &mut staged_pools,
+            )?;
+            staged_added.push((new_cfg.clone(), new_prog));
+        }
+
+        // Phase 2: commit — no fallible steps below.
+        self.event_pools = staged_pools;
+
         // 1. Removed programs: gracefully stop, clean up and unregister
         for name in &diff.removed {
             if let Some(mut prog) = self.programs.remove(name) {
@@ -1736,46 +1768,30 @@ impl ManagerActor {
         }
 
         // 2. Modified programs: gracefully stop old instance, replace with new instance, restart if autostart
-        for new_cfg in diff.modified {
-            let name = &new_cfg.name;
-            if let Some(prog) = self.programs.get_mut(name) {
+        for (new_cfg, new_prog) in staged_modified {
+            let name = new_cfg.name.clone();
+            if let Some(prog) = self.programs.get_mut(&name) {
                 let _ = prog.stop(new_cfg.stop_wait_secs).await;
                 let _ = prog.shutdown().await;
             }
 
-            let new_prog = instantiate_program(
-                &new_cfg,
-                &self.server_identifier,
-                &self.activity_tracker,
-                &self.event_hub,
-                &self.cancel_token,
-                &mut self.event_pools,
-            )?;
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }
 
             self.programs.insert(name.clone(), new_prog);
-            self.configs.insert(name.clone(), new_cfg);
+            self.configs.insert(name, new_cfg);
         }
 
-        // 3. Added programs: instantiate, register, and start if autostart
-        for new_cfg in diff.added {
-            let name = &new_cfg.name;
-            let new_prog = instantiate_program(
-                &new_cfg,
-                &self.server_identifier,
-                &self.activity_tracker,
-                &self.event_hub,
-                &self.cancel_token,
-                &mut self.event_pools,
-            )?;
+        // 3. Added programs: register the staged instance, start if autostart
+        for (new_cfg, new_prog) in staged_added {
+            let name = new_cfg.name.clone();
             if new_cfg.autostart {
                 let _ = new_prog.start().await;
             }
 
             self.programs.insert(name.clone(), new_prog);
-            self.configs.insert(name.clone(), new_cfg);
+            self.configs.insert(name, new_cfg);
         }
 
         // 4. Update the active DAG
@@ -1811,20 +1827,11 @@ impl ManagerActor {
         let new_programs_map = new_config.resolve_programs()?;
         let _new_dag = DependencyGraph::build(&new_programs_map)?;
 
-        // 1. Stop all running programs gracefully
-        self.execute_stop_all(None).await;
-
-        // 2. Shutdown existing program instances
-        for (_, mut prog) in self.programs.drain() {
-            let _ = prog.shutdown().await;
-        }
-
-        self.configs.clear();
-        self.event_pools.clear();
-
-        // 3. Store pending configs and instantiate programs from the new configuration
+        // 1. Stage the new generation before touching the running one.
+        // On failure, programs, configs, event pools, and the DAG remain untouched.
         self.pending_configs = new_programs_map.clone();
-
+        let mut staged_pools = HashMap::new();
+        let mut staged = Vec::with_capacity(new_programs_map.len());
         for (name, cfg) in &new_programs_map {
             let prog = instantiate_program(
                 cfg,
@@ -1832,10 +1839,23 @@ impl ManagerActor {
                 &self.activity_tracker,
                 &self.event_hub,
                 &self.cancel_token,
-                &mut self.event_pools,
+                &mut staged_pools,
             )?;
+            staged.push((name.clone(), cfg.clone(), prog));
+        }
+
+        // 2. Commit: stop all running programs gracefully, then swap in the
+        // staged generation (no fallible steps below)
+        self.execute_stop_all(None).await;
+        for (_, mut prog) in self.programs.drain() {
+            let _ = prog.shutdown().await;
+        }
+
+        self.configs.clear();
+        self.event_pools = staged_pools;
+        for (name, cfg, prog) in staged {
             self.programs.insert(name.clone(), prog);
-            self.configs.insert(name.clone(), cfg.clone());
+            self.configs.insert(name, cfg);
         }
 
         self.sync_logging_config(new_config.logging.clone());
@@ -1877,6 +1897,10 @@ impl ManagerActor {
             });
         }
 
+        // Stage all group members before mutating so a config error cannot
+        // leave a partially added group behind.
+        let mut staged_pools = self.event_pools.clone();
+        let mut staged = Vec::with_capacity(candidates.len());
         for cfg in &candidates {
             let prog = instantiate_program(
                 cfg,
@@ -1884,13 +1908,17 @@ impl ManagerActor {
                 &self.activity_tracker,
                 &self.event_hub,
                 &self.cancel_token,
-                &mut self.event_pools,
+                &mut staged_pools,
             )?;
+            staged.push((cfg.clone(), prog));
+        }
+        self.event_pools = staged_pools;
+        for (cfg, prog) in staged {
             if cfg.autostart {
                 let _ = prog.start().await;
             }
             self.programs.insert(cfg.name.clone(), prog);
-            self.configs.insert(cfg.name.clone(), cfg.clone());
+            self.configs.insert(cfg.name.clone(), cfg);
         }
 
         self.refresh_derived_state().await;

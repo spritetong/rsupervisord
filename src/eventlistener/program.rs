@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 enum ListenerCommand {
     Start {
@@ -46,6 +46,7 @@ pub struct EventListenerProgram {
     ring_buffer: Arc<RingBuffer>,
     command_tx: mpsc::Sender<ListenerCommand>,
     cancel_token: CancellationToken,
+    _cancel_guard: DropGuard,
 }
 
 impl EventListenerProgram {
@@ -74,6 +75,9 @@ impl EventListenerProgram {
         let ring_buffer = Arc::new(RingBuffer::new(512));
         let (command_tx, command_rx) = mpsc::channel(16);
 
+        let child_cancel = cancel_token.child_token();
+        let cancel_guard = child_cancel.clone().drop_guard();
+
         let actor = EventListenerActor {
             config: config.clone(),
             pool,
@@ -81,7 +85,7 @@ impl EventListenerProgram {
             started_at: started_at.clone(),
             ring_buffer: ring_buffer.clone(),
             command_rx,
-            cancel_token: cancel_token.clone(),
+            cancel_token: child_cancel.clone(),
         };
 
         tokio::spawn(actor.run());
@@ -92,7 +96,8 @@ impl EventListenerProgram {
             started_at,
             ring_buffer,
             command_tx,
-            cancel_token,
+            cancel_token: child_cancel,
+            _cancel_guard: cancel_guard,
         })
     }
 }
@@ -219,6 +224,14 @@ struct EventListenerChild {
     cancel_token: CancellationToken,
 }
 
+impl Drop for EventListenerChild {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        let _ = self.platform_guard.force_kill();
+        let _ = self.child.start_kill();
+    }
+}
+
 struct EventListenerActor {
     config: ProgramConfig,
     pool: EventListenerPool,
@@ -232,13 +245,6 @@ struct EventListenerActor {
 impl EventListenerActor {
     async fn run(mut self) {
         let mut child_process: Option<EventListenerChild> = None;
-
-        // Autostart if configured
-        if self.config.autostart
-            && let Ok(child) = self.spawn_child().await
-        {
-            child_process = Some(child);
-        }
 
         loop {
             tokio::select! {
@@ -296,7 +302,12 @@ impl EventListenerActor {
                             };
                             let _ = reply.send(res);
                         }
-                        None => break,
+                        None => {
+                            if let Some(mut c) = child_process.take() {
+                                self.stop_child(&mut c, self.config.stop_wait_secs).await;
+                            }
+                            break;
+                        }
                     }
                 }
                 status = async {
@@ -352,6 +363,7 @@ impl EventListenerActor {
         cmd.stderr(std::process::Stdio::piped());
 
         platform.configure_command(&mut cmd, self.config.user.as_deref(), self.config.umask)?;
+        cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn().map_err(|e| ProgramError::StartFailed {
             name: self.config.name.clone(),

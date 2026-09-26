@@ -661,27 +661,40 @@ async fn test_process_send_stdin_fresh_pipe_after_restart() {
 }
 
 #[tokio::test]
-async fn test_start_secs_unaffected_by_status_queries() {
+async fn test_start_secs_deadline_survives_redundant_commands() {
     let (cmd, args) = get_sleep_command(10);
-    let mut config = ProgramConfig::new("status_query_startsecs_test", cmd);
+    let mut config = ProgramConfig::new("startsecs_anchor_test", cmd);
     config.args = args;
-    config.start_secs = Duration::from_secs(1);
+    config.start_secs = Duration::from_secs(2);
 
     let mut program = ProcessProgram::new(config).expect("create");
     program.start().await.expect("start");
     assert_eq!(program.status().state, ProgramState::Starting);
 
-    // Repeatedly query status during start_secs window to ensure deadline is NOT reset
-    for _ in 0..5 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let st = program.status();
-        assert!(st.state == ProgramState::Starting || st.state == ProgramState::Running);
+    // Redundant Start commands travel through the actor command channel (the
+    // historical trigger path for start_secs resets) but must not re-anchor
+    // the deadline: the live child makes spawn_child() fail without respawning.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let res = program.start().await;
+        assert!(
+            matches!(
+                res,
+                Err(rsupervisord::error::ProgramError::AlreadyRunning { .. })
+            ),
+            "live child must reject redundant start: {:?}",
+            res
+        );
+        assert_eq!(program.status().state, ProgramState::Starting);
     }
 
+    // Deadline stays anchored at the original spawn (t≈0), so Running must
+    // arrive at t≈2s — well before the reset deadline (t≈2.9s after the last
+    // redundant command at t≈0.9s) would allow it.
     program
-        .wait_for_state(ProgramState::Running, Duration::from_secs(2))
+        .wait_for_state(ProgramState::Running, Duration::from_millis(1600))
         .await
-        .expect("Program should reach Running state despite status queries");
+        .expect("start_secs deadline must not be reset by redundant commands");
 
     program.stop(Duration::from_secs(1)).await.expect("stop");
     program.shutdown().await.expect("shutdown");

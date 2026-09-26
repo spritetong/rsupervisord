@@ -130,14 +130,52 @@ where
                 }
             }
 
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = BufReader::new(reader);
+            let mut buf = Vec::new();
 
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(ref e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::NotConnected
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            program = ?program_name,
+                            stream = stream_name,
+                            error = %e,
+                            "Log read error; terminating pump"
+                        );
+                        break;
+                    }
+                }
+
+                // Strip trailing '\n' and optional '\r'
+                if buf.ends_with(b"\n") {
+                    buf.pop();
+                    if buf.ends_with(b"\r") {
+                        buf.pop();
+                    }
+                }
+
+                let line = String::from_utf8_lossy(&buf);
                 // Push to in-memory RingBuffer (for tail -f and web streaming)
                 if let Some(ref prefix) = ring_prefix {
                     ring_buffer.push(format!("{}: {}", prefix, line));
                 } else {
-                    ring_buffer.push(&line);
+                    ring_buffer.push(&*line);
                 }
 
                 // Broadcast to the central EventHub LogBus if configured
@@ -149,7 +187,7 @@ where
                         group_name.clone(),
                         pid,
                         stream_name,
-                        &line,
+                        &*line,
                         events_enabled,
                     ));
                 }
