@@ -773,7 +773,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :style="{ animation: autoRefresh ? 'spin 4s linear infinite' : 'none' }">
             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
           </svg>
-          <span>{{ autoRefresh ? (sseConnected ? 'Heartbeat: 30s' : 'Auto: ' + refreshInterval + 's') : 'Paused' }}</span>
+          <span>{{ autoRefresh ? 'Auto: ' + refreshInterval + 's' : 'Paused' }}</span>
         </button>
 
         <!-- All Logs button -->
@@ -2124,7 +2124,7 @@
         function setupTimer() {
           if (timer) clearInterval(timer);
           if (autoRefresh.value) {
-            const intervalSecs = sseConnected.value ? 30 : refreshInterval.value;
+            const intervalSecs = refreshInterval.value;
             timer = setInterval(fetchStatus, intervalSecs * 1000);
           }
         }

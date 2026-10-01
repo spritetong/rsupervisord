@@ -266,6 +266,24 @@ async fn test_activity_tracker_and_idle_timeout() {
     let continuous_tracker = ActivityTracker::new(0, true);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(continuous_tracker.is_metrics_active());
+
+    // Test wake-up notification from idle state
+    let tracker_clone = tracker.clone();
+    let notify_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let notify_flag = notify_received.clone();
+    let handle = tokio::spawn(async move {
+        tracker_clone.notified().await;
+        notify_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // Wait until tracker becomes idle again
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(!tracker.is_metrics_active());
+
+    // Recording activity should trigger notification and wake up waiters
+    tracker.record_activity();
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+    assert!(notify_received.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[tokio::test]

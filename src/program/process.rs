@@ -1184,6 +1184,16 @@ impl ProgramActor {
                     }
                 }
 
+                _ = self.activity_tracker.notified(), if has_child && !is_metrics_active && self.activity_tracker.is_enabled() => {
+                    metrics_interval.reset();
+                    if let Some(ref child) = self.current_child
+                        && let Ok(m) = child.platform_guard.query_metrics()
+                    {
+                        let mut snapshot = self.status_snapshot.write();
+                        snapshot.metrics = Some(m);
+                    }
+                }
+
                 exit_res = async {
                     match self.current_child.as_mut() {
                         Some(c) => c.platform_guard.wait_exit(&mut c.child).await,

@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// RAII guard representing an active client stream (e.g. SSE).
 /// While any stream guard is alive, metrics sampling remains active.
@@ -30,6 +31,7 @@ pub struct ActivityTracker {
     idle_timeout_secs: u64,
     interval_secs: u64,
     enabled: bool,
+    notify: Arc<Notify>,
 }
 
 impl ActivityTracker {
@@ -52,18 +54,38 @@ impl ActivityTracker {
             idle_timeout_secs,
             interval_secs: interval_secs.max(1),
             enabled,
+            notify: Arc::new(Notify::new()),
         }
     }
 
     /// Records that an external client performed an action (CLI command, Web UI polling, SSE stream).
     pub fn record_activity(&self) {
+        let was_inactive = !self.is_metrics_active();
         *self.last_activity.write() = Instant::now();
+        if was_inactive {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Explicitly resets activity and wakes up all waiting metrics samplers.
+    pub fn reset_activity(&self) {
+        *self.last_activity.write() = Instant::now();
+        self.notify.notify_waiters();
+    }
+
+    /// Asynchronously waits until external client activity awakens metrics sampling.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
     }
 
     /// Enters an active SSE stream session, returning a RAII guard that keeps metrics active.
     pub fn enter_stream(&self) -> SseStreamGuard {
+        let was_inactive = !self.is_metrics_active();
         self.active_observers.fetch_add(1, Ordering::SeqCst);
         self.record_activity();
+        if was_inactive {
+            self.notify.notify_waiters();
+        }
         SseStreamGuard(self.active_observers.clone())
     }
 
