@@ -5,7 +5,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::program::state::{HealthStatus, ProgramState};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
@@ -175,6 +178,15 @@ impl LogEntry {
     pub fn is_stderr(&self) -> bool {
         self.stream == "stderr"
     }
+
+    /// Formats this entry as a standard line string: `[program] line` or `[program] [stderr] line`.
+    pub fn formatted_line(&self) -> String {
+        if self.stream == "stderr" {
+            format!("[{}] [stderr] {}", self.program, self.line)
+        } else {
+            format!("[{}] {}", self.program, self.line)
+        }
+    }
 }
 
 /// Centralized star-topology event hub distributing system events and aggregated logs.
@@ -182,6 +194,8 @@ impl LogEntry {
 pub struct EventHub {
     system_tx: broadcast::Sender<SystemEvent>,
     log_tx: broadcast::Sender<LogEntry>,
+    log_history: Arc<Mutex<VecDeque<LogEntry>>>,
+    log_capacity: usize,
 }
 
 impl Default for EventHub {
@@ -193,9 +207,15 @@ impl Default for EventHub {
 impl EventHub {
     /// Creates a new EventHub with bounded broadcast capacities for system events and logs.
     pub fn new(system_capacity: usize, log_capacity: usize) -> Self {
+        let log_cap = log_capacity.max(64);
         let (system_tx, _) = broadcast::channel(system_capacity.max(16));
-        let (log_tx, _) = broadcast::channel(log_capacity.max(64));
-        Self { system_tx, log_tx }
+        let (log_tx, _) = broadcast::channel(log_cap);
+        Self {
+            system_tx,
+            log_tx,
+            log_history: Arc::new(Mutex::new(VecDeque::with_capacity(log_cap))),
+            log_capacity: log_cap,
+        }
     }
 
     /// Publishes a system lifecycle event to all active subscribers.
@@ -212,12 +232,40 @@ impl EventHub {
         self.publish_system(event);
     }
 
-    /// Publishes an aggregated log entry to all active subscribers.
-    /// Incurs zero cloning overhead if no subscribers are active.
+    /// Publishes an aggregated log entry to history and active subscribers.
     pub fn publish_log(&self, entry: LogEntry) {
+        {
+            let mut guard = self.log_history.lock();
+            if guard.len() >= self.log_capacity {
+                guard.pop_front();
+            }
+            guard.push_back(entry.clone());
+        }
+
         if self.log_tx.receiver_count() > 0 {
             let _ = self.log_tx.send(entry);
         }
+    }
+
+    /// Returns true if there are any active subscribers to the log broadcast bus.
+    #[inline]
+    pub fn has_log_subscribers(&self) -> bool {
+        self.log_tx.receiver_count() > 0
+    }
+
+    /// Retrieves up to `max_lines` most recent log entries from the aggregated history.
+    pub fn get_logs(&self, max_lines: Option<usize>) -> Vec<LogEntry> {
+        let guard = self.log_history.lock();
+        match max_lines {
+            Some(n) if n < guard.len() => guard.iter().skip(guard.len() - n).cloned().collect(),
+            _ => guard.iter().cloned().collect(),
+        }
+    }
+
+    /// Clears the aggregated log history buffer.
+    pub fn clear_logs(&self) {
+        let mut guard = self.log_history.lock();
+        guard.clear();
     }
 
     /// Subscribes to the global system events broadcast stream.
@@ -263,6 +311,12 @@ mod tests {
         });
 
         hub.publish_log(LogEntry::new("test", "stdout", "hello"));
+        let logs = hub.get_logs(None);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].formatted_line(), "[test] hello");
+
+        hub.clear_logs();
+        assert_eq!(hub.get_logs(None).len(), 0);
     }
 
     #[tokio::test]

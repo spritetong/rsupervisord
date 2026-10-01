@@ -367,6 +367,17 @@ impl SupervisorClient {
         Ok(resp.lines)
     }
 
+    /// Clears buffered log lines for a specific program or all programs.
+    pub async fn clear_logs(&self, name: &str) -> Result<()> {
+        let path = if name == "all" {
+            "/api/v1/all/logs".to_string()
+        } else {
+            format!("/api/v1/programs/{}/logs", name)
+        };
+        let _: serde_json::Value = self.request_json("DELETE", &path, None).await?;
+        Ok(())
+    }
+
     /// Sends characters/bytes to a running program's standard input.
     pub async fn send_stdin(&self, name: &str, chars: &str) -> Result<()> {
         let path = format!("/api/v1/programs/{}/stdin", name);
@@ -374,6 +385,16 @@ impl SupervisorClient {
         let body_bytes = serde_json::to_vec(&body)?;
         let _: serde_json::Value = self.request_json("POST", &path, Some(&body_bytes)).await?;
         Ok(())
+    }
+
+    /// Fetches system and daemon metadata.
+    pub async fn system_info(&self) -> Result<serde_json::Value> {
+        self.request_json("GET", "/api/v1/info", None).await
+    }
+
+    /// Fetches auth capabilities and daemon metadata.
+    pub async fn auth_config(&self) -> Result<serde_json::Value> {
+        self.request_json("GET", "/api/v1/auth/config", None).await
     }
 
     /// Invokes an XML-RPC method on `/RPC2` on the daemon.

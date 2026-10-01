@@ -747,13 +747,15 @@ pub async fn handle_clear(client: &SupervisorClient, names: &[String]) -> Result
     }
 
     for name in names {
-        let method = if name == "all" {
-            "supervisor.clearAllProcessLogs"
-        } else {
-            "supervisor.clearProcessLogs"
-        };
-        let param = format!("<param><value><string>{}</string></value></param>", name);
-        let _ = client.call_xmlrpc(method, &param).await;
+        if client.clear_logs(name).await.is_err() {
+            let method = if name == "all" {
+                "supervisor.clearAllProcessLogs"
+            } else {
+                "supervisor.clearProcessLogs"
+            };
+            let param = format!("<param><value><string>{}</string></value></param>", name);
+            let _ = client.call_xmlrpc(method, &param).await;
+        }
 
         if !is_tty {
             println!("{}: cleared", name);

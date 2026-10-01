@@ -1026,6 +1026,16 @@ impl ManagerHandle {
             .map_err(|_| ProgramError::ChannelClosed { name: name_str })?
     }
 
+    pub async fn clear_all_process_logs(&self) -> Result<(), ProgramError> {
+        self.event_hub.clear_logs();
+        let configs = self.get_all_configs().await?;
+        for cfg in configs.values() {
+            let _ = self.clear_process_logs(&cfg.name).await;
+        }
+        let _ = self.clear_main_log().await;
+        Ok(())
+    }
+
     pub async fn read_main_log(&self, offset: i64, length: i64) -> Result<String, ProgramError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -1657,16 +1667,37 @@ impl ManagerActor {
                             let _ = reply.send(statuses);
                         }
                         ManagerCommand::ReadLogs { name, lines, reply } => {
-                            let target = if self.programs.contains_key(&name) {
-                                Some(name.clone())
+                            if name == "all" {
+                                let history = self.event_hub.get_logs(lines);
+                                let formatted: Vec<String> = if !history.is_empty() {
+                                    history.into_iter().map(|e| e.formatted_line()).collect()
+                                } else {
+                                    let mut all = Vec::new();
+                                    for (pname, prog) in &self.programs {
+                                        for line in prog.read_logs(lines) {
+                                            all.push(format!("[{}] {}", pname, line));
+                                        }
+                                    }
+                                    let limit = lines.unwrap_or(all.len());
+                                    if all.len() > limit {
+                                        all.split_off(all.len() - limit)
+                                    } else {
+                                        all
+                                    }
+                                };
+                                let _ = reply.send(Ok(formatted));
                             } else {
-                                self.find_match(&name).into_iter().next()
-                            };
-                            let res = target
-                                .and_then(|n| self.programs.get(&n))
-                                .map(|p| p.read_logs(lines))
-                                .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
-                            let _ = reply.send(res);
+                                let target = if self.programs.contains_key(&name) {
+                                    Some(name.clone())
+                                } else {
+                                    self.find_match(&name).into_iter().next()
+                                };
+                                let res = target
+                                    .and_then(|n| self.programs.get(&n))
+                                    .map(|p| p.read_logs(lines))
+                                    .ok_or_else(|| ProgramError::NotFound { name: name.clone() });
+                                let _ = reply.send(res);
+                            }
                         }
                         ManagerCommand::SubscribeLogs { name, reply } => {
                             let target = if self.programs.contains_key(&name) {

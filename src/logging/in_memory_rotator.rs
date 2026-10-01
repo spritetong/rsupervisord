@@ -7,126 +7,77 @@
 use crate::consts::MAX_LIVE_LOG_LINE_BYTES;
 use crate::error::ProgramError;
 use crate::logging::backend::LogBackend;
+use crate::logging::continuous_ring::ContinuousRingBuffer;
 use crate::logging::reader::{InstantLogReader, LogFileReader};
 use crate::logging::types::{LogChannel, LogChunk};
 use async_trait::async_trait;
 use bytes::BytesMut;
+use bytestring::ByteString;
 use parking_lot::{Mutex, RwLock};
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
-
-/// An in-memory rotated log segment representing one generation of log records.
-#[derive(Debug, Clone, Default)]
-pub struct MemorySegment {
-    pub data: Vec<u8>,
-    pub line_offsets: Vec<usize>,
-}
-
-impl MemorySegment {
-    pub fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            line_offsets: Vec::new(),
-        }
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-            line_offsets: Vec::new(),
-        }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    #[inline]
-    pub fn line_count(&self) -> usize {
-        self.line_offsets.len()
-    }
-}
 
 /// Rotator for a single log channel (e.g. stdout or stderr) stored entirely in memory.
 ///
-/// Lock order: acquire `active` before `backups_queue` in every method; never
-/// reverse. `pending_line` is independent and must never be held while taking
-/// either segment lock.
+/// Backed by a contiguous [`ContinuousRingBuffer`] for zero-allocation runtime writes
+/// and zero-copy [`ByteString`] slice reads.
 pub struct InMemoryChannelRotator {
-    max_bytes: usize,
+    segment_bytes: usize,
     backups: usize,
-    active: RwLock<MemorySegment>,
-    backups_queue: RwLock<VecDeque<MemorySegment>>,
+    ring: RwLock<ContinuousRingBuffer>,
     broadcast_tx: broadcast::Sender<String>,
     /// Incomplete line tail awaiting a newline for live broadcast.
     pending_line: Mutex<BytesMut>,
-    /// Monotonic total cumulative byte count since startup/seeding (satisfies supervisor offset semantics).
-    cumulative_bytes: AtomicU64,
-}
-
-/// Copies a slice of bytes `[start..start + length]` from consecutive slices into a new `Vec<u8>`.
-fn extract_window(slices: &[&[u8]], mut start: usize, mut length: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(length);
-    for slice in slices {
-        if length == 0 {
-            break;
-        }
-        if start < slice.len() {
-            let take = (slice.len() - start).min(length);
-            out.extend_from_slice(&slice[start..start + take]);
-            length -= take;
-            start = 0;
-        } else {
-            start -= slice.len();
-        }
-    }
-    out
 }
 
 impl InMemoryChannelRotator {
     /// Creates a new in-memory channel rotator with segment size threshold and retained backups.
+    /// Total retention capacity is `max_bytes * (backups + 1)`.
     pub fn new(max_bytes: usize, backups: usize) -> Self {
+        let segment_bytes = max_bytes.max(1);
+        let total_capacity = segment_bytes.saturating_mul(backups.saturating_add(1));
         let (broadcast_tx, _) = broadcast::channel(1024);
         Self {
-            max_bytes: max_bytes.max(1),
+            segment_bytes,
             backups,
-            active: RwLock::new(MemorySegment::with_capacity(max_bytes.min(64 * 1024))),
-            backups_queue: RwLock::new(VecDeque::with_capacity(backups)),
+            ring: RwLock::new(ContinuousRingBuffer::new(total_capacity)),
             broadcast_tx,
             pending_line: Mutex::new(BytesMut::new()),
-            cumulative_bytes: AtomicU64::new(0),
         }
     }
 
     /// Creates a new in-memory channel rotator bounded by total stream retention capacity.
-    /// Each segment is clamped to at least 1024 bytes to prevent micro-segment thrashing.
+    /// Each segment size is calculated as `total_capacity / (backups + 1)`.
     pub fn with_total_capacity(total_capacity: usize, backups: usize) -> Self {
         let segment_count = backups.saturating_add(1).max(1);
         let min_total = segment_count.saturating_mul(1024);
         let safe_capacity = total_capacity.max(min_total);
         let segment_bytes = (safe_capacity / segment_count).max(1024);
-        Self::new(segment_bytes, backups)
+        let (broadcast_tx, _) = broadcast::channel(1024);
+        Self {
+            segment_bytes,
+            backups,
+            ring: RwLock::new(ContinuousRingBuffer::new(safe_capacity)),
+            broadcast_tx,
+            pending_line: Mutex::new(BytesMut::new()),
+        }
     }
 
-    /// Returns the maximum byte size of an individual segment.
+    /// Returns the logical byte size of an individual segment.
     #[inline]
     pub fn segment_size(&self) -> usize {
-        self.max_bytes
+        self.segment_bytes
+    }
+
+    /// Returns the configured backup segment count.
+    #[inline]
+    pub fn backups(&self) -> usize {
+        self.backups
     }
 
     /// Assembles `data` into complete newline-delimited lines and broadcasts them.
-    ///
-    /// Bytes are buffered across chunk boundaries so multi-byte UTF-8 sequences
-    /// and lines split across reads are never dropped or broken.
+    /// Only incurs allocation overhead if live receivers are actively subscribed.
     fn broadcast_chunk(&self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -134,6 +85,10 @@ impl InMemoryChannelRotator {
 
         let has_receivers = self.broadcast_tx.receiver_count() > 0;
         let mut pending = self.pending_line.lock();
+        if !has_receivers && pending.is_empty() {
+            return;
+        }
+
         pending.extend_from_slice(data);
 
         let mut start = 0usize;
@@ -178,80 +133,31 @@ impl InMemoryChannelRotator {
         pending.clear();
     }
 
-    /// Appends a raw chunk of bytes, rotating segments when `max_bytes` is reached.
-    /// Oversize chunks larger than `max_bytes` are split across segments.
+    /// Appends a raw chunk of bytes to the contiguous in-memory ring buffer.
+    /// Zero heap allocations when writing.
     pub fn append_bytes(&self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
 
         self.broadcast_chunk(data);
-
-        let mut rem = data;
-        while !rem.is_empty() {
-            // Lock order: active before backups_queue.
-            let mut active = self.active.write();
-
-            if active.len() >= self.max_bytes && !active.is_empty() {
-                let mut backups = self.backups_queue.write();
-                if self.backups > 0 {
-                    if backups.len() >= self.backups {
-                        backups.pop_front();
-                    }
-                    let old_active = std::mem::replace(
-                        &mut *active,
-                        MemorySegment::with_capacity(self.max_bytes.min(64 * 1024)),
-                    );
-                    backups.push_back(old_active);
-                } else {
-                    active.data.clear();
-                    active.line_offsets.clear();
-                }
-            }
-
-            let space = self.max_bytes.saturating_sub(active.len()).max(1);
-            let chunk_len = rem.len().min(space);
-            let chunk = &rem[..chunk_len];
-
-            let prev_len = active.data.len();
-            active.data.extend_from_slice(chunk);
-
-            for (i, &b) in chunk.iter().enumerate() {
-                if b == b'\n' {
-                    active.line_offsets.push(prev_len + i + 1);
-                }
-            }
-
-            self.cumulative_bytes
-                .fetch_add(chunk_len as u64, Ordering::Relaxed);
-            rem = &rem[chunk_len..];
-        }
+        self.ring.write().write_bytes(data);
     }
 
     /// Returns the total cumulative bytes written to this channel since inception/seeding.
     #[inline]
     pub fn cumulative_bytes(&self) -> u64 {
-        self.cumulative_bytes.load(Ordering::SeqCst)
+        self.ring.read().cumulative_bytes()
     }
 
     /// Seeds this in-memory channel with the trailing chunk of an existing disk file,
     /// sets the initial cumulative byte offset to the disk file size, and rotates
     /// the on-disk file (renaming to `<path>.1`) to prevent subsequent disk writes.
     pub fn seed_from_file(&self, path: &Path, max_seed_bytes: usize) -> std::io::Result<u64> {
-        let bounded_seed = max_seed_bytes.min(self.max_bytes);
+        let bounded_seed = max_seed_bytes.min(self.segment_bytes);
         match LogFileReader::seed_and_archive(path, bounded_seed, Some("1"))? {
             Some((bytes, file_size)) => {
-                if !bytes.is_empty() {
-                    let mut active = self.active.write();
-                    let prev_len = active.data.len();
-                    active.data.extend_from_slice(&bytes);
-                    for (i, &b) in bytes.iter().enumerate() {
-                        if b == b'\n' {
-                            active.line_offsets.push(prev_len + i + 1);
-                        }
-                    }
-                }
-                self.cumulative_bytes.store(file_size, Ordering::SeqCst);
+                self.ring.write().seed(&bytes, file_size);
                 Ok(file_size)
             }
             None => Ok(0),
@@ -259,216 +165,42 @@ impl InMemoryChannelRotator {
     }
 
     /// Appends a text line with an added newline delimiter.
-    ///
-    /// Broadcasts exactly once via [`Self::append_bytes`].
+    /// Broadcasts exactly once via live broadcast channel.
     pub fn append_line(&self, line: &str) {
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-        self.append_bytes(&bytes);
+        if self.broadcast_tx.receiver_count() > 0 {
+            let _ = self.broadcast_tx.send(line.to_string());
+        }
+        self.ring.write().write_line(line);
     }
 
-    /// Returns a flat snapshot of all active and backup segment bytes.
+    /// Returns a flat snapshot of all currently retained bytes.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        // Lock order: active before backups_queue (data order is still
-        // backups first, then active, for chronological layout).
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-
-        let total_size: usize = active.len() + backups.iter().map(|s| s.len()).sum::<usize>();
-        let mut out = Vec::with_capacity(total_size);
-
-        for seg in backups.iter() {
-            out.extend_from_slice(&seg.data);
-        }
-        out.extend_from_slice(&active.data);
-        out
+        self.ring.read().snapshot_bytes()
     }
 
     /// Reads bytes starting from monotonic offset with length, returning `(content, total_size, overflow)`.
-    /// Slices directly across segment windows to eliminate O(N) buffer clones and data/offset races.
     pub fn read_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-        let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
-
-        let retained_sz: usize = backups.iter().map(|s| s.len()).sum::<usize>() + active.len();
-        let oldest_available_offset = total_sz.saturating_sub(retained_sz as i64);
-
-        let mut overflow = false;
-        let mut len = length;
-
-        if len < 0 {
-            len = 0;
-        }
-
-        let (start_off, to_read) = if offset < 0 {
-            let target = total_sz + offset;
-            let actual_start = if target < oldest_available_offset {
-                overflow = true;
-                oldest_available_offset
-            } else {
-                target
-            };
-            let rem = (total_sz - actual_start) as usize;
-            let r = if len == 0 {
-                rem
-            } else {
-                (len as usize).min(rem)
-            };
-            (actual_start, r)
-        } else {
-            if offset < oldest_available_offset {
-                overflow = true;
-                (oldest_available_offset, (len as usize).min(retained_sz))
-            } else if offset >= total_sz {
-                return (String::new(), total_sz, false);
-            } else {
-                let rem = (total_sz - offset) as usize;
-                let r = if len == 0 {
-                    rem
-                } else {
-                    (len as usize).min(rem)
-                };
-                (offset, r)
-            }
-        };
-
-        let local_start = (start_off - oldest_available_offset) as usize;
-        let local_end = (local_start + to_read).min(retained_sz);
-        let slice_len = local_end.saturating_sub(local_start);
-
-        let slices: Vec<&[u8]> = backups
-            .iter()
-            .map(|s| s.data.as_slice())
-            .chain(std::iter::once(active.data.as_slice()))
-            .collect();
-        let window = extract_window(&slices, local_start, slice_len);
-
-        (
-            String::from_utf8_lossy(&window).to_string(),
-            total_sz,
-            overflow,
-        )
+        self.ring.read().read_bytes(offset, length)
     }
 
     /// Tails bytes backwards from buffer end or monotonic offset, matching supervisor XML-RPC semantics.
-    /// Slices directly across segment windows to eliminate O(N) buffer clones and data/offset races.
     pub fn tail_bytes(&self, offset: i64, length: i64) -> (String, i64, bool) {
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-        let total_sz = self.cumulative_bytes.load(Ordering::SeqCst) as i64;
-
-        let retained_sz: usize = backups.iter().map(|s| s.len()).sum::<usize>() + active.len();
-        let oldest_available_offset = total_sz.saturating_sub(retained_sz as i64);
-
-        let mut len = length;
-        if len < 0 {
-            len = 0;
-        }
-
-        let slices: Vec<&[u8]> = backups
-            .iter()
-            .map(|s| s.data.as_slice())
-            .chain(std::iter::once(active.data.as_slice()))
-            .collect();
-
-        if offset == 0 {
-            let actual_len = if len == 0 {
-                retained_sz
-            } else {
-                (len as usize).min(retained_sz)
-            };
-            let start = retained_sz.saturating_sub(actual_len);
-            let window = extract_window(&slices, start, actual_len);
-            let has_overflow = total_sz > actual_len as i64;
-            return (
-                String::from_utf8_lossy(&window).to_string(),
-                total_sz,
-                has_overflow,
-            );
-        }
-
-        let mut overflow = false;
-        let mut off = offset;
-
-        if off < oldest_available_offset {
-            overflow = true;
-            off = oldest_available_offset;
-        }
-
-        if off >= total_sz {
-            return (String::new(), total_sz, false);
-        }
-
-        let local_start = (off - oldest_available_offset) as usize;
-        let to_read = if len == 0 {
-            retained_sz - local_start
-        } else {
-            (len as usize).min(retained_sz - local_start)
-        };
-        let local_end = local_start + to_read;
-        let slice_len = local_end.saturating_sub(local_start);
-        let window = extract_window(&slices, local_start, slice_len);
-
-        let new_offset = off + slice_len as i64;
-        (
-            String::from_utf8_lossy(&window).to_string(),
-            new_offset,
-            overflow,
-        )
+        self.ring.read().tail_bytes(offset, length)
     }
 
-    /// Returns the most recent `max_lines` lines.
+    /// Returns the most recent `max_lines` lines as standard `String`s.
     pub fn read_lines(&self, max_lines: Option<usize>) -> Vec<String> {
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-
-        let slices: Vec<&[u8]> = backups
-            .iter()
-            .map(|s| s.data.as_slice())
-            .chain(std::iter::once(active.data.as_slice()))
-            .collect();
-
-        let mut lines = Vec::new();
-        let mut cur_line_bytes = Vec::new();
-        for slice in slices {
-            for &b in slice {
-                if b == b'\n' {
-                    if cur_line_bytes.last() == Some(&b'\r') {
-                        cur_line_bytes.pop();
-                    }
-                    lines.push(String::from_utf8_lossy(&cur_line_bytes).into_owned());
-                    cur_line_bytes.clear();
-                } else {
-                    cur_line_bytes.push(b);
-                }
-            }
-        }
-        if !cur_line_bytes.is_empty() {
-            if cur_line_bytes.last() == Some(&b'\r') {
-                cur_line_bytes.pop();
-            }
-            lines.push(String::from_utf8_lossy(&cur_line_bytes).into_owned());
-        }
-
-        match max_lines {
-            Some(n) if n < lines.len() => lines[lines.len() - n..].to_vec(),
-            _ => lines,
-        }
+        self.ring.read().read_lines(max_lines)
     }
 
-    /// Clears both active and backup segments, any pending broadcast line, and resets cumulative bytes.
+    /// Returns the most recent `max_lines` lines as zero-copy `ByteString` slices.
+    pub fn read_line_slices(&self, max_lines: Option<usize>) -> Vec<ByteString> {
+        self.ring.read().read_line_slices(max_lines)
+    }
+
+    /// Clears the ring buffer, any pending broadcast line, and resets cumulative bytes.
     pub fn clear(&self) {
-        {
-            // Lock order: active before backups_queue.
-            let mut active = self.active.write();
-            let mut backups = self.backups_queue.write();
-            active.data.clear();
-            active.line_offsets.clear();
-            backups.clear();
-        }
-        self.cumulative_bytes.store(0, Ordering::SeqCst);
+        self.ring.write().clear();
         self.pending_line.lock().clear();
     }
 
@@ -477,20 +209,14 @@ impl InMemoryChannelRotator {
         self.broadcast_tx.subscribe()
     }
 
-    /// Returns the total bytes across active and backup segments.
+    /// Returns the total bytes currently retained in the ring buffer.
     pub fn byte_size(&self) -> usize {
-        // Lock order: active before backups_queue.
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-        active.len() + backups.iter().map(|s| s.len()).sum::<usize>()
+        self.ring.read().byte_size()
     }
 
-    /// Returns the total line count across active and backup segments.
+    /// Returns the total line count currently retained in the ring buffer.
     pub fn line_count(&self) -> usize {
-        // Lock order: active before backups_queue.
-        let active = self.active.read();
-        let backups = self.backups_queue.read();
-        active.line_count() + backups.iter().map(|s| s.line_count()).sum::<usize>()
+        self.ring.read().line_count()
     }
 }
 
@@ -684,23 +410,19 @@ mod tests {
 
     #[test]
     fn test_in_memory_channel_rotation() {
-        // max 20 bytes per segment, 2 backups
+        // max 20 bytes per segment, 2 backups = 60 bytes total capacity
         let rotator = InMemoryChannelRotator::new(20, 2);
 
         rotator.append_line("12345"); // ~6 bytes
         rotator.append_line("67890"); // ~6 bytes
         rotator.append_line("abcde"); // ~6 bytes -> total ~18 bytes
 
-        assert_eq!(rotator.backups_queue.read().len(), 0);
+        assert_eq!(rotator.line_count(), 3);
 
-        // Next line triggers rotation of first segment to backups
         rotator.append_line("fghij");
-        assert_eq!(rotator.backups_queue.read().len(), 1);
-
         rotator.append_line("klmno");
         rotator.append_line("pqrst");
-        rotator.append_line("uvwxy"); // triggers another rotation (18 + 6 > 20)
-        assert_eq!(rotator.backups_queue.read().len(), 2);
+        rotator.append_line("uvwxy");
 
         // Snapshot still contains lines within retention
         let lines = rotator.read_lines(None);
@@ -784,8 +506,6 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        // Small max_bytes forces frequent rotation (active→backups write path)
-        // while readers hold backups→active in the old code — AB-BA deadlock.
         let rotator = Arc::new(InMemoryChannelRotator::new(32, 2));
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -814,7 +534,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         stop.store(true, Ordering::Relaxed);
 
-        // Join with timeout so a deadlock fails fast instead of hanging CI.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = writer.join();
@@ -827,28 +546,17 @@ mod tests {
 
     #[test]
     fn test_oversize_chunk_splits_across_segments() {
-        // max 20 bytes per segment, 3 backups
+        // max 20 bytes per segment, 3 backups = 80 bytes total capacity
         let rotator = InMemoryChannelRotator::new(20, 3);
 
-        // Append a 50-byte chunk in one call (2.5x the segment limit)
+        // Append a 50-byte chunk in one call
         let large_payload = b"0123456789abcdefghij0123456789abcdefghij0123456789";
         assert_eq!(large_payload.len(), 50);
 
         rotator.append_bytes(large_payload);
 
-        let active = rotator.active.read();
-        let backups = rotator.backups_queue.read();
-
-        // Active segment must never exceed max_bytes (20)
-        assert!(active.len() <= 20, "active.len() {} > 20", active.len());
-        // All backup segments must never exceed max_bytes (20)
-        for (idx, seg) in backups.iter().enumerate() {
-            assert!(seg.len() <= 20, "backup[{}] len {} > 20", idx, seg.len());
-        }
-
-        // Total retained bytes across active and backups must equal full 50 bytes (20 + 20 + 10)
-        let total: usize = active.len() + backups.iter().map(|s| s.len()).sum::<usize>();
-        assert_eq!(total, 50);
+        // Total retained bytes must equal full 50 bytes
+        assert_eq!(rotator.byte_size(), 50);
 
         // Cumulative monotonic bytes must be exactly 50
         assert_eq!(rotator.cumulative_bytes(), 50);
@@ -883,7 +591,6 @@ mod tests {
 
         // Verify min safe segment clamping (at least 1024 bytes per segment)
         let clamped = InMemoryChannelRotator::with_total_capacity(100, 3);
-        // 4 segments * 1024 = 4096 min capacity -> 1024 per segment
         assert_eq!(clamped.segment_size(), 1024);
     }
 }

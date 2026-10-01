@@ -103,10 +103,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/reload", post(restart_daemon))
         .route("/api/v1/restart", post(restart_daemon))
         .route("/api/v1/events", get(stream_system_events))
+        .route(
+            "/api/v1/all/logs",
+            get(read_all_logs)
+                .delete(clear_all_logs)
+                .post(clear_all_logs),
+        )
         .route("/api/v1/logs/stream", get(stream_all_logs))
-        .route("/api/v1/programs/{name}/logs", get(read_logs))
+        .route(
+            "/api/v1/programs/{name}/logs",
+            get(read_logs)
+                .delete(clear_program_logs)
+                .post(clear_program_logs),
+        )
         .route("/api/v1/programs/{name}/logs/stream", get(stream_logs))
         .route("/api/v1/programs/{name}/stdin", post(send_stdin))
+        .route("/api/v1/info", get(system_info))
+        .route("/api/v1/system/info", get(system_info))
         .route("/api/v1/auth/config", get(auth_config))
         .route("/api/v1/auth/login", post(auth_login))
         .route("/api/v1/auth/logout", post(auth_logout))
@@ -133,12 +146,26 @@ async fn record_activity_middleware(
     next.run(req).await
 }
 
-/// Auth capability flags reported to the Web UI before login.
+/// Auth capability and daemon metadata reported to the Web UI before login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfigDto {
     pub basic: bool,
     pub token: bool,
     pub session: bool,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub server_name: String,
+    #[serde(default)]
+    pub github_url: String,
+}
+
+/// System information and daemon metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemInfoDto {
+    pub version: String,
+    pub server_name: String,
+    pub github_url: String,
 }
 
 /// JSON body accepted by `POST /api/v1/auth/login`.
@@ -147,6 +174,16 @@ pub struct LoginRequest {
     pub username: Option<String>,
     pub password: Option<String>,
     pub token: Option<String>,
+}
+
+/// GET /api/v1/system/info and GET /api/v1/info
+async fn system_info(State(state): State<AppState>) -> Json<ApiResponse<SystemInfoDto>> {
+    let server_name = state.manager.server_identifier().to_string();
+    Json(ApiResponse::ok(SystemInfoDto {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        server_name,
+        github_url: "https://github.com/spritetong/rsupervisord".to_string(),
+    }))
 }
 
 /// GET /api/v1/auth/config — public; tells the UI which login fields to show
@@ -163,10 +200,16 @@ async fn auth_config(
     let session = session_id_from_headers(&headers)
         .map(|sid| state.sessions.validate_session(&sid))
         .unwrap_or(false);
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let server_name = state.manager.server_identifier().to_string();
+    let github_url = "https://github.com/spritetong/rsupervisord".to_string();
     Json(ApiResponse::ok(AuthConfigDto {
         basic: state.basic_auth.is_some(),
         token: auth.auth_token.is_some(),
         session,
+        version,
+        server_name,
+        github_url,
     }))
 }
 
@@ -878,12 +921,39 @@ async fn restart_daemon(
     }
 }
 
+/// GET /api/v1/all/logs
+async fn read_all_logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> Result<(StatusCode, Json<ApiResponse<LogLinesResponse>>), StatusCode> {
+    match state.manager.read_logs("all", Some(query.lines)).await {
+        Ok(lines) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok(LogLinesResponse {
+                name: "all".to_string(),
+                lines,
+            })),
+        )),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(format!(
+                "Failed to read aggregated logs: {}",
+                e
+            ))),
+        )),
+    }
+}
+
 /// GET /api/v1/programs/:name/logs
 async fn read_logs(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<(StatusCode, Json<ApiResponse<LogLinesResponse>>), StatusCode> {
+    if name == "all" {
+        return read_all_logs(State(state), Query(query)).await;
+    }
+
     match state.manager.read_logs(&name, Some(query.lines)).await {
         Ok(lines) => Ok((
             StatusCode::OK,
@@ -902,11 +972,58 @@ async fn read_logs(
     }
 }
 
+/// DELETE/POST /api/v1/programs/:name/logs
+async fn clear_program_logs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), StatusCode> {
+    if name == "all" {
+        return clear_all_logs(State(state)).await;
+    }
+
+    match state.manager.clear_process_logs(&name).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok(serde_json::json!({ "cleared": true }))),
+        )),
+        Err(ProgramError::NotFound { .. }) => Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err(format!("Program '{}' not found", name))),
+        )),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(format!("Failed to clear logs: {}", e))),
+        )),
+    }
+}
+
+/// DELETE/POST /api/v1/all/logs
+async fn clear_all_logs(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), StatusCode> {
+    match state.manager.clear_all_process_logs().await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse::ok(serde_json::json!({ "cleared": true }))),
+        )),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(format!("Failed to clear all logs: {}", e))),
+        )),
+    }
+}
+
 /// GET /api/v1/programs/:name/logs/stream
 async fn stream_logs(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+) -> Result<Response, StatusCode> {
+    if name == "all" {
+        return stream_all_logs(State(state))
+            .await
+            .map(|sse| sse.into_response());
+    }
+
     let rx = state
         .manager
         .subscribe_logs(&name)
@@ -917,12 +1034,12 @@ async fn stream_logs(
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
         let _guard = &stream_guard;
         match item {
-            Ok(line) => Some(Ok(Event::default().data(line))),
+            Ok(line) => Some(Ok::<_, Infallible>(Event::default().data(line))),
             Err(_) => None,
         }
     });
 
-    Ok(Sse::new(stream))
+    Ok(Sse::new(stream).into_response())
 }
 
 /// GET /api/v1/events

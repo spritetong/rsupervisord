@@ -174,18 +174,19 @@ where
                     }
                 }
 
-                let line = String::from_utf8_lossy(&buf);
-                // Push to in-memory RingBuffer (for tail -f and web streaming)
+                // Push to in-memory RingBuffer (zero string allocation)
                 if let Some(ref prefix) = ring_prefix {
-                    ring_buffer.push(format!("{}: {}", prefix, line));
+                    ring_buffer.push_prefixed(prefix, &buf);
                 } else {
-                    ring_buffer.push(&*line);
+                    ring_buffer.push_bytes(&buf);
                 }
 
-                // Broadcast to the central EventHub LogBus if configured
+                // Broadcast to the central EventHub LogBus only if listeners/subscribers are active
                 if let Some(ref hub) = event_hub
                     && let Some(ref prog) = program_name
+                    && (events_enabled || hub.has_log_subscribers())
                 {
+                    let line = String::from_utf8_lossy(&buf);
                     hub.publish_log(LogEntry::with_details(
                         prog,
                         group_name.clone(),
@@ -198,11 +199,14 @@ where
 
                 // Write chunk to generic log backend if configured
                 if let Some(ref b) = backend {
+                    let mut chunk_bytes = bytes::BytesMut::with_capacity(buf.len() + 1);
+                    chunk_bytes.extend_from_slice(&buf);
+                    chunk_bytes.extend_from_slice(b"\n");
                     let chunk = LogChunk::new(
                         channel,
                         program_name.clone().unwrap_or_default(),
                         pid,
-                        format!("{}\n", line),
+                        chunk_bytes.freeze(),
                     );
                     if let Err(e) = b.write_chunk(&chunk).await {
                         tracing::warn!(

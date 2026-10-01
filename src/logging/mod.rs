@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod composite;
+pub mod continuous_ring;
 pub mod destination;
 pub mod in_memory_rotator;
 pub mod pump;
@@ -18,6 +19,7 @@ pub mod types;
 
 pub use backend::LogBackend;
 pub use composite::{CompositeLogBackend, NullLogBackend, StdIoLogBackend, StdIoStream};
+pub use continuous_ring::ContinuousRingBuffer;
 pub use destination::{
     BackendBuildOptions, LogDestination, SyslogFacility, SyslogProto, SyslogSeverity, SyslogTarget,
 };

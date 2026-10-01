@@ -169,6 +169,21 @@ programs:
         logs
     );
 
+    // 4b. Clear logs and verify buffer is emptied
+    client
+        .clear_logs("worker")
+        .await
+        .expect("clear worker logs");
+    let cleared_logs = client
+        .read_logs("worker", 50)
+        .await
+        .expect("read cleared logs");
+    assert!(
+        cleared_logs.is_empty(),
+        "Expected logs to be cleared, got: {:?}",
+        cleared_logs
+    );
+
     // 5. Restart worker
     let restart_res = client
         .restart("worker", true, 10)
@@ -1501,6 +1516,126 @@ programs:
         .await
         .expect("get multi_hooked:1");
     assert_eq!(multi1.pre_start.as_deref(), Some("echo multi-pre-start"));
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_server_info_api_and_custom_server_name() {
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("server_info");
+    let ipc_str = ipc_path.to_string_lossy().replace('\\', "\\\\");
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_str}"
+  http_bind: "127.0.0.1:{port}"
+  server_name: "custom-cluster-01"
+"#
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse config");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(manager_handle, None, config.server.clone());
+
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
+
+    // Verify /api/v1/info
+    let info = client.system_info().await.expect("get info");
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["server_name"], "custom-cluster-01");
+    assert_eq!(
+        info["github_url"],
+        "https://github.com/spritetong/rsupervisord"
+    );
+
+    // Verify /api/v1/auth/config returns the same metadata
+    let auth_cfg = client.auth_config().await.expect("get auth config");
+    assert_eq!(auth_cfg["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(auth_cfg["server_name"], "custom-cluster-01");
+
+    server_cancel.cancel();
+    let _ = server_task.await;
+    manager.shutdown().await.expect("shutdown manager");
+}
+
+#[tokio::test]
+async fn test_server_engine_all_logs_endpoint() {
+    let port = get_ephemeral_port();
+    let ipc_path = get_test_ipc_path("all_logs");
+    let ipc_str = ipc_path.to_string_lossy().replace('\\', "\\\\");
+
+    let yaml = format!(
+        r#"
+server:
+  uds_path: "{ipc_str}"
+  http_bind: "127.0.0.1:{port}"
+
+programs:
+  logger_a:
+    command: |-
+      {cmd_a}
+    autostart: true
+    autorestart: never
+  logger_b:
+    command: |-
+      {cmd_b}
+    autostart: true
+    autorestart: never
+"#,
+        cmd_a = get_worker_command("ALPHA_STARTUP_LOG", 10),
+        cmd_b = get_worker_command("BETA_STARTUP_LOG", 10),
+    );
+
+    let config = SupervisorConfig::from_yaml_str(&yaml).expect("parse config");
+    let mut manager = SupervisorManager::new(&config).expect("create manager");
+    let manager_handle = manager.handle();
+
+    let server_cancel = CancellationToken::new();
+    let server = ServerEngine::new(manager_handle.clone(), None, config.server.clone());
+
+    let server_token = server_cancel.clone();
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(server_token).await;
+    });
+
+    manager_handle.start_all().await.expect("start all");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let client = SupervisorClient::new(Endpoint::Tcp(format!("127.0.0.1:{}", port)), None);
+
+    // 1. Verify read_logs("all", ...) fetches aggregated historical lines
+    let all_logs = client.read_logs("all", 100).await.expect("read all logs");
+    assert!(
+        all_logs.iter().any(|l| l.contains("ALPHA_STARTUP_LOG")),
+        "Expected ALPHA_STARTUP_LOG in all_logs, got: {:?}",
+        all_logs
+    );
+    assert!(
+        all_logs.iter().any(|l| l.contains("BETA_STARTUP_LOG")),
+        "Expected BETA_STARTUP_LOG in all_logs, got: {:?}",
+        all_logs
+    );
+
+    // 2. Clear all logs and verify
+    client.clear_logs("all").await.expect("clear all logs");
+    let cleared_logs = client
+        .read_logs("all", 100)
+        .await
+        .expect("read cleared all logs");
+    assert_eq!(cleared_logs.len(), 0);
 
     server_cancel.cancel();
     let _ = server_task.await;

@@ -91,8 +91,11 @@ impl ProcessProgram {
             &config.name,
             &config.group,
         )));
-        let ring_buffer = Arc::new(RingBuffer::default());
         let in_memory_buffer_size = config.logs.effective_buffer_size();
+        let ring_buffer = Arc::new(RingBuffer::with_byte_capacity(
+            in_memory_buffer_size,
+            Some(crate::consts::DEFAULT_LOG_LINES.max(2000)),
+        ));
         let stdout_backups = config.logs.effective_stdout_backups();
         let stderr_backups = config.logs.effective_stderr_backups();
 

@@ -61,7 +61,7 @@ pub struct ServerConfig {
     pub password: Option<String>,
     #[serde(default)]
     pub auth_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "server_name", alias = "name")]
     pub identifier: Option<String>,
     /// When true (default), relative paths in path fields are absolutized against the
     /// config file directory at the parse boundary. When false, relative paths are

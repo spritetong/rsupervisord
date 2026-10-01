@@ -18,6 +18,10 @@ worker_threads: 2
 # 1. Daemon Server Engine Settings
 # ------------------------------------------------------------------------------
 server:
+  # Optional server display name (alias: identifier). Displayed in the Web UI header
+  # and used in event listener protocols (default: "rsupervisord").
+  # server_name: "prod-server-01"
+
   # Local IPC socket path (Unix Domain Socket on Unix, Named Pipe / UDS on Windows)
   # Default on Unix: /var/run/supervisord.sock (or /tmp/supervisord.sock)
   # Default on Windows: \\.\pipe\supervisord.rsupervisord.ipc (or C:/run/supervisord.sock for Caddy UDS)
