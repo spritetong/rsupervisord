@@ -25,6 +25,9 @@ debug = 0
 strip = true
 
 [dependencies]
+# Memory allocator
+mimalloc = { version = "0.1"}
+
 # Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["time"] }

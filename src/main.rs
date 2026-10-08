@@ -5,8 +5,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use clap::Parser;
+use mimalloc::MiMalloc;
 use rsupervisord::daemon::{load_config, set_daemon_args};
 use rsupervisord::{DaemonArgs, build_tokio_runtime, run_daemon};
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> anyhow::Result<()> {
     // Capture exe_path from argv[0] before any CLI argument parsing.

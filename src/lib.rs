@@ -46,6 +46,10 @@ pub fn build_tokio_runtime(
             .and_then(|v| v.parse::<u32>().ok())
     });
 
+    // SAFETY: remove the `TOKIO_WORKER_THREADS` env var before building the runtime.
+    // Remove the `TOKIO_WORKER_THREADS` env var to avoid subprocesses inheriting the env var.
+    unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
+
     let mut builder = match threads {
         Some(1) => {
             tracing::info!("Initialized single-threaded (current_thread) Tokio runtime");
