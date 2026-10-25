@@ -209,11 +209,12 @@ impl ManagerHandle {
         }
 
         // 3. Group match e.g. "worker" matches all instances with group == "worker"
-        let matches: Vec<ProgramConfig> = configs
+        let mut matches: Vec<ProgramConfig> = configs
             .values()
             .filter(|cfg| cfg.group == trimmed)
             .cloned()
             .collect();
+        matches.sort_by(|a, b| a.name.cmp(&b.name));
         matches
     }
 
@@ -1654,7 +1655,7 @@ impl ManagerActor {
                             let _ = reply.send(res);
                         }
                         ManagerCommand::GetAllStatus { reply } => {
-                            let statuses = self
+                            let mut statuses: Vec<_> = self
                                 .programs
                                 .iter()
                                 .map(|(n, p)| {
@@ -1664,6 +1665,9 @@ impl ManagerActor {
                                     st
                                 })
                                 .collect();
+                            statuses.sort_by(|a, b| {
+                                a.group.cmp(&b.group).then_with(|| a.name.cmp(&b.name))
+                            });
                             let _ = reply.send(statuses);
                         }
                         ManagerCommand::ReadLogs { name, lines, reply } => {
@@ -1673,7 +1677,9 @@ impl ManagerActor {
                                     history.into_iter().map(|e| e.formatted_line()).collect()
                                 } else {
                                     let mut all = Vec::new();
-                                    for (pname, prog) in &self.programs {
+                                    let mut progs: Vec<_> = self.programs.iter().collect();
+                                    progs.sort_by_key(|(pname, _)| *pname);
+                                    for (pname, prog) in progs {
                                         for line in prog.read_logs(lines) {
                                             all.push(format!("[{}] {}", pname, line));
                                         }
@@ -1842,12 +1848,13 @@ impl ManagerActor {
         }
 
         // 3. Group match e.g. "worker" matches all instances with group == "worker"
-        let matches: Vec<String> = self
+        let mut matches: Vec<String> = self
             .configs
             .iter()
             .filter(|(_, cfg)| cfg.group == trimmed)
             .map(|(p_name, _)| p_name.clone())
             .collect();
+        matches.sort();
         matches
     }
 

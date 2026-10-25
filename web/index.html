@@ -265,6 +265,18 @@
       position: relative;
       display: flex;
       align-items: center;
+      margin: 0;
+    }
+
+    input[type="search"].input-text {
+      -webkit-appearance: textfield;
+      appearance: textfield;
+    }
+
+    input[type="search"]::-webkit-search-decoration,
+    input[type="search"]::-webkit-search-cancel-button {
+      -webkit-appearance: none;
+      appearance: none;
     }
 
     .search-icon {
@@ -885,13 +897,23 @@
     <div class="toolbar">
       <div class="toolbar-left">
         <!-- Search filter -->
-        <div class="search-box">
+        <form role="search" class="search-box" @submit.prevent autocomplete="off">
           <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
-          <input type="text" class="input-text" v-model="searchQuery" placeholder="Filter programs...">
-        </div>
+          <input
+            type="search"
+            name="program-filter-search"
+            class="input-text"
+            v-model="searchQuery"
+            placeholder="Filter programs..."
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+          >
+        </form>
 
         <!-- Status Filter Dropdown -->
         <select class="select-dropdown" v-model="filterStatus">
@@ -980,14 +1002,38 @@
             <th style="width: 40px; text-align: center;">
               <input type="checkbox" class="checkbox-custom" :checked="allSelected" :indeterminate="indeterminateSelected" @change="toggleSelectAll">
             </th>
-            <th>Program</th>
-            <th>Group</th>
-            <th>Status</th>
-            <th>Health</th>
-            <th>PID</th>
-            <th>CPU</th>
-            <th>Memory</th>
-            <th>Uptime</th>
+            <th @click="toggleSort('name')" style="cursor: pointer; user-select: none;" title="Click to sort by program name">
+              Program
+              <span v-if="sortColumn === 'name'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('group')" style="cursor: pointer; user-select: none;" title="Click to sort by group">
+              Group
+              <span v-if="sortColumn === 'group'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('state')" style="cursor: pointer; user-select: none;" title="Click to sort by status">
+              Status
+              <span v-if="sortColumn === 'state'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('health')" style="cursor: pointer; user-select: none;" title="Click to sort by health">
+              Health
+              <span v-if="sortColumn === 'health'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('pid')" style="cursor: pointer; user-select: none;" title="Click to sort by PID">
+              PID
+              <span v-if="sortColumn === 'pid'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('cpu')" style="cursor: pointer; user-select: none;" title="Click to sort by CPU">
+              CPU
+              <span v-if="sortColumn === 'cpu'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('mem')" style="cursor: pointer; user-select: none;" title="Click to sort by memory">
+              Memory
+              <span v-if="sortColumn === 'mem'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
+            <th @click="toggleSort('uptime')" style="cursor: pointer; user-select: none;" title="Click to sort by uptime">
+              Uptime
+              <span v-if="sortColumn === 'uptime'" style="font-size: 10px;">{{ sortAsc ? ' ▲' : ' ▼' }}</span>
+            </th>
             <th style="text-align: right;">Actions</th>
           </tr>
         </thead>
@@ -1302,7 +1348,7 @@
 
     <!-- Login Modal -->
     <div class="modal-backdrop" v-if="authModalOpen">
-      <div class="modal-card" style="max-width: 440px;">
+      <form class="modal-card" style="max-width: 440px; margin: 0;" @submit.prevent="submitLogin" autocomplete="on">
         <div class="modal-header">
           <div class="modal-title">Sign in</div>
         </div>
@@ -1312,11 +1358,11 @@
             exchanged for an HttpOnly session cookie and are never stored in the browser.
           </p>
           <div v-if="authBasic" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
-            <input type="text" class="input-text" v-model="loginUsername" placeholder="Username" autocomplete="username" style="width: 100%; padding-left: 12px;">
-            <input type="password" class="input-text" v-model="loginPassword" placeholder="Password" autocomplete="current-password" @keyup.enter="submitLogin" style="width: 100%; padding-left: 12px;">
+            <input type="text" name="username" class="input-text" v-model="loginUsername" placeholder="Username" autocomplete="username" style="width: 100%; padding-left: 12px;">
+            <input type="password" name="password" class="input-text" v-model="loginPassword" placeholder="Password" autocomplete="current-password" style="width: 100%; padding-left: 12px;">
           </div>
           <div v-if="authTokenEnabled">
-            <input type="password" class="input-text" v-model="loginToken" placeholder="Bearer token (server.auth_token)" autocomplete="off" @keyup.enter="submitLogin" style="width: 100%; font-family: var(--font-mono); padding-left: 12px;">
+            <input type="password" name="token" class="input-text" v-model="loginToken" placeholder="Bearer token (server.auth_token)" autocomplete="off" style="width: 100%; font-family: var(--font-mono); padding-left: 12px;">
           </div>
           <div v-if="!authBasic && !authTokenEnabled" style="color: var(--text-muted);">
             No authentication is configured on the server.
@@ -1324,11 +1370,11 @@
           <div v-if="loginError" style="color: #f87171; margin-top: 12px; font-size: 13px;">{{ loginError }}</div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-primary" :disabled="loginPending" @click="submitLogin">
+          <button type="submit" class="btn btn-primary" :disabled="loginPending">
             {{ loginPending ? 'Signing in...' : 'Sign In' }}
           </button>
         </div>
-      </div>
+      </form>
     </div>
 
     <!-- Toast Notifications Container -->
@@ -1349,6 +1395,22 @@
         const searchQuery = ref('');
         const filterStatus = ref('ALL');
         const filterGroup = ref('ALL');
+        const sortColumn = ref('');
+        const sortAsc = ref(true);
+
+        function toggleSort(col) {
+          if (sortColumn.value === col) {
+            if (sortAsc.value) {
+              sortAsc.value = false;
+            } else {
+              sortColumn.value = '';
+              sortAsc.value = true;
+            }
+          } else {
+            sortColumn.value = col;
+            sortAsc.value = true;
+          }
+        }
         const autoRefresh = ref(true);
         const refreshInterval = ref(3);
         const isLoading = ref(false);
@@ -1462,6 +1524,7 @@
 
             const data = await res.json();
             if (data.success && Array.isArray(data.data)) {
+              data.data.sort((a, b) => (a.group || '').localeCompare(b.group || '') || (a.name || '').localeCompare(b.name || ''));
               programs.value = data.data;
               lastUpdated.value = new Date();
 
@@ -1517,6 +1580,34 @@
 
           if (filterGroup.value !== 'ALL') {
             list = list.filter(p => p.group === filterGroup.value);
+          }
+
+          if (sortColumn.value) {
+            const col = sortColumn.value;
+            const asc = sortAsc.value;
+            list = [...list].sort((a, b) => {
+              let valA = a[col];
+              let valB = b[col];
+              if (col === 'pid') {
+                const numA = parseInt(valA, 10) || 0;
+                const numB = parseInt(valB, 10) || 0;
+                return asc ? numA - numB : numB - numA;
+              }
+              if (col === 'cpu') {
+                const numA = parseFloat(valA) || 0;
+                const numB = parseFloat(valB) || 0;
+                return asc ? numA - numB : numB - numA;
+              }
+              if (col === 'mem') {
+                const numA = parseFloat(valA) || 0;
+                const numB = parseFloat(valB) || 0;
+                return asc ? numA - numB : numB - numA;
+              }
+              const strA = String(valA || '');
+              const strB = String(valB || '');
+              const cmp = strA.localeCompare(strB);
+              return asc ? cmp : -cmp;
+            });
           }
 
           return list;
@@ -2093,6 +2184,9 @@
             authSession.value = true;
             authBlocked.value = false;
             authModalOpen.value = false;
+            if (loginUsername.value && searchQuery.value === loginUsername.value) {
+              searchQuery.value = '';
+            }
             loginPassword.value = '';
             loginToken.value = '';
             showToast('Signed in', 'success');
@@ -2243,6 +2337,9 @@
           terminalRef,
           toasts,
           filteredPrograms,
+          sortColumn,
+          sortAsc,
+          toggleSort,
           stats,
           allSelected,
           indeterminateSelected,

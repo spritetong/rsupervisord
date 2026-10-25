@@ -1,6 +1,6 @@
 [package]
 name = "rsupervisord"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Sprite Tong <spritetong@gmail.com>"]
 repository = "https://github.com/spritetong/rsupervisord"
@@ -26,7 +26,7 @@ strip = true
 
 [dependencies]
 # Memory allocator
-mimalloc = { version = "0.1"}
+mimalloc = { version = "0.1" }
 
 # Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
@@ -43,11 +43,11 @@ chrono = { version = "0.4", default-features = false, features = [
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
 # Synchronization primitives & lifecycle guards
-parking_lot = "0.12"
+parking_lot = "0.13"
 scopeguard = "1.2"
 
 # Error handling
@@ -74,7 +74,7 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace"] }
-rust-embed = "8.5"
+rust-embed = "8.13"
 mime_guess = "2.0"
 base64 = "0.23"
 sha1 = "0.11"
@@ -83,7 +83,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 derive_more = { version = "2.1.1", features = ["full"] }
 dashmap = "6.2.1"
 ahash = "0.8.12"
-smallvec = "1.16.1"
+smallvec = "1.16.4"
 paste = "1"
 smart-default = "0.7"
 compact_str = { version = "0.10.0", features = ["serde"] }
