@@ -23,7 +23,9 @@ pub struct UnixPipeReader {
 
 impl UnixPipeReader {
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
-        let async_fd = AsyncFd::new(fd)?;
+        // SAFETY: `fd` is a valid, uniquely owned file descriptor that remains valid
+        // for the entire lifetime of this `AsyncFd`.
+        let async_fd = unsafe { AsyncFd::register(fd)? };
         Ok(Self { inner: async_fd })
     }
 }
