@@ -31,3 +31,17 @@ pub use rotator::LogRotator;
 pub use syslog::SyslogLogBackend;
 pub use transport::{LogTransport, ProcessStdioHandles, TransportStreams};
 pub use types::{LogChannel, LogChunk};
+
+/// Configures global ANSI color suppression.
+///
+/// When `no_color` is true, colorization via the `colored` crate is disabled,
+/// and the `NO_COLOR` environment variable is set to `"1"`.
+pub fn set_no_color(no_color: bool) {
+    if no_color {
+        colored::control::set_override(false);
+        // SAFETY: Early startup or CLI initialization before concurrent threads access env.
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+        }
+    }
+}

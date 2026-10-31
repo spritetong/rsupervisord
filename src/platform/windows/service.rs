@@ -295,6 +295,16 @@ pub fn run_as_service(
     Ok(())
 }
 
+/// Returns the launch arguments used when configuring the Windows service.
+pub fn service_launch_arguments(config_path: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--service"),
+        OsString::from("--no-color"),
+        OsString::from("-c"),
+        config_path.as_os_str().to_os_string(),
+    ]
+}
+
 /// Installs the binary as an auto-start Windows system service with crash recovery.
 ///
 /// `exe_path` and `config_path` are resolved by the caller
@@ -307,11 +317,7 @@ pub fn install_service(cmd_name: &str, exe_path: &Path, config_path: &Path) -> a
         );
     }
 
-    let launch_arguments = vec![
-        OsString::from("--service"),
-        OsString::from("-c"),
-        config_path.as_os_str().to_os_string(),
-    ];
+    let launch_arguments = service_launch_arguments(config_path);
 
     let manager = ServiceManager::local_computer(
         None::<&str>,

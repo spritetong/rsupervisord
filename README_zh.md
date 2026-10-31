@@ -243,6 +243,7 @@ sudo systemctl restart supervisord
 | `--worker-threads <N>` | - | CPU 核心数 | 运行时工作线程数。设为 `1` 时启用单线程模式 |
 | `--service` | - | `false` | 系统服务分发模式（由 Windows SCM 或服务调度器自动隐式调用） |
 | `--allow-unelevated` | - | `false` | 守护进程以特权身份运行时，允许非特权客户端连接本地 IPC |
+| `--no-color` | - | `false` | 禁用 stdout、stderr 及日志输出中的 ANSI 颜色格式 |
 | `service <OP>` | - | - | 系统服务生命周期管理：`install`, `uninstall`, `start`, `stop`, `restart` |
 | `ctl <CMD...>` | - | - | 直接调用控制端功能，等同于调用 `supervisorctl <CMD...>` |
 
@@ -272,6 +273,7 @@ supervisord -c config.yaml --allow-unelevated
 | `--key <TOKEN>` | `-k` | 空 | HTTP REST API 的 Bearer Token 认证密钥 |
 | `--user <USER>` | `-u` | 空 | HTTP Basic Auth 认证用户名 |
 | `--password <PASS>` | `-p` | 空 | HTTP Basic Auth 认证密码 |
+| `--no-color` | - | `false` | 禁用 stdout 及 stderr 输出中的 ANSI 颜色格式 |
 
 #### 常用子命令与操作示例
 

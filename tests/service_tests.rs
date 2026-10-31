@@ -92,3 +92,55 @@ fn test_daemon_args_service_mutual_exclusion() {
     // replacing the old "Only one service management flag" manual check.
     assert!(DaemonArgs::try_parse_from(["supervisord", "service", "install", "start"]).is_err());
 }
+
+#[test]
+fn test_service_invocation_with_no_color_flag() {
+    let args = DaemonArgs::try_parse_from([
+        "supervisord",
+        "--service",
+        "--no-color",
+        "-c",
+        "/etc/supervisord.yaml",
+    ])
+    .unwrap();
+    assert!(args.service);
+    assert!(args.no_color);
+    assert_eq!(
+        args.config.as_deref(),
+        Some(std::path::Path::new("/etc/supervisord.yaml"))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn test_windows_service_launch_arguments_include_no_color() {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    let cfg_path = Path::new(r"C:\etc\supervisord.yaml");
+    let args = rsupervisord::platform::windows::service::service_launch_arguments(cfg_path);
+    assert_eq!(
+        args,
+        vec![
+            OsString::from("--service"),
+            OsString::from("--no-color"),
+            OsString::from("-c"),
+            cfg_path.as_os_str().to_os_string(),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_unix_systemd_unit_includes_no_color() {
+    use std::path::Path;
+
+    let unit = rsupervisord::platform::unix::service::generate_systemd_unit(
+        "supervisord",
+        Path::new("/usr/local/bin/supervisord"),
+        Path::new("/etc/supervisord.yaml"),
+    );
+    assert!(unit.contains(
+        r#"ExecStart="/usr/local/bin/supervisord" --no-color -c "/etc/supervisord.yaml""#
+    ));
+}

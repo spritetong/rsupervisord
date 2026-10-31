@@ -14,6 +14,10 @@
 # Can also be overridden via CLI (--worker-threads <N>) or env var TOKIO_WORKER_THREADS.
 worker_threads: 2
 
+# Disable ANSI color formatting on stdout, stderr, and logging output (default: false).
+# Can also be overridden via CLI (--no-color).
+# no_color: false
+
 # ------------------------------------------------------------------------------
 # 1. Daemon Server Engine Settings
 # ------------------------------------------------------------------------------
@@ -86,6 +90,9 @@ ctl:
   # username: "${SUPERVISOR_HTTP_USER:-}"
   # password: "${SUPERVISOR_HTTP_PASSWORD:-}"
   # auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
+  # Disable ANSI color formatting on supervisorctl stdout/stderr (default: false).
+  # Inherits top-level no_color if omitted.
+  # no_color: false
 
 # ------------------------------------------------------------------------------
 # 2. Daemon Logging Settings
@@ -99,6 +106,10 @@ logging:
 
   # Log verbosity level: trace, debug, info, warn, error (default: info)
   level: "info"
+
+  # Disable ANSI color formatting in logging output (default: false).
+  # Inherits top-level no_color if omitted.
+  # no_color: false
 
   # Maximum log file size before rotation (e.g. 10MB, 20MB, 100MB)
   max_bytes: "20MB"

@@ -243,6 +243,7 @@ sudo systemctl restart supervisord
 | `--worker-threads <N>` | - | CPU cores | Number of runtime worker threads (`1` enables single-threaded mode) |
 | `--service` | - | `false` | System service mode (invoked by Windows SCM or service dispatchers) |
 | `--allow-unelevated` | - | `false` | When daemon is elevated, permits non-elevated clients to connect to local IPC |
+| `--no-color` | - | `false` | Disable ANSI color formatting on stdout, stderr, and logging |
 | `service <OP>` | - | - | System service management: `install`, `uninstall`, `start`, `stop`, `restart` |
 | `ctl <CMD...>` | - | - | Invoke CLI controller commands directly (equivalent to `supervisorctl <CMD...>`) |
 
@@ -272,6 +273,7 @@ supervisord -c config.yaml --allow-unelevated
 | `--key <TOKEN>` | `-k` | Empty | Bearer Token authentication key for HTTP REST API |
 | `--user <USER>` | `-u` | Empty | HTTP Basic Auth username |
 | `--password <PASS>` | `-p` | Empty | HTTP Basic Auth password |
+| `--no-color` | - | `false` | Disable ANSI color formatting on stdout and stderr |
 
 #### Subcommands and Practical Examples
 

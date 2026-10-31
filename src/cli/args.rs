@@ -39,6 +39,10 @@ pub struct CliArgs {
     #[arg(short = 'p', short_alias = 'P', long = "password", global = true)]
     pub password: Option<String>,
 
+    /// Disable ANSI color formatting on stdout and stderr
+    #[arg(long = "no-color", global = true)]
+    pub no_color: bool,
+
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 }
@@ -55,6 +59,9 @@ impl CliArgs {
         }
         if let Some(k) = &self.auth_token {
             ctl.auth_token = Some(k.clone());
+        }
+        if self.no_color {
+            ctl.no_color = Some(true);
         }
         match (&self.user, &self.password) {
             (Some(u), Some(p)) => {

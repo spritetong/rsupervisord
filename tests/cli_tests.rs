@@ -432,6 +432,7 @@ fn test_cli_args_apply_field_independent_overrides() {
         username: Some("cfgu".into()),
         password: Some("cfgp".into()),
         auth_token: Some("cfgk".into()),
+        ..Default::default()
     };
 
     // -s only: overrides serverurl, leaves credentials untouched.
@@ -470,4 +471,97 @@ fn test_cli_args_apply_field_independent_overrides() {
     let args = CliArgs::parse_from(["supervisorctl", "status"]);
     args.apply(&mut ctl);
     assert_eq!(ctl, base());
+}
+
+#[test]
+fn test_no_color_cli_args_parsing() {
+    use rsupervisord::DaemonArgs;
+
+    // Default supervisorctl is false
+    let args = CliArgs::parse_from(["supervisorctl", "status"]);
+    assert!(!args.no_color);
+
+    // --no-color flag enables it
+    let args = CliArgs::parse_from(["supervisorctl", "--no-color", "status"]);
+    assert!(args.no_color);
+
+    let args = CliArgs::parse_from(["supervisorctl", "status", "--no-color"]);
+    assert!(args.no_color);
+
+    // Default supervisord is false
+    let daemon = DaemonArgs::parse_from(["supervisord"]);
+    assert!(!daemon.no_color);
+
+    // --no-color enables it
+    let daemon = DaemonArgs::parse_from(["supervisord", "--no-color"]);
+    assert!(daemon.no_color);
+}
+
+#[test]
+fn test_no_color_yaml_and_config_apply() {
+    use rsupervisord::DaemonArgs;
+    use rsupervisord::config::{CtlConfig, SupervisorConfig};
+
+    // Default YAML deserialization has no_color == false
+    let yaml = r#"
+server:
+  uds_path: "/tmp/sup.sock"
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(!cfg.no_color);
+    assert!(!cfg.is_no_color());
+
+    // Top-level no_color: true
+    let yaml = r#"
+no_color: true
+server:
+  uds_path: "/tmp/sup.sock"
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.no_color);
+    assert!(cfg.is_no_color());
+
+    // Under logging: no_color: true
+    let yaml = r#"
+logging:
+  no_color: true
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(!cfg.no_color);
+    assert_eq!(cfg.logging.no_color, Some(true));
+    assert!(cfg.is_no_color());
+
+    // Under ctl: no_color: true
+    let yaml = r#"
+ctl:
+  no_color: true
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(!cfg.no_color);
+    assert_eq!(cfg.ctl.as_ref().and_then(|c| c.no_color), Some(true));
+    assert!(cfg.is_no_color());
+
+    // DaemonArgs apply overrides config
+    let mut cfg = SupervisorConfig::default();
+    assert!(!cfg.no_color);
+    let daemon_args = DaemonArgs::parse_from(["supervisord", "--no-color"]);
+    daemon_args.apply(&mut cfg);
+    assert!(cfg.no_color);
+    assert!(cfg.is_no_color());
+
+    // CliArgs apply overrides ctl config
+    let mut ctl = CtlConfig::default();
+    assert_eq!(ctl.no_color, None);
+    let cli_args = CliArgs::parse_from(["supervisorctl", "--no-color", "status"]);
+    cli_args.apply(&mut ctl);
+    assert_eq!(ctl.no_color, Some(true));
+}
+
+#[test]
+fn test_set_no_color_suppresses_colored() {
+    use colored::Colorize;
+
+    rsupervisord::logging::set_no_color(true);
+    let colored_str = "hello".green().bold().to_string();
+    assert_eq!(colored_str, "hello");
 }

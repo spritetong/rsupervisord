@@ -131,6 +131,9 @@ pub struct LoggingConfig {
     /// When true, suppress console (stdout/stderr) log output (INI `silent`).
     #[serde(default)]
     pub silent: bool,
+    /// When true, suppress ANSI color formatting in logging output.
+    #[serde(default)]
+    pub no_color: Option<bool>,
 }
 
 impl LoggingConfig {
@@ -410,6 +413,9 @@ pub struct CtlConfig {
     /// Bearer token for protected endpoints (aligns with supervisorctl `-k`).
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// When true, suppress ANSI color formatting on supervisorctl stdout/stderr.
+    #[serde(default)]
+    pub no_color: Option<bool>,
 }
 
 impl CtlConfig {
@@ -463,6 +469,7 @@ impl CtlConfig {
             username: server.uds_username.clone(),
             password: server.uds_password.clone(),
             auth_token: server.auth_token.clone(),
+            no_color: None,
         });
         if let Some(bind) = server.http_bind.as_ref().filter(|b| !b.is_empty()) {
             out.push(Self {
@@ -470,6 +477,7 @@ impl CtlConfig {
                 username: server.username.clone(),
                 password: server.password.clone(),
                 auth_token: server.auth_token.clone(),
+                no_color: None,
             });
         }
         out
@@ -486,6 +494,9 @@ pub struct SupervisorConfig {
     // TODO: Python parity double-fork daemonize when nodaemon is false.
     #[serde(default)]
     pub nodaemon: bool,
+    /// When true, suppress ANSI color formatting across stdout, stderr, and logging output.
+    #[serde(default)]
+    pub no_color: bool,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -526,6 +537,7 @@ impl Default for SupervisorConfig {
         let mut config = Self {
             worker_threads: None,
             nodaemon: false,
+            no_color: false,
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
@@ -546,6 +558,13 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    /// Returns whether ANSI color output should be suppressed based on top-level,
+    /// logging, or supervisorctl client settings.
+    pub fn is_no_color(&self) -> bool {
+        self.no_color
+            || self.logging.no_color.unwrap_or(false)
+            || self.ctl.as_ref().and_then(|c| c.no_color).unwrap_or(false)
+    }
     /// Loads and parses a SupervisorConfig from a file, automatically determining format:
     /// - `.yaml` or `.yml` files are parsed via the YAML pipeline
     /// - all other files (e.g. `.conf`, `.ini`, or extensionless) are parsed via the compatibility INI pipeline

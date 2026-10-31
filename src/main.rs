@@ -18,6 +18,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--no-color") {
+        rsupervisord::logging::set_no_color(true);
+    }
+
     let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
 
     if stem.to_ascii_lowercase().ends_with("ctl") {
@@ -41,6 +45,10 @@ fn main() -> anyhow::Result<()> {
     let daemon_args = DaemonArgs::parse_from(args);
     set_daemon_args(&daemon_args);
 
+    if daemon_args.no_color {
+        rsupervisord::logging::set_no_color(true);
+    }
+
     // Service lifecycle: `supervisord service <install|uninstall|start|stop|restart>`
     if let Some(rsupervisord::daemon::DaemonAction::Service { op }) = &daemon_args.action {
         return rsupervisord::service::run_service_op(*op, daemon_args.config.as_deref());
@@ -57,6 +65,11 @@ fn main() -> anyhow::Result<()> {
 
     let worker_threads = load_config(&config_path, Some(&daemon_args))
         .ok()
+        .inspect(|c| {
+            if c.is_no_color() {
+                rsupervisord::logging::set_no_color(true);
+            }
+        })
         .and_then(|c| c.worker_threads)
         .or(daemon_args.worker_threads)
         .map(|w| w as u32);

@@ -47,6 +47,10 @@ pub struct DaemonArgs {
     #[arg(long = "allow-unelevated")]
     pub allow_unelevated: bool,
 
+    /// Disable ANSI color formatting on stdout, stderr, and logging output
+    #[arg(long = "no-color", global = true)]
+    pub no_color: bool,
+
     /// Service lifecycle management (e.g. 'service install')
     #[command(subcommand)]
     pub action: Option<DaemonAction>,
@@ -93,6 +97,9 @@ impl DaemonArgs {
         }
         if let Some(level) = &self.loglevel {
             config.logging.level = level.clone();
+        }
+        if self.no_color {
+            config.no_color = true;
         }
     }
 }
@@ -157,6 +164,10 @@ impl SupervisorDaemon {
                 return Err(e.into());
             }
         };
+
+        if config.is_no_color() {
+            crate::logging::set_no_color(true);
+        }
 
         let main_log_rotator = config.logging.build_main_rotator();
 
@@ -377,6 +388,11 @@ fn init_tracing(
     let is_logging_disabled =
         !config.logging.enabled.is_enabled() || config.logging.level.to_lowercase() == "off";
 
+    let no_color = config.is_no_color();
+    if no_color {
+        crate::logging::set_no_color(true);
+    }
+
     if is_logging_disabled {
         let filter = tracing_subscriber::EnvFilter::new("off");
         let _ = tracing_subscriber::registry().with(filter).try_init();
@@ -503,7 +519,9 @@ fn init_tracing(
     if silent {
         try_with_file!(tracing_subscriber::registry().with(filter));
     } else {
-        let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+        let console_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(!no_color)
+            .with_target(false);
         try_with_file!(
             tracing_subscriber::registry()
                 .with(filter)

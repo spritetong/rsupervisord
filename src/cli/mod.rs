@@ -170,6 +170,11 @@ pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates>
     };
 
     let ctls = resolve_ctl_chain(cfg.as_ref(), args)?;
+    if let Some(ref c) = cfg
+        && c.is_no_color()
+    {
+        crate::logging::set_no_color(true);
+    }
     let candidates: Vec<EndpointCandidate> = ctls.iter().map(ctl_to_candidate).collect();
     let token = ctls.first().and_then(|c| c.auth_token.clone());
     Ok((candidates, cli_basic_override(args), token))
@@ -200,15 +205,28 @@ where
     // Capture exe_path before clap argument parsing.
     let _ = crate::config::paths::exe_path();
 
+    let argv_vec: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+    let has_no_color = argv_vec.iter().any(|a| a == "--no-color");
+    if has_no_color {
+        crate::logging::set_no_color(true);
+    }
+
     let mut cmd = CliArgs::command();
+    if has_no_color {
+        cmd = cmd.color(clap::ColorChoice::Never);
+    }
     if let Some(b) = bin_name {
         cmd = cmd.bin_name(b);
     }
-    let matches = cmd.get_matches_from(argv);
+    let matches = cmd.get_matches_from(argv_vec);
     let args = match CliArgs::from_arg_matches(&matches) {
         Ok(args) => args,
         Err(e) => e.exit(),
     };
+
+    if args.no_color {
+        crate::logging::set_no_color(true);
+    }
 
     // Short-lived client process: a lightweight current-thread runtime suffices.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -220,6 +238,10 @@ where
 /// Executes the CLI with parsed arguments; `bin_name` is only forwarded to the
 /// `help` subcommand so it renders consistently with clap's `--help`.
 pub async fn run_with_args(args: CliArgs, bin_name: Option<&str>) -> Result<()> {
+    if args.no_color {
+        crate::logging::set_no_color(true);
+    }
+
     // Keep a copy of the explicit config: endpoint resolution below consumes
     // `args.config`, while local service operations need it too.
     let service_config = args.config.clone();

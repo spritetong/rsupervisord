@@ -21,7 +21,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart="{exe}" -c "{cfg}"
+ExecStart="{exe}" --no-color -c "{cfg}"
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s

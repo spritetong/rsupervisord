@@ -390,6 +390,7 @@ const SUPERVISORD_MAPPINGS: &[FieldMapping] = &[
     map_field!(&["silent"], "logging.silent", Bool),
     map_field!(&["identifier"], "server.identifier", Identity),
     map_field!("nodaemon", Bool),
+    map_field!("no_color", Bool),
     map_field!("environment", Environment),
     map_field!("pidfile", Identity),
     map_field!("minfds", U32),
@@ -401,6 +402,7 @@ const CTL_MAPPINGS: &[FieldMapping] = &[
     map_field!("username", Identity),
     map_field!("password", Identity),
     map_field!("auth_token", Identity),
+    map_field!("no_color", Bool),
 ];
 
 const GROUP_MAPPINGS: &[FieldMapping] = &[
