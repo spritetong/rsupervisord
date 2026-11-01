@@ -165,7 +165,7 @@ impl SupervisorDaemon {
             }
         };
 
-        if config.is_no_color() {
+        if config.is_daemon_no_color() {
             crate::logging::set_no_color(true);
         }
 
@@ -388,7 +388,7 @@ fn init_tracing(
     let is_logging_disabled =
         !config.logging.enabled.is_enabled() || config.logging.level.to_lowercase() == "off";
 
-    let no_color = config.is_no_color();
+    let no_color = config.is_daemon_no_color();
     if no_color {
         crate::logging::set_no_color(true);
     }

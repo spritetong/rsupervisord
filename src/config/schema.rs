@@ -558,8 +558,23 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Returns whether ANSI color output should be suppressed based on top-level,
-    /// logging, or supervisorctl client settings.
+    /// Returns whether ANSI color output should be suppressed for daemon/server contexts
+    /// (logging, stdout, stderr).
+    /// Precedence: logging.no_color (if explicitly set) > top-level no_color.
+    pub fn is_daemon_no_color(&self) -> bool {
+        self.logging.no_color.unwrap_or(self.no_color)
+    }
+
+    /// Returns whether ANSI color output should be suppressed for supervisorctl client contexts.
+    /// Precedence: ctl.no_color (if explicitly set) > top-level no_color.
+    pub fn is_ctl_no_color(&self) -> bool {
+        self.ctl
+            .as_ref()
+            .and_then(|c| c.no_color)
+            .unwrap_or(self.no_color)
+    }
+
+    /// Legacy / general check: true if any section requests suppressing color.
     pub fn is_no_color(&self) -> bool {
         self.no_color
             || self.logging.no_color.unwrap_or(false)

@@ -171,7 +171,7 @@ pub fn resolve_endpoint_candidates(args: &CliArgs) -> Result<ResolvedCandidates>
 
     let ctls = resolve_ctl_chain(cfg.as_ref(), args)?;
     if let Some(ref c) = cfg
-        && c.is_no_color()
+        && c.is_ctl_no_color()
     {
         crate::logging::set_no_color(true);
     }

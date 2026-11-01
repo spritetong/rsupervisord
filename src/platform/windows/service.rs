@@ -299,7 +299,6 @@ pub fn run_as_service(
 pub fn service_launch_arguments(config_path: &Path) -> Vec<OsString> {
     vec![
         OsString::from("--service"),
-        OsString::from("--no-color"),
         OsString::from("-c"),
         config_path.as_os_str().to_os_string(),
     ]

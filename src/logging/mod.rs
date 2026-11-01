@@ -39,9 +39,5 @@ pub use types::{LogChannel, LogChunk};
 pub fn set_no_color(no_color: bool) {
     if no_color {
         colored::control::set_override(false);
-        // SAFETY: Early startup or CLI initialization before concurrent threads access env.
-        unsafe {
-            std::env::set_var("NO_COLOR", "1");
-        }
     }
 }

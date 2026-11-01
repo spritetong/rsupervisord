@@ -539,7 +539,32 @@ ctl:
     let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(!cfg.no_color);
     assert_eq!(cfg.ctl.as_ref().and_then(|c| c.no_color), Some(true));
-    assert!(cfg.is_no_color());
+    assert!(cfg.is_ctl_no_color());
+    assert!(!cfg.is_daemon_no_color());
+
+    // ctl.no_color overrides top-level no_color
+    let yaml = r#"
+no_color: true
+ctl:
+  no_color: false
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.no_color);
+    assert_eq!(cfg.ctl.as_ref().and_then(|c| c.no_color), Some(false));
+    assert!(!cfg.is_ctl_no_color());
+    assert!(cfg.is_daemon_no_color());
+
+    // logging.no_color overrides top-level no_color
+    let yaml = r#"
+no_color: true
+logging:
+  no_color: false
+"#;
+    let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.no_color);
+    assert_eq!(cfg.logging.no_color, Some(false));
+    assert!(!cfg.is_daemon_no_color());
+    assert!(cfg.is_ctl_no_color());
 
     // DaemonArgs apply overrides config
     let mut cfg = SupervisorConfig::default();
@@ -547,7 +572,7 @@ ctl:
     let daemon_args = DaemonArgs::parse_from(["supervisord", "--no-color"]);
     daemon_args.apply(&mut cfg);
     assert!(cfg.no_color);
-    assert!(cfg.is_no_color());
+    assert!(cfg.is_daemon_no_color());
 
     // CliArgs apply overrides ctl config
     let mut ctl = CtlConfig::default();

@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
     let worker_threads = load_config(&config_path, Some(&daemon_args))
         .ok()
         .inspect(|c| {
-            if c.is_no_color() {
+            if c.is_daemon_no_color() {
                 rsupervisord::logging::set_no_color(true);
             }
         })

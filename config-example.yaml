@@ -91,7 +91,7 @@ ctl:
   # password: "${SUPERVISOR_HTTP_PASSWORD:-}"
   # auth_token: "${SUPERVISOR_AUTH_TOKEN:-}"
   # Disable ANSI color formatting on supervisorctl stdout/stderr (default: false).
-  # Inherits top-level no_color if omitted.
+  # Overrides other sections when set in ctl. Inherits top-level no_color if omitted.
   # no_color: false
 
 # ------------------------------------------------------------------------------
@@ -108,7 +108,7 @@ logging:
   level: "info"
 
   # Disable ANSI color formatting in logging output (default: false).
-  # Inherits top-level no_color if omitted.
+  # Overrides other sections when set in logging. Inherits top-level no_color if omitted.
   # no_color: false
 
   # Maximum log file size before rotation (e.g. 10MB, 20MB, 100MB)
