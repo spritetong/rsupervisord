@@ -373,20 +373,50 @@ impl std::io::Write for ArcLogWriter {
     }
 }
 
+static MAIN_FILE_ROTATOR: OnceLock<Option<std::sync::Arc<crate::logging::LogRotator>>> =
+    OnceLock::new();
+
+/// Normalizes various log level strings (including Python supervisord aliases) to standard tracing levels.
+pub fn normalize_log_level(level: &str) -> &str {
+    let trimmed = level.trim();
+    if trimmed.eq_ignore_ascii_case("critical")
+        || trimmed.eq_ignore_ascii_case("fatal")
+        || trimmed.eq_ignore_ascii_case("error")
+    {
+        "error"
+    } else if trimmed.eq_ignore_ascii_case("warn") || trimmed.eq_ignore_ascii_case("warning") {
+        "warn"
+    } else if trimmed.eq_ignore_ascii_case("info") {
+        "info"
+    } else if trimmed.eq_ignore_ascii_case("debug") {
+        "debug"
+    } else if trimmed.eq_ignore_ascii_case("trace") || trimmed.eq_ignore_ascii_case("blather") {
+        "trace"
+    } else if trimmed.eq_ignore_ascii_case("off") {
+        "off"
+    } else {
+        trimmed
+    }
+}
+
 /// Initializes tracing subscriber with console and optional file layers.
 ///
 /// Log level precedence: `RUST_LOG` env var > `config.logging.level`.
 /// CLI `-l/--loglevel` is folded into `config.logging.level` by
 /// [`DaemonArgs::apply`] before this runs; `RUST_LOG` still wins when set.
-fn init_tracing(
+pub fn init_tracing(
     config: &SupervisorConfig,
     main_log_rotator: Option<std::sync::Arc<crate::logging::InMemoryChannelRotator>>,
 ) -> Option<std::sync::Arc<crate::logging::LogRotator>> {
+    if let Some(cached) = MAIN_FILE_ROTATOR.get() {
+        return cached.clone();
+    }
+
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let is_logging_disabled =
-        !config.logging.enabled.is_enabled() || config.logging.level.to_lowercase() == "off";
+    let log_level = normalize_log_level(&config.logging.level);
+    let is_logging_disabled = !config.logging.enabled.is_enabled() || log_level == "off";
 
     let no_color = config.is_daemon_no_color();
     if no_color {
@@ -396,10 +426,8 @@ fn init_tracing(
     if is_logging_disabled {
         let filter = tracing_subscriber::EnvFilter::new("off");
         let _ = tracing_subscriber::registry().with(filter).try_init();
-        return None;
+        return MAIN_FILE_ROTATOR.get_or_init(|| None).clone();
     }
-
-    let log_level = &config.logging.level;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
@@ -529,7 +557,7 @@ fn init_tracing(
         );
     }
 
-    main_file_rotator
+    MAIN_FILE_ROTATOR.get_or_init(|| main_file_rotator).clone()
 }
 
 /// Best-effort raise of a soft rlimit to at least `min_value` (OI-8).
@@ -691,5 +719,49 @@ mod tests {
         assert_eq!(config.nodaemon, first_nodaemon);
         assert_eq!(config.worker_threads, first_threads);
         assert_eq!(config.logging.level, first_level);
+    }
+
+    #[test]
+    fn test_normalize_log_level() {
+        assert_eq!(normalize_log_level("critical"), "error");
+        assert_eq!(normalize_log_level("CRITICAL"), "error");
+        assert_eq!(normalize_log_level("fatal"), "error");
+        assert_eq!(normalize_log_level("error"), "error");
+        assert_eq!(normalize_log_level("ERROR"), "error");
+        assert_eq!(normalize_log_level("warn"), "warn");
+        assert_eq!(normalize_log_level("warning"), "warn");
+        assert_eq!(normalize_log_level("WARN"), "warn");
+        assert_eq!(normalize_log_level("info"), "info");
+        assert_eq!(normalize_log_level("INFO"), "info");
+        assert_eq!(normalize_log_level("debug"), "debug");
+        assert_eq!(normalize_log_level("trace"), "trace");
+        assert_eq!(normalize_log_level("blather"), "trace");
+        assert_eq!(normalize_log_level("off"), "off");
+    }
+
+    #[test]
+    fn test_logging_level_yaml_parsing_and_aliases() {
+        // Standard logging.level
+        let yaml1 = r#"
+logging:
+  level: "error"
+"#;
+        let c1 = SupervisorConfig::from_yaml_str(yaml1).unwrap();
+        assert_eq!(c1.logging.level, "error");
+
+        // Alias logging.loglevel
+        let yaml2 = r#"
+logging:
+  loglevel: "warn"
+"#;
+        let c2 = SupervisorConfig::from_yaml_str(yaml2).unwrap();
+        assert_eq!(c2.logging.level, "warn");
+
+        // Top-level loglevel
+        let yaml3 = r#"
+loglevel: "error"
+"#;
+        let c3 = SupervisorConfig::from_yaml_str(yaml3).unwrap();
+        assert_eq!(c3.logging.level, "error");
     }
 }

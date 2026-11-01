@@ -63,13 +63,18 @@ fn main() -> anyhow::Result<()> {
         return rsupervisord::service::run_service(daemon_args, config_path, cmd_name);
     }
 
-    let worker_threads = load_config(&config_path, Some(&daemon_args))
-        .ok()
-        .inspect(|c| {
-            if c.is_daemon_no_color() {
-                rsupervisord::logging::set_no_color(true);
-            }
-        })
+    let config = load_config(&config_path, Some(&daemon_args)).ok();
+
+    if let Some(ref c) = config {
+        if c.is_daemon_no_color() {
+            rsupervisord::logging::set_no_color(true);
+        }
+        let main_log_rotator = c.logging.build_main_rotator();
+        let _ = rsupervisord::daemon::init_tracing(c, main_log_rotator);
+    }
+
+    let worker_threads = config
+        .as_ref()
         .and_then(|c| c.worker_threads)
         .or(daemon_args.worker_threads)
         .map(|w| w as u32);

@@ -175,8 +175,17 @@ fn run_service_loop() -> anyhow::Result<()> {
 
     let res = (|| -> anyhow::Result<()> {
         // Step 2: Determine Tokio worker threads and build runtime
-        let worker_threads = crate::daemon::load_config(&config_path, Some(&daemon_args))
-            .ok()
+        let config = crate::daemon::load_config(&config_path, Some(&daemon_args)).ok();
+        if let Some(ref c) = config {
+            if c.is_daemon_no_color() {
+                crate::logging::set_no_color(true);
+            }
+            let main_log_rotator = c.logging.build_main_rotator();
+            let _ = crate::daemon::init_tracing(c, main_log_rotator);
+        }
+
+        let worker_threads = config
+            .as_ref()
             .and_then(|c| c.worker_threads)
             .or(daemon_args.worker_threads)
             .map(|w| w as u32);

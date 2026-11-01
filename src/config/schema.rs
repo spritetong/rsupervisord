@@ -114,7 +114,7 @@ pub struct LoggingConfig {
     pub enabled: crate::program::config::LogMode,
     #[serde(default)]
     pub file: Option<PathBuf>,
-    #[serde(default = "default_log_level")]
+    #[serde(default = "default_log_level", alias = "loglevel", alias = "log_level")]
     #[default(default_log_level())]
     pub level: String,
     #[serde(default, with = "crate::serde_util::option_byte_size")]
@@ -524,6 +524,9 @@ pub struct SupervisorConfig {
     /// Minimum process soft limit (`minprocs`); applied best-effort on Unix.
     #[serde(default)]
     pub minprocs: Option<u32>,
+    /// Optional root-level alias for `logging.level` (e.g. from Python supervisord.conf habits).
+    #[serde(default, alias = "level", alias = "log_level")]
+    pub loglevel: Option<String>,
     /// Client connection config from `[supervisorctl]` / YAML `ctl`|`supervisorctl`
     /// (not consumed by the daemon). `None` = section absent after optional fill.
     #[serde(default, alias = "supervisorctl")]
@@ -549,6 +552,7 @@ impl Default for SupervisorConfig {
             pidfile: None,
             minfds: None,
             minprocs: None,
+            loglevel: None,
             ctl: None,
             config_dir: None,
         };
@@ -641,6 +645,11 @@ impl SupervisorConfig {
         }
         if config.server.uds_password.is_none() && config.server.password.is_some() {
             config.server.uds_password = config.server.password.clone();
+        }
+        if let Some(lvl) = config.loglevel.take()
+            && config.logging.level == default_log_level()
+        {
+            config.logging.level = lvl;
         }
         config.config_dir = config_dir.map(|p| p.to_path_buf());
         config.apply_default_paths();
