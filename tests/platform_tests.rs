@@ -248,6 +248,31 @@ async fn test_windows_file_uds_connect_with_dot_slash_path() {
     let _ = accept.await;
 }
 
+/// Windows regression guard: the socket file can disappear before `Drop` runs
+/// (temp dir cleanup, config reload). A self-connect wake-up fails in that state
+/// and leaves the accept thread blocked forever, hanging `join()`.
+#[cfg(windows)]
+#[test]
+fn test_windows_uds_drop_returns_when_socket_file_was_unlinked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("drop_probe.sock");
+    let listener = native_platform()
+        .bind_ipc_listener(&path, true, 0o777)
+        .expect("bind UDS listener");
+    std::fs::remove_file(&path).expect("remove socket file");
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let dropper = std::thread::spawn(move || {
+        drop(listener);
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+        "WindowsUdsListener::Drop hung after the socket file was unlinked"
+    );
+    dropper.join().expect("dropper join");
+}
+
 #[tokio::test]
 async fn test_platform_backend_configure_attach_and_signal() {
     let platform = native_platform();

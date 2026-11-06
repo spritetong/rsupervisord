@@ -20,6 +20,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tokio::process::Command as TokioCommand;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Networking::WinSock::{
+    FD_ACCEPT, FD_ACCEPT_BIT, SOCKET, WSA_INFINITE, WSA_INVALID_EVENT, WSA_WAIT_EVENT_0,
+    WSA_WAIT_FAILED, WSACloseEvent, WSACreateEvent, WSAEVENT, WSAEnumNetworkEvents, WSAEventSelect,
+    WSAGetLastError, WSANETWORKEVENTS, WSASetEvent, WSAWaitForMultipleEvents,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -680,9 +685,9 @@ impl PlatformIpcListener for WindowsNamedPipeListener {
     }
 }
 
-fn cleanup_windows_uds(p: PathBuf) {
-    let _ = uds_windows::UnixStream::connect(&p);
-    let _ = std::fs::remove_file(&p);
+/// Maps the last Winsock error into an `io::Error`.
+fn wsa_last_error() -> io::Error {
+    io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
 }
 
 /// Verifies that the connected Windows AF_UNIX client is running with elevated privileges.
@@ -781,10 +786,21 @@ fn verify_windows_uds_caller(stream: &uds_windows::UnixStream) -> Result<(), Pro
 
 /// Windows Unix Domain Socket (AF_UNIX) listener.
 pub struct WindowsUdsListener {
-    listener: std::sync::Arc<uds_windows::UnixListener>,
-    _cleanup: scopeguard::ScopeGuard<PathBuf, fn(PathBuf)>,
+    /// `Option` so `Drop` can close the receiver *before* joining the accept
+    /// thread: a `blocking_send` parked on a full queue is then released with an
+    /// error instead of keeping the thread alive forever.
+    rx: Option<tokio::sync::mpsc::Receiver<uds_windows::UnixStream>>,
+    /// Manual-reset cancel event owned by this struct. The accept thread only
+    /// borrows its handle value and never closes it, so `WSASetEvent` in `Drop`
+    /// remains valid even if the thread has already exited on its own.
+    cancel_event: WSAEVENT,
+    path: PathBuf,
+    thread: Option<std::thread::JoinHandle<()>>,
     allow_unelevated: bool,
 }
+
+unsafe impl Send for WindowsUdsListener {}
+unsafe impl Sync for WindowsUdsListener {}
 
 impl WindowsUdsListener {
     pub fn bind(path: &Path, allow_unelevated: bool, mode: u32) -> io::Result<Self> {
@@ -798,11 +814,112 @@ impl WindowsUdsListener {
         let listener = uds_windows::UnixListener::bind(path)?;
         // Apply mode immediately after bind, before any accept: authorization layer.
         // Fail hard — a socket without the intended DACL must not accept clients.
-        security::apply_file_mode(path, mode)?;
-        let cleanup = scopeguard::guard(path.to_path_buf(), cleanup_windows_uds as fn(PathBuf));
+        if let Err(e) = security::apply_file_mode(path, mode) {
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
+
+        let sock = std::os::windows::io::AsRawSocket::as_raw_socket(&listener) as SOCKET;
+
+        // Two Winsock events: FD_ACCEPT for the listener, plus a manual-reset
+        // cancel event signalled by Drop. WSAEventSelect binds FD_ACCEPT and
+        // switches the socket to nonblocking mode by itself.
+        //
+        // This is Winsock2 event selection, not AcceptEx: afunix.sys has no
+        // overlapped/IOCP accept support, so AcceptEx fails with WSAEINVAL /
+        // WSAEOPNOTSUPP. Plain accept() after an FD_ACCEPT event is supported.
+        let cancel_event = unsafe { WSACreateEvent() };
+        if cancel_event == WSA_INVALID_EVENT {
+            let err = wsa_last_error();
+            let _ = std::fs::remove_file(path);
+            return Err(err);
+        }
+        let socket_event = unsafe { WSACreateEvent() };
+        if socket_event == WSA_INVALID_EVENT {
+            let err = wsa_last_error();
+            unsafe { WSACloseEvent(cancel_event) };
+            let _ = std::fs::remove_file(path);
+            return Err(err);
+        }
+        if unsafe { WSAEventSelect(sock, socket_event, FD_ACCEPT as i32) } != 0 {
+            let err = wsa_last_error();
+            unsafe {
+                WSACloseEvent(socket_event);
+                WSACloseEvent(cancel_event);
+            }
+            let _ = std::fs::remove_file(path);
+            return Err(err);
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let l = std::sync::Arc::new(listener);
+        let thread = match std::thread::Builder::new()
+            .name("rsupervisord-windows-uds".to_string())
+            .spawn(move || {
+                // Index 0 is the cancel event, so it wins when both are signalled.
+                let wait_handles: [HANDLE; 2] = [cancel_event as HANDLE, socket_event as HANDLE];
+
+                'accept: loop {
+                    let waited = unsafe {
+                        WSAWaitForMultipleEvents(
+                            2,
+                            wait_handles.as_ptr() as *const _,
+                            0,
+                            WSA_INFINITE,
+                            0,
+                        )
+                    };
+                    if waited == WSA_WAIT_EVENT_0 as u32 || waited == WSA_WAIT_FAILED {
+                        break;
+                    }
+                    if waited != (WSA_WAIT_EVENT_0 as u32) + 1 {
+                        break;
+                    }
+
+                    // WSAEnumNetworkEvents resets the event and re-arms FD_ACCEPT.
+                    let mut net_events: WSANETWORKEVENTS = unsafe { std::mem::zeroed() };
+                    if unsafe { WSAEnumNetworkEvents(sock, socket_event, &mut net_events) } != 0 {
+                        break;
+                    }
+                    if (net_events.lNetworkEvents & FD_ACCEPT as i32) == 0
+                        || net_events.iErrorCode[FD_ACCEPT_BIT as usize] != 0
+                    {
+                        continue;
+                    }
+
+                    // FD_ACCEPT is only re-posted after accept() is called, so
+                    // drain the whole backlog before waiting again. The socket is
+                    // nonblocking, hence accept() never blocks here.
+                    loop {
+                        match l.accept() {
+                            Ok((stream, _)) => {
+                                if tx.blocking_send(stream).is_err() {
+                                    break 'accept;
+                                }
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) => break 'accept,
+                        }
+                    }
+                }
+                unsafe { WSACloseEvent(socket_event) };
+            }) {
+            Ok(t) => t,
+            Err(e) => {
+                unsafe {
+                    WSACloseEvent(socket_event);
+                    WSACloseEvent(cancel_event);
+                }
+                let _ = std::fs::remove_file(path);
+                return Err(e);
+            }
+        };
+
         Ok(Self {
-            listener: std::sync::Arc::new(listener),
-            _cleanup: cleanup,
+            rx: Some(rx),
+            cancel_event,
+            path: path.to_path_buf(),
+            thread: Some(thread),
             allow_unelevated,
         })
     }
@@ -814,10 +931,14 @@ impl PlatformIpcListener for WindowsUdsListener {
         use std::os::windows::io::{FromRawSocket, IntoRawSocket};
 
         loop {
-            let l = self.listener.clone();
-            let (std_stream, _) = tokio::task::spawn_blocking(move || l.accept())
+            let rx = self
+                .rx
+                .as_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "Listener closed"))?;
+            let std_stream = rx
+                .recv()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Interrupted, e))??;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "Listener closed"))?;
 
             if !self.allow_unelevated
                 && crate::platform::native_platform().is_elevated()
@@ -833,6 +954,36 @@ impl PlatformIpcListener for WindowsUdsListener {
             let async_stream = tokio::net::TcpStream::from_std(std_tcp)?;
             return Ok(Box::new(async_stream));
         }
+    }
+}
+
+impl Drop for WindowsUdsListener {
+    fn drop(&mut self) {
+        // Signal the accept thread's WSAWaitForMultipleEvents. This touches only
+        // our own event object, never the still-open listener socket, so there
+        // is no closesocket(), no AcceptEx and no self-connect. A self-connect
+        // is not a valid wake-up anyway: the socket file may already have been
+        // unlinked (temp dir cleanup, config reload), and connect() then fails
+        // with WSAECONNREFUSED while accept() stays blocked forever.
+        unsafe { WSASetEvent(self.cancel_event) };
+
+        // Release the receiver first. If the accept thread is parked in
+        // `blocking_send` on a full channel, dropping the receiver makes that
+        // send fail immediately, so the join below cannot hang on it.
+        drop(self.rx.take());
+
+        // The accept thread is the sole owner of the listener SOCKET and of the
+        // FD_ACCEPT event. Wait for it to exit and close both by itself.
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+
+        // cancel_event is owned here; close it only after the thread is gone.
+        unsafe { WSACloseEvent(self.cancel_event) };
+
+        // Only now is the listener unbound; unlinking the stale path cannot race
+        // with a live listener.
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

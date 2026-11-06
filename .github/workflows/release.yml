@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-22.04
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,7 +26,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
+        if: matrix.os == 'ubuntu-22.04'
         run: cargo fmt --check
 
       - name: Clippy
@@ -99,8 +107,14 @@ jobs:
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
           cargo binstall --no-confirm cross
 
-      - name: Build target (native)
-        if: "!matrix.use_cross"
+      - name: Build target (Unix native)
+        if: "!matrix.use_cross && runner.os != 'Windows'"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build target (Windows)
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build target (cross)
